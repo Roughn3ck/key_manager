@@ -1,0 +1,111 @@
+KEY MANAGER GUI - FINAL PATHS AND INSTRUCTIONS
+================================================
+
+1. EXECUTABLE FILES:
+   =================
+   - GUI Program: b:\Github\key_manager\USB_DEPLOYMENT\key_manager_gui.exe
+   - CLI Program: b:\Github\key_manager\USB_DEPLOYMENT\key_manager.exe
+   - Build Location: b:\Github\key_manager\dist\key_manager_gui.exe
+
+2. DATA STORAGE PATHS:
+   ===================
+   - Encrypted Vault: C:\Users\krisr\.key_manager\key_vault.encrypted
+   - Backup Folder: C:\Users\krisr\.key_manager\backups\
+   - Data Directory: C:\Users\krisr\.key_manager\
+
+3. SOURCE CODE:
+   =============
+   - Main GUI: b:\Github\key_manager\src\gui_main.py
+   - Backup Engine: b:\Github\key_manager\src\backup_engine.py
+   - Crypto Engine: b:\Github\key_manager\src\crypto_engine.py
+   - CLI Main: b:\Github\key_manager\src\main.py
+
+4. BUILD TOOLS:
+   =============
+   - Build Script: b:\Github\key_manager\build_gui.py
+   - Requirements: b:\Github\key_manager\requirements.txt
+   - Test Script: b:\Github\key_manager\test_gui.py
+
+5. HOW TO USE:
+   ============
+   A. Run GUI from EXE:
+      -----------------
+      1. Open Command Prompt
+      2. Navigate to: b:\Github\key_manager\USB_DEPLOYMENT
+      3. Run: key_manager_gui.exe
+
+   B. Run GUI from Python:
+      ---------------------
+      1. Open Command Prompt
+      2. Navigate to: b:\Github\key_manager
+      3. Run: python src\gui_main.py
+
+   C. Build New EXE:
+      ---------------
+      1. Open Command Prompt
+      2. Navigate to: b:\Github\key_manager
+      3. Run: python build_gui.py
+      4. EXE will be created in: dist\key_manager_gui.exe
+      5. Copy to USB_DEPLOYMENT manually or it auto-copies
+
+6. TROUBLESHOOTING GUI BLANK SCREEN:
+   ==================================
+   If GUI shows blank screen after login:
+
+   1. Check vault exists:
+      - Run: python src\main.py unlock
+      - Enter password: TestPassword123!
+      - If successful, vault exists and password is correct
+
+   2. Test GUI with debug:
+      - Run: python test_gui_login.py
+      - Should show "✓ GUI components load successfully"
+
+   3. Check console for errors:
+      - Run GUI from command line to see error messages
+      - Look for Python exceptions in the console
+
+   4. Common issues:
+      - Vault doesn't exist (initialize with CLI first)
+      - Wrong password
+      - Corrupted vault file
+      - Missing dependencies
+
+7. BACKUP SYSTEM:
+   ===============
+   - Backups are automatically created in: C:\Users\krisr\.key_manager\backups\
+   - Each backup is timestamped: vault_backup_YYYYMMDD_HHMMSS_reason.encrypted
+   - Maximum 10 backups kept (oldest are automatically deleted)
+   - Backup metadata stored in .meta.json files
+
+8. SECURITY FEATURES:
+   ===================
+   - 5-minute session timeout (auto-lock)
+   - Password re-entry required for mnemonic reveal
+   - Mnemonics auto-hide after 5 minutes
+   - AES-256-GCM encryption with Argon2id key derivation
+   - Clipboard integration with copy buttons
+   - Multi-copy queue for batch operations
+
+9. TESTING:
+   =========
+   - Run: python test_gui.py (comprehensive test)
+   - Run: python test_gui_login.py (login-specific test)
+   - Run: python debug_paths.py (path verification)
+
+================================================
+SUMMARY:
+================================================
+The GUI is ready to use! The main executable is at:
+  b:\Github\key_manager\USB_DEPLOYMENT\key_manager_gui.exe
+
+Backups will be automatically created at:
+  C:\Users\krisr\.key_manager\backups\
+
+To start using:
+  1. Copy USB_DEPLOYMENT folder to encrypted USB drive
+  2. Run key_manager_gui.exe from the USB drive
+  3. Enter your master password (default: TestPassword123!)
+  4. Use the modern dark-themed interface to manage your crypto keys
+
+Note: If you still see a blank screen, run from command line to see error messages.

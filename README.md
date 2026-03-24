@@ -10,6 +10,23 @@ Key Manager is a secure application for storing and managing your cryptocurrency
 
 Think of it as a digital safe for your crypto keys that you can carry on a USB drive.
 
+## 🎨 New Modern GUI (Version 2.0)
+
+Key Manager now features a modern, dark-themed graphical interface with enhanced security features:
+
+### GUI Features:
+- **Modern Dark Theme** - Easy on the eyes with CustomTkinter
+- **Secure Login Screen** - Password-only entry with Argon2id/AES validation
+- **Dashboard Layout** - Left panel with account list, right panel with chain view
+- **Clipboard Interface** - Copy buttons for addresses with multi-copy queue
+- **5-Minute Session Rule** - Auto-lock after 5 minutes of inactivity
+- **Secure Mnemonic Reveal** - Password re-entry required to view 24-word phrases
+- **Automatic Backups** - Timestamped encrypted backups of your vault
+
+### Two Interfaces Available:
+1. **CLI Interface** - Original command-line tool (`key_manager.exe`)
+2. **GUI Interface** - New graphical interface (`key_manager_gui.exe`)
+
 ## 🔒 Security Features
 
 ### Dual-Layer Protection
@@ -25,9 +42,13 @@ Think of it as a digital safe for your crypto keys that you can carry on a USB d
 ## 📦 What's Included
 
 ### Files in This Package:
-- `key_manager.exe` - The main program (run this file)
-- `USB_DEPLOYMENT/` - Folder containing the ready-to-use program
+- `key_manager.exe` - The CLI program (original command-line interface)
+- `key_manager_gui.exe` - The new GUI program (modern graphical interface)
+- `USB_DEPLOYMENT/` - Folder containing the ready-to-use programs
 - `address_database.json` - Sample database with 124 cryptocurrency addresses (for reference)
+- `src/backup_engine.py` - Automated backup system with timestamped encrypted copies
+- `src/gui_main.py` - Modern GUI implementation using CustomTkinter
+- `build_gui.py` - PyInstaller build script for creating portable EXE
 - Various support files for developers
 
 ## 🚀 Getting Started
@@ -53,7 +74,34 @@ Think of it as a digital safe for your crypto keys that you can carry on a USB d
 
 ## 💡 How to Use (Step by Step)
 
-### Basic Commands:
+### Using the GUI Interface:
+
+1. **Run the GUI Program:**
+   ```
+   key_manager_gui.exe
+   ```
+   Or from Python:
+   ```
+   python src/gui_main.py
+   ```
+
+2. **Login Screen:**
+   - Enter your master password
+   - Click "Unlock Vault" or press Enter
+   - The vault will unlock and show the main dashboard
+
+3. **Main Dashboard:**
+   - **Left Panel:** Click any account to select it
+   - **Right Panel:** View addresses and copy them to clipboard
+   - **Session Timer:** Shows remaining time before auto-lock (5 minutes)
+   - **Status Bar:** Shows backup count and lock button
+
+4. **Viewing Mnemonics:**
+   - Click "Reveal Mnemonic" for accounts that have recovery phrases
+   - Re-enter your master password for security
+   - Mnemonic will auto-hide after 5 minutes
+
+### Using the CLI Interface:
 
 1. **Initialize a New Vault** (First time only):
    ```
