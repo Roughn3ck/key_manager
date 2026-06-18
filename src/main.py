@@ -5,7 +5,14 @@ CLI interface for managing encrypted cryptocurrency keys and addresses.
 import json
 import os
 import sys
+import csv
+import base64
 from pathlib import Path
+
+# Fix Windows console encoding for Unicode characters (✓, ✗, etc.)
+if sys.platform == 'win32':
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 from typing import Dict, List, Optional, Any
 
 import click
@@ -22,58 +29,59 @@ crypto = CryptoEngine()
 
 # Constants
 DATA_FILE = "key_vault.encrypted"
+SESSION_FILE = ".key_manager_session"
 CONFIG_DIR = Path.home() / ".key_manager"
+
+
+def get_data_dir() -> Path:
+    """Determine the data directory based on how the app is running.
+    
+    If running as a frozen EXE (portable/USB mode), use the EXE directory
+    so the vault is stored alongside the executable for true portability.
+    Otherwise, use the user's home directory (~/.key_manager).
+    """
+    if getattr(sys, 'frozen', False):
+        return Path(os.path.dirname(sys.executable))
+    else:
+        return CONFIG_DIR
 
 
 class KeyManager:
     """Main application for managing encrypted keys."""
     
     def __init__(self, data_dir: Optional[Path] = None) -> None:
-        """
-        Initialize the key manager.
-        
-        Args:
-            data_dir: Directory to store encrypted data (defaults to CONFIG_DIR)
-        """
-        self.data_dir = data_dir or CONFIG_DIR
+        self.data_dir = data_dir or get_data_dir()
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.data_file = self.data_dir / DATA_FILE
+        self.session_file = self.data_dir / SESSION_FILE
         
-        # Sample address database structure (will be loaded from encrypted storage)
+        # Default address database structure
         self.address_db = {
             "version": "1.0",
             "pools": {
                 "Genesis": {
-                    "description": "Genesis pool - 6 accounts",
-                    "accounts": ["G SS", "Expenses", "G1", "G2", "G3", "G4", "G5", "G6"]
+                    "description": "Genesis pool",
+                    "accounts": ["GSS", "Expenses", "G1", "G2", "G3", "G4", "G5", "G6"]
                 },
                 "SafetyNet": {
-                    "description": "SafetyNet pool - 5 accounts",
+                    "description": "SafetyNet pool",
                     "accounts": ["N1", "N2", "N3", "N4", "N5"]
                 },
                 "Foundation": {
-                    "description": "Foundation pool - 5 accounts",
+                    "description": "Foundation pool",
                     "accounts": ["F1", "F2", "F3", "F4", "F5"]
                 },
                 "Seed": {
-                    "description": "Seed pool - 5 accounts",
+                    "description": "Seed pool",
                     "accounts": ["S1", "S2", "S3", "S4", "S5"]
                 }
             },
             "accounts": {},
-            "mnemonics": {}  # Encrypted 24-word mnemonics
+            "mnemonics": {}
         }
     
     def load_encrypted_data(self, password: str) -> bool:
-        """
-        Load encrypted data from file.
-        
-        Args:
-            password: Master password
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
+        """Load encrypted data from file, replacing current address_db."""
         if not self.data_file.exists():
             return False
         
@@ -81,11 +89,10 @@ class KeyManager:
             with open(self.data_file, 'r') as f:
                 encrypted_json = f.read()
             
-            # Decrypt the data
             decrypted_data = crypto.decrypt_json(encrypted_json, password)
             
-            # Update address database with loaded data
-            self.address_db.update(decrypted_data)
+            # Replace entire address_db with loaded data
+            self.address_db = decrypted_data
             return True
             
         except Exception as e:
@@ -93,52 +100,56 @@ class KeyManager:
             return False
     
     def save_encrypted_data(self, password: str) -> bool:
-        """
-        Save encrypted data to file.
-        
-        Args:
-            password: Master password
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
+        """Save encrypted data to file."""
         try:
-            # Encrypt the data
             encrypted_json = crypto.encrypt_json(self.address_db, password)
-            
-            # Save to file
             with open(self.data_file, 'w') as f:
                 f.write(encrypted_json)
-            
             return True
-            
         except Exception as e:
             console.print(f"[red]Error saving data: {e}[/red]")
             return False
     
+    def create_session(self, password: str) -> None:
+        """Store password in session file for use by subsequent commands."""
+        encoded = base64.b64encode(password.encode()).decode()
+        with open(self.session_file, 'w') as f:
+            f.write(encoded)
+    
+    def get_session_password(self) -> Optional[str]:
+        """Retrieve password from session file."""
+        if not self.session_file.exists():
+            return None
+        try:
+            with open(self.session_file, 'r') as f:
+                encoded = f.read().strip()
+            if not encoded:
+                return None
+            return base64.b64decode(encoded.encode()).decode()
+        except Exception:
+            return None
+    
+    def end_session(self) -> None:
+        """Remove session file."""
+        if self.session_file.exists():
+            self.session_file.unlink()
+    
+    def is_session_active(self) -> bool:
+        """Check if a session is active."""
+        return self.session_file.exists()
+    
     def initialize_vault(self, password: str) -> bool:
-        """
-        Initialize a new encrypted vault.
-        
-        Args:
-            password: Master password
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
+        """Initialize a new encrypted vault."""
         if self.data_file.exists():
             console.print("[yellow]Vault already exists. Use 'unlock' instead.[/yellow]")
             return False
         
-        # Initialize with sample data structure
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
             transient=True,
         ) as progress:
             progress.add_task(description="Initializing secure vault...", total=None)
-            
-            # Save initial empty vault
             success = self.save_encrypted_data(password)
         
         if success:
@@ -149,114 +160,228 @@ class KeyManager:
             return False
     
     def add_mnemonic(self, account_name: str, mnemonic: str, password: str) -> bool:
-        """
-        Add or update a mnemonic for an account.
-        
-        Args:
-            account_name: Name of the account
-            mnemonic: 24-word mnemonic phrase
-            password: Master password for encryption
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        # Store encrypted mnemonic
-        self.address_db["mnemonics"][account_name] = mnemonic
-        
-        # Save changes
+        """Add or update a mnemonic for an account."""
+        self.address_db.setdefault("mnemonics", {})[account_name] = mnemonic
         return self.save_encrypted_data(password)
     
-    def add_address(self, account: str, coin: str, chain: str, address: str, password: str) -> bool:
-        """
-        Add an address to an account.
-        
-        Args:
-            account: Account name
-            coin: Cryptocurrency (e.g., BTC, ETH)
-            chain: Blockchain/network (e.g., ERC-20, P2TR)
-            address: Wallet address
-            password: Master password for saving
-            
-        Returns:
-            bool: True if successful, False otherwise
-        """
-        # Initialize account if not exists
+    def show_mnemonic(self, account_name: str) -> Optional[str]:
+        """Get mnemonic for an account, or None if not found."""
+        return self.address_db.get("mnemonics", {}).get(account_name)
+    
+    def add_account(self, account_name: str, pool: Optional[str] = None) -> bool:
+        """Create a new account entry, optionally in a pool."""
+        if account_name in self.address_db.get("accounts", {}):
+            return False
+        self.address_db.setdefault("accounts", {})[account_name] = {"addresses": [], "notes": ""}
+        if pool and pool in self.address_db.get("pools", {}):
+            self.address_db["pools"][pool].setdefault("accounts", []).append(account_name)
+        return True
+    
+    def add_private_key(self, account_name: str, private_key: str, password: str) -> bool:
+        """Add or update a private key for an account."""
+        self.address_db.setdefault("private_keys", {})[account_name] = private_key
+        return self.save_encrypted_data(password)
+    
+    def show_private_key(self, account_name: str) -> Optional[str]:
+        """Get private key for an account, or None if not found."""
+        return self.address_db.get("private_keys", {}).get(account_name)
+    
+    def change_password(self, old_password: str, new_password: str) -> bool:
+        """Change the vault password by re-encrypting with new password."""
+        if not self.data_file.exists():
+            return False
+        try:
+            with open(self.data_file, 'r') as f:
+                encrypted_json = f.read()
+            decrypted_data = crypto.decrypt_json(encrypted_json, old_password)
+            self.address_db = decrypted_data
+            new_encrypted = crypto.encrypt_json(self.address_db, new_password)
+            with open(self.data_file, 'w') as f:
+                f.write(new_encrypted)
+            self.create_session(new_password)
+            return True
+        except Exception:
+            return False
+    
+    def add_address(self, account: str, coin: str, chain: str, address: str, 
+                    password: str, notes: str = "") -> bool:
+        """Add an address to an account."""
         if account not in self.address_db["accounts"]:
             self.address_db["accounts"][account] = {
                 "addresses": [],
                 "notes": ""
             }
         
-        # Add address
-        self.address_db["accounts"][account]["addresses"].append({
+        addr_entry = {
             "coin": coin,
             "chain": chain,
             "address": address
-        })
+        }
+        if notes:
+            addr_entry["notes"] = notes
         
-        # Save changes
+        self.address_db["accounts"][account]["addresses"].append(addr_entry)
         return self.save_encrypted_data(password)
     
-    def list_accounts(self) -> None:
-        """Display all accounts in a formatted table."""
-        table = Table(title="Accounts by Pool")
+    def import_csv(self, csv_path: str, password: str) -> tuple:
+        """Import addresses from a CSV file.
         
+        Returns:
+            Tuple of (added_count, skipped_count, error_messages)
+        """
+        added = 0
+        skipped = 0
+        errors = []
+        
+        try:
+            with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row_num, row in enumerate(reader, start=2):
+                    try:
+                        account = row.get('Account', '').strip()
+                        coin = row.get('Coin', '').strip()
+                        chain = row.get('Chain', '').strip()
+                        address = row.get('Address', '').strip()
+                        notes = row.get('Notes', '').strip()
+                        
+                        if not account:
+                            skipped += 1
+                            continue
+                        
+                        # Skip rows with empty address (account placeholder)
+                        if not address:
+                            # Still create the account entry
+                            if account not in self.address_db["accounts"]:
+                                self.address_db["accounts"][account] = {
+                                    "addresses": [],
+                                    "notes": notes
+                                }
+                            skipped += 1
+                            continue
+                        
+                        if account not in self.address_db["accounts"]:
+                            self.address_db["accounts"][account] = {
+                                "addresses": [],
+                                "notes": ""
+                            }
+                        
+                        addr_entry = {
+                            "coin": coin,
+                            "chain": chain,
+                            "address": address
+                        }
+                        if notes:
+                            addr_entry["notes"] = notes
+                        
+                        self.address_db["accounts"][account]["addresses"].append(addr_entry)
+                        added += 1
+                        
+                    except Exception as e:
+                        errors.append(f"Row {row_num}: {str(e)}")
+                        skipped += 1
+            
+            if added > 0:
+                self.save_encrypted_data(password)
+            
+            return (added, skipped, errors)
+            
+        except FileNotFoundError:
+            return (0, 0, [f"CSV file not found: {csv_path}"])
+        except Exception as e:
+            return (0, 0, [f"Error reading CSV: {str(e)}"])
+    
+    def list_accounts(self) -> None:
+        """Display all accounts organized by pool."""
+        table = Table(title="Accounts by Pool")
         table.add_column("Pool", style="cyan")
         table.add_column("Description", style="yellow")
         table.add_column("Accounts", style="green")
         
-        for pool_name, pool_data in self.address_db["pools"].items():
-            accounts = ", ".join(pool_data["accounts"])
-            table.add_row(pool_name, pool_data["description"], accounts)
+        for pool_name, pool_data in self.address_db.get("pools", {}).items():
+            accounts = ", ".join(pool_data.get("accounts", []))
+            table.add_row(pool_name, pool_data.get("description", ""), accounts)
+        
+        # Show accounts not in any pool
+        all_pool_accounts = set()
+        for pool_data in self.address_db.get("pools", {}).values():
+            all_pool_accounts.update(pool_data.get("accounts", []))
+        
+        unassigned = set(self.address_db.get("accounts", {}).keys()) - all_pool_accounts
+        if unassigned:
+            table.add_row("Unassigned", "Accounts not in a pool", ", ".join(sorted(unassigned)))
         
         console.print(table)
     
     def show_addresses(self, account: Optional[str] = None) -> None:
-        """
-        Display addresses for all accounts or a specific account.
+        """Display addresses for all accounts or a specific account."""
+        accounts = self.address_db.get("accounts", {})
         
-        Args:
-            account: Optional account name to filter by
-        """
+        if not accounts:
+            console.print("[yellow]No accounts with addresses found.[/yellow]")
+            console.print("[dim]Use 'add-address' or 'import-csv' to add addresses.[/dim]")
+            return
+        
         if account:
-            if account not in self.address_db["accounts"]:
+            if account not in accounts:
                 console.print(f"[red]Account '{account}' not found[/red]")
+                console.print(f"[dim]Available accounts: {', '.join(sorted(accounts.keys()))}[/dim]")
                 return
-            
             self._show_account_addresses(account)
         else:
-            # Show all accounts
-            for acc_name in self.address_db["accounts"]:
+            for acc_name in sorted(accounts.keys()):
                 self._show_account_addresses(acc_name)
     
     def _show_account_addresses(self, account: str) -> None:
         """Display addresses for a specific account."""
         acc_data = self.address_db["accounts"][account]
+        notes = acc_data.get("notes", '')
         
-        panel = Panel.fit(
-            f"[bold cyan]{account}[/bold cyan]\n"
-            f"[yellow]{acc_data.get('notes', 'No notes')}[/yellow]",
-            title=f"Account: {account}"
-        )
+        panel_content = f"[bold cyan]{account}[/bold cyan]"
+        if notes:
+            panel_content += f"\n[yellow]Notes: {notes}[/yellow]"
+        
+        panel = Panel.fit(panel_content, title=f"Account: {account}")
         console.print(panel)
         
-        if not acc_data["addresses"]:
-            console.print("[dim]No addresses stored[/dim]")
+        addresses = acc_data.get("addresses", [])
+        if not addresses:
+            console.print("[dim]  No addresses stored[/dim]\n")
             return
         
         table = Table(show_header=True, header_style="bold magenta")
-        table.add_column("Coin")
-        table.add_column("Chain")
-        table.add_column("Address")
+        table.add_column("Coin", style="green")
+        table.add_column("Chain", style="cyan")
+        table.add_column("Address", style="white")
+        table.add_column("Notes", style="yellow")
         
-        for addr in acc_data["addresses"]:
+        for addr in addresses:
+            addr_notes = addr.get("notes", "")
             table.add_row(
-                addr["coin"],
-                addr["chain"],
-                addr["address"]
+                addr.get("coin", ""),
+                addr.get("chain", ""),
+                addr.get("address", ""),
+                addr_notes
             )
         
         console.print(table)
+        console.print()
+
+
+def get_manager_with_session(ctx) -> tuple:
+    """Get a KeyManager loaded with session data if available.
+    
+    Returns:
+        Tuple of (manager, password) where password may be None if no session
+    """
+    manager = ctx.obj.get('manager')
+    if not manager:
+        return None, None
+    
+    password = manager.get_session_password()
+    if password and manager.data_file.exists():
+        manager.load_encrypted_data(password)
+    
+    return manager, password
 
 
 @click.group()
@@ -264,24 +389,30 @@ class KeyManager:
 def cli(ctx):
     """Secure Crypto Key Manager - Store and manage encrypted cryptocurrency keys."""
     ctx.ensure_object(dict)
-    ctx.obj['manager'] = KeyManager()
+    manager = KeyManager()
+    ctx.obj['manager'] = manager
 
 
 @cli.command()
 @click.option('--password', prompt=True, hide_input=True, confirmation_prompt=True,
               help='Master password for the vault')
-def init(password: str):
+@click.pass_context
+def init(ctx, password: str):
     """Initialize a new encrypted vault."""
-    manager = KeyManager()
-    manager.initialize_vault(password)
+    manager = ctx.obj['manager']
+    if manager.initialize_vault(password):
+        # Auto-create session after init
+        manager.create_session(password)
+        console.print("[green]✓ Session started. You can now use other commands without re-entering password.[/green]")
 
 
 @cli.command()
 @click.option('--password', prompt=True, hide_input=True,
               help='Master password to unlock the vault')
-def unlock(password: str):
+@click.pass_context
+def unlock(ctx, password: str):
     """Unlock and load an existing vault."""
-    manager = KeyManager()
+    manager = ctx.obj['manager']
     
     with Progress(
         SpinnerColumn(),
@@ -291,9 +422,15 @@ def unlock(password: str):
         progress.add_task(description="Unlocking vault...", total=None)
         
         if manager.load_encrypted_data(password):
+            # Create session for subsequent commands
+            manager.create_session(password)
             console.print("[green]✓ Vault unlocked successfully[/green]")
-            # Store manager in context for subsequent commands
-            click.get_current_context().obj['manager'] = manager
+            console.print("[dim]Session active. You can now use other commands without re-entering password.[/dim]")
+            
+            # Show summary
+            accounts = manager.address_db.get("accounts", {})
+            addr_count = sum(len(acc.get("addresses", [])) for acc in accounts.values())
+            console.print(f"[dim]Loaded {len(accounts)} accounts with {addr_count} addresses[/dim]")
         else:
             console.print("[red]Failed to unlock vault. Wrong password or vault doesn't exist.[/red]")
             sys.exit(1)
@@ -301,11 +438,21 @@ def unlock(password: str):
 
 @cli.command()
 @click.pass_context
+def lock(ctx):
+    """Lock the vault and end the current session."""
+    manager = ctx.obj['manager']
+    manager.end_session()
+    console.print("[green]✓ Session locked. Password cleared.[/green]")
+
+
+@cli.command()
+@click.pass_context
 def accounts(ctx):
     """List all accounts organized by pool."""
-    manager = ctx.obj.get('manager')
-    if not manager:
-        console.print("[red]Please unlock the vault first: key-manager unlock[/red]")
+    manager, password = get_manager_with_session(ctx)
+    
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
         sys.exit(1)
     
     manager.list_accounts()
@@ -316,9 +463,10 @@ def accounts(ctx):
 @click.pass_context
 def addresses(ctx, account: Optional[str]):
     """Show addresses for all accounts or a specific account."""
-    manager = ctx.obj.get('manager')
-    if not manager:
-        console.print("[red]Please unlock the vault first: key-manager unlock[/red]")
+    manager, password = get_manager_with_session(ctx)
+    
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
         sys.exit(1)
     
     manager.show_addresses(account)
@@ -329,18 +477,18 @@ def addresses(ctx, account: Optional[str]):
 @click.argument('coin')
 @click.argument('chain')
 @click.argument('address')
-@click.option('--password', prompt=True, hide_input=True,
-              help='Master password to save changes')
+@click.option('--notes', default='', help='Optional notes for this address')
 @click.pass_context
-def add_address(ctx, account: str, coin: str, chain: str, address: str, password: str):
+def add_address(ctx, account: str, coin: str, chain: str, address: str, notes: str):
     """Add an address to an account."""
-    manager = ctx.obj.get('manager')
-    if not manager:
-        console.print("[red]Please unlock the vault first: key-manager unlock[/red]")
+    manager, password = get_manager_with_session(ctx)
+    
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
         sys.exit(1)
     
-    if manager.add_address(account, coin, chain, address, password):
-        console.print("[green]✓ Address added successfully[/green]")
+    if manager.add_address(account, coin, chain, address, password, notes):
+        console.print(f"[green]✓ Address added to {account} successfully[/green]")
     else:
         console.print("[red]Failed to add address[/red]")
 
@@ -348,14 +496,13 @@ def add_address(ctx, account: str, coin: str, chain: str, address: str, password
 @cli.command()
 @click.argument('account')
 @click.argument('mnemonic', nargs=-1)
-@click.option('--password', prompt=True, hide_input=True,
-              help='Master password to save changes')
 @click.pass_context
-def add_mnemonic(ctx, account: str, mnemonic: tuple, password: str):
-    """Add or update a mnemonic for an account."""
-    manager = ctx.obj.get('manager')
-    if not manager:
-        console.print("[red]Please unlock the vault first: key-manager unlock[/red]")
+def add_mnemonic(ctx, account: str, mnemonic: tuple):
+    """Add or update a mnemonic for an account. Use 'show-mnemonic' to view stored mnemonics."""
+    manager, password = get_manager_with_session(ctx)
+    
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
         sys.exit(1)
     
     mnemonic_str = ' '.join(mnemonic)
@@ -367,6 +514,148 @@ def add_mnemonic(ctx, account: str, mnemonic: tuple, password: str):
         console.print("[green]✓ Mnemonic added successfully[/green]")
     else:
         console.print("[red]Failed to add mnemonic[/red]")
+
+
+@cli.command()
+@click.argument('account')
+@click.option('--pool', default=None, help='Pool to add the account to')
+@click.pass_context
+def add_account(ctx, account: str, pool: str):
+    """Create a new account entry, optionally in a pool."""
+    manager, password = get_manager_with_session(ctx)
+    
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
+        sys.exit(1)
+    
+    if manager.add_account(account, pool):
+        if password:
+            manager.save_encrypted_data(password)
+        if pool:
+            console.print(f"[green]✓ Account '{account}' created and added to pool '{pool}'[/green]")
+        else:
+            console.print(f"[green]✓ Account '{account}' created[/green]")
+    else:
+        console.print(f"[yellow]Account '{account}' already exists[/yellow]")
+
+
+@cli.command()
+@click.argument('account')
+@click.pass_context
+def show_mnemonic(ctx, account: str):
+    """Show the mnemonic for an account. Requires password re-entry for security."""
+    manager, password = get_manager_with_session(ctx)
+    
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
+        sys.exit(1)
+    
+    mnemonic = manager.show_mnemonic(account)
+    if mnemonic is None:
+        console.print(f"[red]No mnemonic found for account '{account}'[/red]")
+        sys.exit(1)
+    
+    # Re-verify password for sensitive operation
+    verify = click.prompt("Re-enter password to view mnemonic", hide_input=True)
+    if verify != password:
+        console.print("[red]Password incorrect[/red]")
+        sys.exit(1)
+    
+    console.print(Panel(
+        f"[green]{mnemonic}[/green]",
+        title=f"Mnemonic for {account}",
+        subtitle="⚠ Copy this securely and clear your terminal afterward"
+    ))
+
+
+@cli.command()
+@click.argument('account')
+@click.argument('private_key')
+@click.pass_context
+def add_key(ctx, account: str, private_key: str):
+    """Add or update a private key for an account."""
+    manager, password = get_manager_with_session(ctx)
+    
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
+        sys.exit(1)
+    
+    if manager.add_private_key(account, private_key, password):
+        console.print(f"[green]✓ Private key added for {account}[/green]")
+    else:
+        console.print("[red]Failed to add private key[/red]")
+
+
+@cli.command()
+@click.argument('account')
+@click.pass_context
+def show_key(ctx, account: str):
+    """Show the private key for an account. Requires password re-entry for security."""
+    manager, password = get_manager_with_session(ctx)
+    
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
+        sys.exit(1)
+    
+    key = manager.show_private_key(account)
+    if key is None:
+        console.print(f"[red]No private key found for account '{account}'[/red]")
+        sys.exit(1)
+    
+    # Re-verify password for sensitive operation
+    verify = click.prompt("Re-enter password to view private key", hide_input=True)
+    if verify != password:
+        console.print("[red]Password incorrect[/red]")
+        sys.exit(1)
+    
+    console.print(Panel(
+        f"[green]{key}[/green]",
+        title=f"Private Key for {account}",
+        subtitle="⚠ Never share this key with anyone"
+    ))
+
+
+@cli.command()
+@click.pass_context
+def change_password(ctx):
+    """Change the vault master password."""
+    manager = ctx.obj['manager']
+    
+    if not manager.data_file.exists():
+        console.print("[red]No vault found. Initialize first with 'init' command.[/red]")
+        sys.exit(1)
+    
+    old_password = click.prompt("Current password", hide_input=True)
+    new_password = click.prompt("New password", hide_input=True, confirmation_prompt=True)
+    
+    if manager.change_password(old_password, new_password):
+        console.print("[green]✓ Password changed successfully[/green]")
+        console.print("[dim]New session created with updated password.[/dim]")
+    else:
+        console.print("[red]Failed to change password. Current password may be incorrect.[/red]")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('csv_path')
+@click.pass_context
+def import_csv(ctx, csv_path: str):
+    """Import addresses from a CSV file. CSV must have columns: Account, Coin, Chain, Address, Notes"""
+    manager, password = get_manager_with_session(ctx)
+    
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
+        sys.exit(1)
+    
+    added, skipped, errors = manager.import_csv(csv_path, password)
+    
+    console.print(f"[green]✓ Imported {added} addresses[/green]")
+    if skipped > 0:
+        console.print(f"[yellow]  Skipped {skipped} rows (empty addresses or missing data)[/yellow]")
+    if errors:
+        console.print(f"[red]  Errors:[/red]")
+        for err in errors:
+            console.print(f"[red]    {err}[/red]")
 
 
 @cli.command()
@@ -384,12 +673,10 @@ def gen_password():
 @click.pass_context
 def status(ctx):
     """Show vault status and statistics."""
-    manager = ctx.obj.get('manager')
-    if not manager:
-        console.print("[red]Please unlock the vault first: key-manager unlock[/red]")
-        sys.exit(1)
+    manager, password = get_manager_with_session(ctx)
     
     vault_exists = manager.data_file.exists()
+    session_active = manager.is_session_active()
     
     info_table = Table(title="Vault Status", show_header=False)
     info_table.add_column("Property", style="cyan")
@@ -397,13 +684,20 @@ def status(ctx):
     
     info_table.add_row("Vault Location", str(manager.data_file))
     info_table.add_row("Vault Exists", "✓ Yes" if vault_exists else "✗ No")
+    info_table.add_row("Session Active", "✓ Yes" if session_active else "✗ No")
     
     if vault_exists:
         file_size = manager.data_file.stat().st_size
         info_table.add_row("File Size", f"{file_size:,} bytes")
     
-    info_table.add_row("Accounts Stored", str(len(manager.address_db["accounts"])))
-    info_table.add_row("Mnemonics Stored", str(len(manager.address_db["mnemonics"])))
+    if password:
+        accounts = manager.address_db.get("accounts", {})
+        addr_count = sum(len(acc.get("addresses", [])) for acc in accounts.values())
+        info_table.add_row("Accounts Stored", str(len(accounts)))
+        info_table.add_row("Total Addresses", str(addr_count))
+        info_table.add_row("Mnemonics Stored", str(len(manager.address_db.get("mnemonics", {}))))
+    else:
+        info_table.add_row("Accounts", "Unlock to view")
     
     console.print(info_table)
 

@@ -23,15 +23,20 @@ def build_gui_exe():
     """Build the GUI executable using PyInstaller."""
     print("Building Key Manager GUI executable...")
     
+    project_dir = Path(__file__).parent.resolve()
+    
+    # Check icon exists, use absolute path
+    icon_path = project_dir / 'assets' / 'icon.ico'
+    icon_args = [f'--icon={icon_path}'] if icon_path.exists() else []
+    
     # PyInstaller arguments for onefile portable EXE
     # Fixed to avoid DLL errors and ensure proper bundling
     args = [
-        'src/gui_main.py',
+        str(project_dir / 'src' / 'gui_main.py'),
         '--name=key_manager_gui',
         '--onefile',
-        '--windowed',  # No console window for GUI app
-        '--icon=assets/icon.ico',  # Optional: add icon if available
-        '--add-data=src;src',  # Include source modules
+        '--console',  # Use console mode to avoid DLL ordinal errors; GUI hides console via FreeConsole()
+        *icon_args,
         '--hidden-import=customtkinter',
         '--hidden-import=cryptography',
         '--hidden-import=argon2',
@@ -47,25 +52,17 @@ def build_gui_exe():
         '--collect-all=PIL',  # For image support if needed
         '--clean',
         '--noconfirm',
-        '--paths=src',  # Explicitly add src to path
+        f'--paths={project_dir / "src"}',  # Explicitly add src to path
+        f'--distpath={project_dir / "dist"}',
+        f'--workpath={project_dir / "build"}',
+        f'--specpath={project_dir}',
     ]
     
     # Add Windows-specific options to avoid DLL issues
     if sys.platform == 'win32':
         args.extend([
-            '--uac-admin',  # Request admin privileges if needed
             '--disable-windowed-traceback',  # Cleaner error handling
         ])
-    
-    # Add data files if they exist
-    data_files = [
-        ('README.md', '.'),
-        ('LICENSE', '.'),
-    ]
-    
-    for src, dst in data_files:
-        if os.path.exists(src):
-            args.append(f'--add-data={src}{os.pathsep}{dst}')
     
     print(f"Running PyInstaller with args: {' '.join(args)}")
     
@@ -189,6 +186,11 @@ def check_dependencies():
 
 def main():
     """Main build function."""
+    # Change to project directory
+    project_dir = Path(__file__).parent.resolve()
+    os.chdir(project_dir)
+    print(f"Working directory: {os.getcwd()}")
+    
     print("="*60)
     print("Key Manager GUI - Portable EXE Builder")
     print("="*60)

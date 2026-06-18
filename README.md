@@ -250,4 +250,40 @@ This package comes pre-configured with:
 
 **Remember:** Your crypto security is only as strong as your practices. This tool provides the technology, but you provide the careful handling that keeps your assets safe.
 
-*Last Updated: March 19, 2026*
+## 🔧 Developer Notes — GUI Fixes (June 2026)
+
+The GUI was crashing on login in both script (`python src/gui_main.py`) and EXE modes. Three root causes were identified and fixed:
+
+### Bug 1: `FreeConsole()` crashing script mode
+- **Cause:** `ctypes.windll.kernel32.FreeConsole()` was called unconditionally at startup. In script mode, this detaches stdout/stderr from the terminal, causing a fatal "I/O operation on closed file" error that immediately crashed the app.
+- **Fix:** `FreeConsole()` now only runs when the app is frozen (i.e., running as a PyInstaller EXE). Script mode keeps the console attached so errors are visible.
+
+### Bug 2: Session timer started before the status bar existed
+- **Cause:** `attempt_login()` called `start_session_timer()` → `update_session_timer()`, which tried to update `self.session_timer_label` before `create_status_bar()` had created it. This raised an `AttributeError` and crashed immediately after successful login.
+- **Fix:** `start_session_timer()` is now called only after the status bar (and its labels) have been created. The backup status update is also guarded with `hasattr(self, 'backup_status_label')`.
+
+### Bug 3: `update_session_timer()` lacked defensive guards
+- **Cause:** If the timer callback fired before or after the dashboard widgets existed, it would crash with an `AttributeError`.
+- **Fix:** `update_session_timer()` now checks `hasattr(self, 'session_timer_label')` before updating the label, and only reschedules if the dashboard is still active.
+
+### Running the GUI
+
+**Script mode (development):**
+```
+python src/gui_main.py
+```
+This now works correctly — the login screen appears, and successful login opens the dashboard without crashing.
+
+**Portable EXE mode:**
+```
+USB_DEPLOYMENT\key_manager_gui.exe
+```
+The EXE was rebuilt with `python build_gui.py` and launches correctly. It stays open after login (previously it shut down immediately due to Bug 1 above).
+
+### Rebuilding the GUI EXE
+```
+python build_gui.py
+```
+This runs PyInstaller with `--onefile --windowed` and copies the result to `USB_DEPLOYMENT/key_manager_gui.exe`. The resulting EXE is ~50-100MB (Python runtime + CustomTkinter + cryptography + argon2 bundled).
+
+*Last Updated: June 18, 2026*

@@ -1,0 +1,134 @@
+# Key Manager - Cline Project Rules
+
+## Project Overview
+Key Manager is a secure cryptocurrency key storage application with CLI and GUI interfaces.
+It encrypts wallet data (24-word mnemonics, addresses, account info) using AES-256-GCM with Argon2id key derivation.
+Designed for portable USB deployment alongside a local CLI workflow.
+
+## Project Structure
+```
+key_manager/
+├── src/
+│   ├── main.py           # CLI interface (Click-based) + KeyManager class
+│   ├── gui_main.py       # CustomTkinter GUI - dark theme dashboard
+│   ├── crypto_engine.py  # AES-256-GCM encryption + Argon2id KDF
+│   └── backup_engine.py  # Vault backup/restore engine
+├── USB_DEPLOYMENT/        # Pre-built portable EXEs for USB drives
+│   ├── key_manager.exe       # CLI version (working)
+│   └── key_manager_gui.exe   # GUI version (working, rebuilt June 2026)
+├── build_gui.py           # PyInstaller build script for GUI EXE
+├── init_vault.py          # Vault initialization helper
+├── check_vault.py         # Vault diagnostic script
+├── show_vault.py          # Vault content viewer
+├── import_addresses.py    # Import addresses from CSV
+├── import_addresses_to_vault.py  # Import addresses into encrypted vault
+├── process_excel.py       # Excel address processing
+├── debug_paths.py         # Path resolution debugging
+├── address_database.json  # Unencrypted reference/template address data
+├── sample_addresses.csv   # Sample CSV for import testing
+├── setup.py               # Package setup
+├── requirements.txt       # Python dependencies
+├── STATUS.md              # Project status tracking
+└── FINAL_PATHS.txt        # Path configuration notes
+```
+
+## Key Architecture Decisions
+
+### Data Flow
+- **Encrypted vault** (`key_vault.encrypted`) is the single source of truth
+- Vault location: `~/.key_manager/key_vault.encrypted` (CLI) or `<exe_dir>/.key_manager/` (portable/GUI)
+- `KeyManager.address_db` holds the in-memory decrypted data after unlock
+- Data structure: `{ version, pools: {name: {description, accounts:[]}}, accounts: {name: {addresses:[], notes}}, mnemonics: {name: phrase} }`
+
+### Crypto Stack
+- **Argon2id** for key derivation (64MB memory, 3 iterations, 4 lanes)
+- **AES-256-GCM** for authenticated encryption (12-byte nonce, 16-byte tag)
+- Salt and nonce are randomly generated per encryption operation
+- `CryptoEngine.encrypt_json()` → JSON string with base64-encoded salt/nonce/tag/ciphertext
+- `CryptoEngine.verify_password()` attempts full decrypt to validate (no separate password hash)
+
+### Dual Interface Pattern
+- CLI: `src/main.py` uses Click commands + Rich for output
+- GUI: `src/gui_main.py` uses CustomTkinter with dark theme
+- Both share `KeyManager` class and `CryptoEngine`
+
+### Portable vs Local Paths
+- **Frozen (EXE)**: `base_dir = os.path.dirname(sys.executable)` → vault in `<exe_dir>/.key_manager/`
+- **Script**: `base_dir = project_root` → vault in `~/.key_manager/` (default) or custom `data_dir`
+- `PortableKeyManager` in `gui_main.py` overrides the data directory for portability
+
+## Critical Code Areas & Known Patterns
+
+### GUI Fix History (June 2026)
+The GUI was crashing on login in both script and EXE modes. Three bugs were identified and fixed:
+
+1. **`FreeConsole()` crashing script mode**: `ctypes.windll.kernel32.FreeConsole()` was called unconditionally at startup. In script mode, this detaches stdout/stderr from the terminal, causing a fatal "I/O operation on closed file" error. **Fix:** `FreeConsole()` now only runs when `getattr(sys, 'frozen', False)` is `True` (EXE mode only). Never call `FreeConsole()` in script mode.
+
+2. **Session timer started before status bar existed**: `attempt_login()` → `start_session_timer()` → `update_session_timer()` tried to update `self.session_timer_label` before `create_status_bar()` created it. Raised `AttributeError`, crashing immediately after successful login. **Fix:** `start_session_timer()` is now called after `create_status_bar()`. Backup status update guarded with `hasattr(self, 'backup_status_label')`.
+
+3. **`update_session_timer()` lacked defensive guards**: Timer callback could fire before/after dashboard widgets existed, crashing. **Fix:** `update_session_timer()` checks `hasattr(self, 'session_timer_label')` before updating and only reschedules if dashboard is active.
+
+**Key lesson:** Always guard `self.*` widget references with `hasattr()` checks in any callback that might fire before or after the widget lifecycle. Widget creation order matters — do not start timers or callbacks until all referenced widgets exist.
+
+### Remaining GUI Issues (from earlier review, verify current state)
+1. **Hardcoded accounts**: Left panel may still use hardcoded pool/account dicts instead of loading from `self.key_manager.address_db["pools"]`. Verify before extending.
+2. **Mnemonic reveal**: `verify_password()` was called with `json.dumps(self.key_manager.address_db)` (decrypted data) but expects the encrypted JSON string. May still fail. Verify before using reveal feature.
+3. **Fragile PortableKeyManager proxy**: `__dict__.update()` + `__getattr__` pattern can break when `KeyManager` sets attributes after `__init__`. Be cautious when adding new KeyManager attributes.
+4. **No visual notifications**: `show_notification()` only prints to console; no toast/popup feedback.
+
+### Import Path Handling
+- `sys.path.insert(0, ...)` is used in multiple files to enable `from crypto_engine import ...`
+- When modifying imports, test both script execution and PyInstaller frozen execution
+- The `--add-data=src;src` PyInstaller flag must be maintained
+
+## Dependencies
+```
+customtkinter    # GUI framework
+cryptography     # AES-GCM + Argon2id
+click            # CLI framework
+rich             # CLI output formatting
+pyperclip        # Clipboard operations
+Pillow (PIL)     # Image support for CustomTkinter
+argon2-cffi      # Argon2id password hashing
+PyInstaller      # Build tool for EXE creation
+```
+
+## Build & Deploy
+- GUI EXE: `python build_gui.py` → `dist/key_manager_gui.exe` → copied to `USB_DEPLOYMENT/`
+- CLI EXE: PyInstaller with `src/main.py` as entry
+- Output goes to `USB_DEPLOYMENT/` for USB drive deployment
+- Build with `--onefile --windowed` for GUI, `--onefile` for CLI
+- Resulting GUI EXE should be ~50-100MB (Python runtime + all deps bundled)
+
+## Running
+- **Script mode (development):** `python src/gui_main.py` — now works correctly
+- **EXE mode (portable):** `USB_DEPLOYMENT\key_manager_gui.exe` — now works correctly
+- **CLI:** `python src/main.py` or `USB_DEPLOYMENT\key_manager.exe`
+
+## Testing
+- `test_gui.py` — Tests backup engine and basic GUI imports
+- `test_gui_login.py` — Tests login screen functionality
+- `test_vault.py` — Tests vault creation/unlock
+- `test_portable_vault.py` — Tests portable vault path resolution
+- `test_dashboard.py` — Tests dashboard creation
+- Tests use temporary directories; clean up after runs
+
+## Coding Conventions
+- Type hints on all function signatures (`Optional[Path]`, `Dict[str, Any]`, etc.)
+- Docstrings on all public methods (Args/Returns pattern)
+- `pathlib.Path` for file system operations
+- No plain text sensitive data in logs or print statements
+- Error handling: catch specific exceptions, never bare `except:`
+- GUI: All widget references stored as `self.*` for later access/update
+- GUI: Guard `self.*` widget references with `hasattr()` in callbacks that might fire before widgets exist
+- GUI: Do not start timers/callbacks until all referenced widgets are created
+- Session timeout: 5 minutes of inactivity triggers auto-lock
+
+## Security Rules
+- Never log or print decrypted mnemonics or addresses in production code
+- Always clear clipboard after copy operations where possible
+- Mnemonics must auto-hide after reveal (5-minute max display)
+- Password fields must use `show="•"` masking
+- No password storage — password is held in memory only during active session
+- On lock/session expiry: clear `current_password`, `revealed_mnemonics`, and `address_db` references
+- Never call `FreeConsole()` in script mode — only when frozen (EXE)

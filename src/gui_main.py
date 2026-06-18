@@ -2,6 +2,26 @@
 Key Manager GUI - Modern dark-themed interface for secure key management.
 Built with CustomTkinter.
 """
+import sys
+import os
+
+# Guard sys.stdout/stderr for windowed/compiled mode where they may be None
+if sys.stdout is None:
+    sys.stdout = open(os.devnull, 'w', encoding='utf-8', errors='replace')
+if sys.stderr is None:
+    sys.stderr = open(os.devnull, 'w', encoding='utf-8', errors='replace')
+
+# Hide console window on Windows only when running as a frozen EXE.
+# Calling FreeConsole() in script mode detaches stdout/stderr from the
+# terminal, causing fatal "I/O operation on closed file" errors that crash
+# the process when anything writes to stderr (e.g. after-login exceptions).
+if sys.platform == 'win32' and getattr(sys, 'frozen', False):
+    import ctypes
+    try:
+        ctypes.windll.kernel32.FreeConsole()
+    except Exception:
+        pass
+
 import tkinter as tk
 import customtkinter as ctk
 from datetime import datetime, timedelta
@@ -12,18 +32,12 @@ from pathlib import Path
 from typing import Dict, List, Optional, Any
 import pyperclip
 import queue
-import sys
-import os
 
 # Add src directory to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from crypto_engine import CryptoEngine
 from backup_engine import BackupEngine
-
-# Import KeyManager with modified data directory for portability
-import sys
-import os
 
 # Determine if we're running from EXE or script
 if getattr(sys, 'frozen', False):
@@ -33,27 +47,109 @@ else:
     # Running from script - use script directory
     base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-# Create a portable KeyManager class
+
 class PortableKeyManager:
-    """KeyManager that stores vault in the same directory as the executable."""
-    
-    def __init__(self):
+    """KeyManager that stores vault in the same directory as the executable.
+
+    Delegates to main.KeyManager, which already handles frozen (EXE) vs
+    script path resolution correctly via get_data_dir().
+    """
+    def __init__(self, data_dir: Optional[Path] = None):
         from main import KeyManager as OriginalKeyManager
-        import os
         
-        # Use portable data directory
-        self.data_dir = os.path.join(base_dir, '.key_manager')
-        os.makedirs(self.data_dir, exist_ok=True)
+        # Only override the data directory when running from a frozen EXE
+        # (portable USB deployment). In script mode, fall back to the default
+        # ~/.key_manager/ location handled by KeyManager itself so the GUI
+        # uses the same vault as the CLI.
+        if data_dir is None:
+            if getattr(sys, 'frozen', False):
+                data_dir = Path(base_dir)
+            else:
+                data_dir = None  # let KeyManager use its default (~/.key_manager)
         
-        # Create original KeyManager with custom data directory
-        self.manager = OriginalKeyManager(data_dir=self.data_dir)
+        self.data_dir = data_dir if data_dir is not None else Path.home() / ".key_manager"
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         
-        # Proxy all attributes and methods
-        self.__dict__.update(self.manager.__dict__)
+        # Create the underlying KeyManager with the resolved data directory
+        self._manager = OriginalKeyManager(data_dir=data_dir)
         
-    def __getattr__(self, name):
-        # Forward any missing attributes to the original manager
-        return getattr(self.manager, name)
+        # Copy key attributes directly
+        self.data_file = self._manager.data_file
+        self.address_db = self._manager.address_db
+        self.session_file = self._manager.session_file
+    
+    def load_encrypted_data(self, password: str) -> bool:
+        """Delegate to underlying KeyManager."""
+        result = self._manager.load_encrypted_data(password)
+        # Sync address_db after load
+        self.address_db = self._manager.address_db
+        return result
+    
+    def save_encrypted_data(self, password: str) -> bool:
+        """Delegate to underlying KeyManager."""
+        # Sync address_db before save
+        self._manager.address_db = self.address_db
+        return self._manager.save_encrypted_data(password)
+    
+    def add_mnemonic(self, account_name: str, mnemonic: str, password: str) -> bool:
+        """Delegate to underlying KeyManager."""
+        self._manager.address_db = self.address_db
+        result = self._manager.add_mnemonic(account_name, mnemonic, password)
+        self.address_db = self._manager.address_db
+        return result
+    
+    def add_address(self, account: str, coin: str, chain: str, address: str, password: str) -> bool:
+        """Delegate to underlying KeyManager."""
+        self._manager.address_db = self.address_db
+        result = self._manager.add_address(account, coin, chain, address, password)
+        self.address_db = self._manager.address_db
+        return result
+    
+    def is_session_active(self) -> bool:
+        """Check if session file exists."""
+        return self.session_file.exists() if hasattr(self, 'session_file') else False
+    
+    def create_session(self, password: str) -> None:
+        """Create session file."""
+        self._manager.create_session(password)
+    
+    def get_session_password(self) -> Optional[str]:
+        """Get password from session file."""
+        return self._manager.get_session_password()
+    
+    def end_session(self) -> None:
+        """End session by removing session file."""
+        self._manager.end_session()
+    
+    def add_account(self, account_name: str, pool: Optional[str] = None) -> bool:
+        """Delegate to underlying KeyManager."""
+        self._manager.address_db = self.address_db
+        result = self._manager.add_account(account_name, pool)
+        self.address_db = self._manager.address_db
+        return result
+    
+    def add_private_key(self, account_name: str, private_key: str, password: str) -> bool:
+        """Delegate to underlying KeyManager."""
+        self._manager.address_db = self.address_db
+        result = self._manager.add_private_key(account_name, private_key, password)
+        self.address_db = self._manager.address_db
+        return result
+    
+    def show_private_key(self, account_name: str) -> Optional[str]:
+        """Get private key for an account."""
+        return self.address_db.get("private_keys", {}).get(account_name)
+    
+    def show_mnemonic(self, account_name: str) -> Optional[str]:
+        """Get mnemonic for an account."""
+        return self.address_db.get("mnemonics", {}).get(account_name)
+    
+    def change_password(self, old_password: str, new_password: str) -> bool:
+        """Change the vault password."""
+        result = self._manager.change_password(old_password, new_password)
+        if result:
+            self.address_db = self._manager.address_db
+        return result
+
 
 # Use the portable version
 KeyManager = PortableKeyManager
@@ -81,7 +177,7 @@ class KeyManagerGUI:
         self.session_start_time = None
         self.session_timeout = 300  # 5 minutes in seconds
         self.session_timer = None
-        self.revealed_mnemonics = {}  # Track revealed mnemonics and their expiry
+        self.revealed_mnemonics = {}
         
         # Clipboard queue for multi-copy
         self.clipboard_queue = queue.Queue()
@@ -90,6 +186,10 @@ class KeyManagerGUI:
         
         # Password for current session
         self.current_password = None
+        
+        # Notification timer
+        self._notification_timer = None
+        self._notification_label = None
         
         # Create login screen
         self.create_login_screen()
@@ -184,7 +284,7 @@ class KeyManagerGUI:
             )
         else:
             self.vault_info_label.configure(
-                text="No vault found. Please initialize with CLI first.",
+                text="No vault found. Please initialize with CLI first (key_manager.exe init)",
                 text_color="orange"
             )
         
@@ -215,14 +315,11 @@ class KeyManagerGUI:
                 # Success - store password for session
                 self.current_password = password
                 
+                # Create session file for CLI interoperability
+                self.key_manager.create_session(password)
+                
                 # Initialize backup engine
                 self.backup_engine = BackupEngine(self.key_manager.data_dir)
-                
-                # Update backup status
-                backup_count = self.backup_engine.get_backup_count()
-                self.backup_status_label.configure(
-                    text=f"Backups: {backup_count}"
-                )
                 
                 # Update UI
                 self.login_status_label.configure(
@@ -245,22 +342,40 @@ class KeyManagerGUI:
                 text=f"Error: {str(e)}",
                 text_color="red"
             )
-            # Print error to console for debugging
             print(f"Login error: {e}")
             import traceback
             traceback.print_exc()
         
     def create_main_dashboard(self):
         """Create the main dashboard after successful login."""
-        # Clear login screen
-        for widget in self.root.winfo_children():
-            widget.destroy()
+        try:
+            # Clear login screen
+            for widget in self.root.winfo_children():
+                widget.destroy()
+                
+            # Create main layout first (creates status bar with session_timer_label)
+            self.create_main_layout()
             
-        # Start session timer
-        self.start_session_timer()
-        
-        # Create main layout
-        self.create_main_layout()
+            # Start session timer only after status bar exists
+            self.start_session_timer()
+            
+            # Now that status bar exists, update backup count
+            if self.backup_engine and hasattr(self, 'backup_status_label'):
+                backup_count = self.backup_engine.get_backup_count()
+                self.backup_status_label.configure(
+                    text=f"Backups: {backup_count}"
+                )
+        except Exception as e:
+            print(f"Dashboard creation error: {e}")
+            import traceback
+            traceback.print_exc()
+            err_label = ctk.CTkLabel(
+                self.root,
+                text=f"Error loading dashboard: {e}",
+                text_color="red",
+                font=ctk.CTkFont(size=14)
+            )
+            err_label.pack(pady=50)
         
     def create_main_layout(self):
         """Create the main dashboard layout with left and right panels."""
@@ -278,7 +393,7 @@ class KeyManagerGUI:
         self.create_status_bar()
         
     def create_left_panel(self, parent):
-        """Create left panel with scrollable account list."""
+        """Create left panel with scrollable account list organized by pool."""
         left_panel = ctk.CTkFrame(parent, width=300, corner_radius=0)
         left_panel.pack(side="left", fill="y", padx=(0, 1))
         left_panel.pack_propagate(False)
@@ -295,30 +410,33 @@ class KeyManagerGUI:
         scrollable_frame = ctk.CTkScrollableFrame(left_panel)
         scrollable_frame.pack(fill="both", expand=True, padx=20, pady=(0, 20))
         
-        # Sample accounts (will be loaded from vault)
-        pools = {
-            "Genesis": ["G SS", "Expenses", "G1", "G2", "G3", "G4", "G5", "G6"],
-            "SafetyNet": ["N1", "N2", "N3", "N4", "N5"],
-            "Foundation": ["F1", "F2", "F3", "F4", "F5"],
-            "Seed": ["S1", "S2", "S3", "S4", "S5"]
-        }
+        # Load pools from vault data
+        pools = self.key_manager.address_db.get("pools", {})
+        accounts_data = self.key_manager.address_db.get("accounts", {})
         
-        for pool_name, accounts in pools.items():
+        for pool_name, pool_data in pools.items():
             # Pool header
             pool_header = ctk.CTkLabel(
                 scrollable_frame,
-                text=pool_name,
+                text=f"── {pool_name} ──",
                 font=ctk.CTkFont(size=14, weight="bold")
             )
-            pool_header.pack(pady=(10, 5), anchor="w")
+            pool_header.pack(pady=(10, 2), anchor="w")
             
-            # Account buttons
-            for account in accounts:
+            # Account buttons from pool data
+            pool_accounts = pool_data.get("accounts", [])
+            for account in pool_accounts:
+                # Show count of addresses for this account
+                addr_count = 0
+                if account in accounts_data:
+                    addr_count = len(accounts_data[account].get("addresses", []))
+                
+                label = f"{account} ({addr_count})" if addr_count > 0 else account
                 account_btn = ctk.CTkButton(
                     scrollable_frame,
-                    text=account,
+                    text=label,
                     command=lambda p=pool_name, a=account: self.select_account(p, a),
-                    width=200,
+                    width=220,
                     height=35,
                     corner_radius=10,
                     fg_color="transparent",
@@ -327,7 +445,38 @@ class KeyManagerGUI:
                     border_color=("gray60", "gray40")
                 )
                 account_btn.pack(pady=2)
-                
+        
+        # Show unassigned accounts (accounts not in any pool but have addresses)
+        all_pool_accounts = set()
+        for pool_data in pools.values():
+            all_pool_accounts.update(pool_data.get("accounts", []))
+        
+        unassigned = set(accounts_data.keys()) - all_pool_accounts
+        if unassigned:
+            unassigned_header = ctk.CTkLabel(
+                scrollable_frame,
+                text="── Unassigned ──",
+                font=ctk.CTkFont(size=14, weight="bold")
+            )
+            unassigned_header.pack(pady=(10, 2), anchor="w")
+            
+            for account in sorted(unassigned):
+                addr_count = len(accounts_data[account].get("addresses", []))
+                label = f"{account} ({addr_count})" if addr_count > 0 else account
+                account_btn = ctk.CTkButton(
+                    scrollable_frame,
+                    text=label,
+                    command=lambda a=account: self.select_account("Unassigned", a),
+                    width=220,
+                    height=35,
+                    corner_radius=10,
+                    fg_color="transparent",
+                    hover_color=("gray70", "gray30"),
+                    border_width=1,
+                    border_color=("gray60", "gray40")
+                )
+                account_btn.pack(pady=2)
+        
     def create_right_panel(self, parent):
         """Create right panel with chain view and addresses."""
         right_panel = ctk.CTkFrame(parent, corner_radius=0)
@@ -397,6 +546,9 @@ class KeyManagerGUI:
         self.current_pool = pool_name
         self.current_account = account_name
         
+        # Reset session timer on activity
+        self.session_start_time = datetime.now()
+        
         # Update panel title
         self.right_panel_title.configure(
             text=f"{pool_name} > {account_name}"
@@ -412,7 +564,9 @@ class KeyManagerGUI:
     def show_account_addresses(self, account_name):
         """Display addresses for the selected account."""
         # Check if account exists in vault
-        if account_name not in self.key_manager.address_db["accounts"]:
+        accounts_data = self.key_manager.address_db.get("accounts", {})
+        
+        if account_name not in accounts_data:
             no_data_label = ctk.CTkLabel(
                 self.chain_view_container,
                 text=f"No addresses found for account '{account_name}'",
@@ -422,7 +576,7 @@ class KeyManagerGUI:
             return
         
         # Get addresses from vault
-        account_data = self.key_manager.address_db["accounts"][account_name]
+        account_data = accounts_data[account_name]
         addresses = account_data.get("addresses", [])
         
         if not addresses:
@@ -437,8 +591,12 @@ class KeyManagerGUI:
             for addr in addresses:
                 self.create_address_card(addr)
         
+        # Add private key section if account has a private key
+        if account_name in self.key_manager.address_db.get("private_keys", {}):
+            self.create_private_key_section(account_name)
+        
         # Add mnemonic section if account has a mnemonic
-        if account_name in self.key_manager.address_db["mnemonics"]:
+        if account_name in self.key_manager.address_db.get("mnemonics", {}):
             self.create_mnemonic_section(account_name)
             
     def create_address_card(self, address_data):
@@ -452,25 +610,36 @@ class KeyManagerGUI:
         
         coin_label = ctk.CTkLabel(
             info_frame,
-            text=address_data["coin"],
+            text=address_data.get("coin", "Unknown"),
             font=ctk.CTkFont(size=14, weight="bold")
         )
         coin_label.pack(anchor="w")
         
         chain_label = ctk.CTkLabel(
             info_frame,
-            text=address_data["chain"],
+            text=address_data.get("chain", "Unknown"),
             font=ctk.CTkFont(size=12)
         )
         chain_label.pack(anchor="w")
         
         address_label = ctk.CTkLabel(
             info_frame,
-            text=address_data["address"],
+            text=address_data.get("address", ""),
             font=ctk.CTkFont(size=11),
             wraplength=400
         )
         address_label.pack(anchor="w", pady=(5, 0))
+        
+        # Notes if present
+        notes = address_data.get("notes", "")
+        if notes:
+            notes_label = ctk.CTkLabel(
+                info_frame,
+                text=f"📝 {notes}",
+                font=ctk.CTkFont(size=10),
+                text_color="yellow"
+            )
+            notes_label.pack(anchor="w", pady=(2, 0))
         
         # Copy button
         button_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -501,19 +670,60 @@ class KeyManagerGUI:
         """Copy address to clipboard."""
         try:
             pyperclip.copy(address)
-            self.show_notification(f"Copied to clipboard: {address[:20]}...")
+            self.show_notification(f"Copied: {address[:20]}...")
         except Exception as e:
             self.show_notification(f"Failed to copy: {str(e)}", error=True)
             
     def add_to_clipboard_queue(self, address):
         """Add address to multi-copy queue."""
         self.clipboard_queue.put(address)
-        self.show_notification(f"Added to queue: {address[:20]}...")
+        queue_size = self.clipboard_queue.qsize()
+        self.show_notification(f"Added to queue ({queue_size}): {address[:20]}...")
         
     def show_notification(self, message, error=False):
-        """Show a temporary notification."""
-        # This would be implemented as a toast notification
-        print(f"Notification: {message}")
+        """Show a temporary toast notification overlay."""
+        # Cancel any existing notification timer
+        if self._notification_timer is not None:
+            self.root.after_cancel(self._notification_timer)
+            self._notification_timer = None
+        
+        # Create notification label if it doesn't exist
+        if self._notification_label is None:
+            self._notification_label = ctk.CTkLabel(
+                self.root,
+                text="",
+                font=ctk.CTkFont(size=12),
+                corner_radius=8,
+                height=30,
+                padx=15
+            )
+        
+        # Style based on error or success
+        if error:
+            self._notification_label.configure(
+                text=f"✗ {message}",
+                text_color="#ff6b6b",
+                fg_color="#3a1a1a"
+            )
+        else:
+            self._notification_label.configure(
+                text=f"✓ {message}",
+                text_color="#51cf94",
+                fg_color="#1a3a2a"
+            )
+        
+        # Place notification at bottom center, above status bar
+        self._notification_label.place(relx=0.5, rely=0.93, anchor="center")
+        self._notification_label.lift()
+        
+        # Auto-dismiss after 3 seconds
+        self._notification_timer = self.root.after(3000, self._dismiss_notification)
+    
+    def _dismiss_notification(self):
+        """Dismiss the current notification."""
+        if self._notification_label is not None:
+            self._notification_label.place_forget()
+        self._notification_timer = None
         
     def start_session_timer(self):
         """Start the 5-minute session timer."""
@@ -522,16 +732,19 @@ class KeyManagerGUI:
         
     def update_session_timer(self):
         """Update the session timer display."""
-        if self.session_start_time:
-            elapsed = (datetime.now() - self.session_start_time).seconds
-            remaining = max(0, self.session_timeout - elapsed)
-            
-            minutes = remaining // 60
-            seconds = remaining % 60
-            
-            self.session_timer_label.configure(
-                text=f"Session: {minutes}:{seconds:02d}"
-            )
+        if self.session_start_time and hasattr(self, 'session_timer_label') and self.session_timer_label is not None:
+            try:
+                elapsed = (datetime.now() - self.session_start_time).seconds
+                remaining = max(0, self.session_timeout - elapsed)
+                
+                minutes = remaining // 60
+                seconds = remaining % 60
+                
+                self.session_timer_label.configure(
+                    text=f"Session: {minutes}:{seconds:02d}"
+                )
+            except Exception:
+                pass
             
             # Check if session expired
             if remaining <= 0:
@@ -540,6 +753,158 @@ class KeyManagerGUI:
                 # Schedule next update
                 self.root.after(1000, self.update_session_timer)
                 
+    def create_private_key_section(self, account_name):
+        """Create a section for private key display and reveal."""
+        # Separator
+        separator = ctk.CTkFrame(self.chain_view_container, height=2, fg_color="gray30")
+        separator.pack(fill="x", pady=20, padx=10)
+        
+        # Private key section
+        pk_frame = ctk.CTkFrame(self.chain_view_container, corner_radius=10)
+        pk_frame.pack(fill="x", pady=10, padx=10)
+        
+        # Title
+        pk_title = ctk.CTkLabel(
+            pk_frame,
+            text="🔑 Private Key",
+            font=ctk.CTkFont(size=16, weight="bold")
+        )
+        pk_title.pack(pady=(15, 10))
+        
+        # Status label
+        self.pk_status_label = ctk.CTkLabel(
+            pk_frame,
+            text="Private key is hidden for security",
+            font=ctk.CTkFont(size=12),
+            text_color="orange"
+        )
+        self.pk_status_label.pack(pady=5)
+        
+        # Private key display (initially hidden)
+        self.pk_display = ctk.CTkTextbox(
+            pk_frame,
+            height=60,
+            font=ctk.CTkFont(size=12, family="monospace"),
+            state="disabled"
+        )
+        self.pk_display.pack(fill="x", padx=20, pady=10)
+        
+        # Button frame
+        button_frame = ctk.CTkFrame(pk_frame, fg_color="transparent")
+        button_frame.pack(pady=(0, 15))
+        
+        # Reveal button
+        self.pk_reveal_button = ctk.CTkButton(
+            button_frame,
+            text="Reveal Key",
+            command=lambda: self.reveal_private_key(account_name),
+            width=150,
+            height=35,
+            font=ctk.CTkFont(size=12, weight="bold")
+        )
+        self.pk_reveal_button.pack(side="left", padx=5)
+        
+        # Copy button (initially disabled)
+        self.pk_copy_button = ctk.CTkButton(
+            button_frame,
+            text="Copy",
+            command=lambda: self.copy_private_key_to_clipboard(account_name),
+            width=100,
+            height=35,
+            state="disabled"
+        )
+        self.pk_copy_button.pack(side="left", padx=5)
+        
+        # Hide button (initially disabled)
+        self.pk_hide_button = ctk.CTkButton(
+            button_frame,
+            text="Hide",
+            command=lambda: self.hide_private_key(account_name),
+            width=100,
+            height=35,
+            state="disabled",
+            fg_color="gray30"
+        )
+        self.pk_hide_button.pack(side="left", padx=5)
+    
+    def reveal_private_key(self, account_name):
+        """Reveal private key with password re-entry."""
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Re-enter Master Password")
+        dialog.geometry("400x200")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        
+        dialog.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{x}+{y}")
+        
+        title_label = ctk.CTkLabel(dialog, text="Re-enter Master Password", font=ctk.CTkFont(size=16, weight="bold"))
+        title_label.pack(pady=20)
+        
+        password_entry = ctk.CTkEntry(dialog, placeholder_text="Enter master password", show="•", width=250, font=ctk.CTkFont(size=12))
+        password_entry.pack(pady=10)
+        password_entry.focus_set()
+        
+        status_label = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(size=11))
+        status_label.pack(pady=5)
+        
+        def verify_password():
+            password = password_entry.get()
+            if not password:
+                status_label.configure(text="Please enter password", text_color="red")
+                return
+            if password == self.current_password:
+                pk = self.key_manager.address_db["private_keys"][account_name]
+                self.pk_display.configure(state="normal")
+                self.pk_display.delete("1.0", "end")
+                self.pk_display.insert("1.0", pk)
+                self.pk_display.configure(state="disabled")
+                self.pk_reveal_button.configure(state="disabled")
+                self.pk_copy_button.configure(state="normal")
+                self.pk_hide_button.configure(state="normal")
+                self.pk_status_label.configure(text="Private key revealed - will auto-hide in 5 minutes", text_color="green")
+                dialog.destroy()
+                self.show_notification("Private key revealed")
+                self.root.after(300000, lambda: self.auto_hide_private_key(account_name))
+            else:
+                status_label.configure(text="Invalid password", text_color="red")
+        
+        password_entry.bind("<Return>", lambda e: verify_password())
+        
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=20)
+        ctk.CTkButton(btn_frame, text="Verify", command=verify_password, width=100).pack(side="left", padx=10)
+        ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy, width=100, fg_color="gray30").pack(side="left", padx=10)
+    
+    def hide_private_key(self, account_name):
+        """Hide the revealed private key."""
+        self.pk_display.configure(state="normal")
+        self.pk_display.delete("1.0", "end")
+        self.pk_display.insert("1.0", "••••••••••••••••••••••••••••••")
+        self.pk_display.configure(state="disabled")
+        self.pk_reveal_button.configure(state="normal")
+        self.pk_copy_button.configure(state="disabled")
+        self.pk_hide_button.configure(state="disabled")
+        self.pk_status_label.configure(text="Private key is hidden for security", text_color="orange")
+        self.show_notification("Private key hidden")
+    
+    def auto_hide_private_key(self, account_name):
+        """Auto-hide private key after 5 minutes."""
+        self.hide_private_key(account_name)
+        self.show_notification("Private key auto-hidden after 5 minutes")
+    
+    def copy_private_key_to_clipboard(self, account_name):
+        """Copy private key to clipboard."""
+        if account_name in self.key_manager.address_db.get("private_keys", {}):
+            pk = self.key_manager.address_db["private_keys"][account_name]
+            try:
+                pyperclip.copy(pk)
+                self.show_notification("Private key copied to clipboard")
+            except Exception as e:
+                self.show_notification(f"Failed to copy: {str(e)}", error=True)
+    
     def create_mnemonic_section(self, account_name):
         """Create a section for mnemonic display and reveal."""
         # Separator
@@ -667,11 +1032,8 @@ class KeyManagerGUI:
                 status_label.configure(text="Please enter password", text_color="red")
                 return
             
-            # Verify password
-            if self.crypto.verify_password(
-                json.dumps(self.key_manager.address_db),  # Simplified verification
-                password
-            ):
+            # Verify password against current session password
+            if password == self.current_password:
                 # Success - reveal mnemonic
                 mnemonic = self.key_manager.address_db["mnemonics"][account_name]
                 
@@ -764,7 +1126,7 @@ class KeyManagerGUI:
         
     def copy_mnemonic_to_clipboard(self, account_name):
         """Copy mnemonic to clipboard."""
-        if account_name in self.key_manager.address_db["mnemonics"]:
+        if account_name in self.key_manager.address_db.get("mnemonics", {}):
             mnemonic = self.key_manager.address_db["mnemonics"][account_name]
             try:
                 pyperclip.copy(mnemonic)
@@ -778,6 +1140,13 @@ class KeyManagerGUI:
         self.current_password = None
         self.session_start_time = None
         self.revealed_mnemonics.clear()
+        
+        # End session file
+        if self.key_manager:
+            self.key_manager.end_session()
+        
+        # Dismiss any notification
+        self._dismiss_notification()
         
         # Return to login screen
         self.create_login_screen()
