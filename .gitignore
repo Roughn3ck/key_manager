@@ -1,80 +1,13 @@
-# Virtual environment
-Include/
-Lib/
-Scripts/
-pyvenv.cfg
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-wheels/
-share/python-wheels/
-*.egg-info/
-.installed.cfg
-*.egg
-MANIFEST
-
-# Database files
-*.db
-*.sqlite
-*.sqlite3
-
-# Encryption keys and sensitive data
+# Sensitive data
+address_database.json
+*.enc
 *.key
-*.pem
-*.cert
-*.crt
-secrets.json
-config.json
-.env
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-
-# IDE files
-.vscode/
-.vscode/*
-!.vscode/settings.json
-!.vscode/tasks.json
-!.vscode/launch.json
-!.vscode/extensions.json
-.idea/
-*.swp
-*.swo
-
-# OS files
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
-
-# Logs
-*.log
-logs/
-
-# PyInstaller
-*.spec
-
-# Compiled Python files
+backups/
+USB_DEPLOYMENT/*.exe
+dist/
+build/
+__pycache__/
 *.pyc
-.obsidian/app.json
-.obsidian/appearance.json
-.obsidian/core-plugins.json
-.obsidian/workspace.json
-Screenshot 2026-03-16 044117.png
+gui_err.log
+gui_run.log
+dashboard_test.log

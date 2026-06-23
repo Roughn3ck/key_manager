@@ -1,0 +1,163 @@
+Error loading data: Decryption failed: 
+Error loading data: Decryption failed: 
+Error loading data: Decryption failed: 
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
+Exception in Tkinter callback
+Traceback (most recent call last):
+  File "tkinter\__init__.py", line 2088, in __call__
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 248, in _mouse_wheel_all
+    if self.check_if_master_is_canvas(event.widget):
+       ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^
+  File "customtkinter\windows\widgets\ctk_scrollable_frame.py", line 280, in check_if_master_is_canvas
+    elif widget.master is not None:
+         ^^^^^^^^^^^^^
+AttributeError: 'str' object has no attribute 'master'
