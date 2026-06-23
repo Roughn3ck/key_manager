@@ -1,23 +1,49 @@
 # Key Manager — Status Report
 
 **Project Location:** `B:\Github\key_manager\`
-**Last Updated:** 2026-06-18
+**Last Updated:** 2026-06-19
 **Assigned Agent:** Cline
+**Current Version:** v2 (GUI Add Address/Mnemonic feature)
+
+## Versioning
+
+Key Manager uses semantic versioning for releases. The current production version is **v2**, which introduces the ability to add new addresses, mnemonics, and accounts from the GUI.
+
+| Version | Description | Key Files |
+|---------|-------------|-----------|
+| v1 | Original GUI — display-only (addresses, mnemonics, private keys) | `src/gui_main.py`, `build_gui.py` |
+| v2 | GUI Add functionality — create accounts, add addresses, add mnemonics via dialogs | `src/gui_main_v2.py`, `build_gui_v2.py` |
+
+### Versioning Rules
+
+1. **New versions** introduce a `_v<N>` suffix to all new/modified working files (e.g., `gui_main_v2.py`, `build_gui_v2.py`).
+2. **v1 files are preserved** — the originals (`gui_main.py`, `build_gui.py`) remain untouched as the v1 baseline.
+3. **Core v1 files are backed up** in the `backups/` directory with a `_v1` suffix (e.g., `build_gui_v1.py`, `gui_main_v1.py`). This allows restoration of v1 if required.
+4. **Shared infrastructure** (`crypto_engine.py`, `backup_engine.py`, `main.py`) is extended in a backward-compatible manner — v1 and v2 both use the same crypto and KeyManager core.
+5. **EXE outputs** in `USB_DEPLOYMENT/` are overwritten with the latest version build. The previous EXE is backed up to `backups/` before overwrite.
+6. **Documentation** (`.clinerules`, `README.md`, `STATUS.md`) is updated with each version release to reflect the current state.
 
 ## Architecture
 
 ```
 key_manager/
 ├── src/
-│   ├── gui_main.py      — CustomTkinter dark GUI (login, dashboard, vault)
-│   ├── crypto_engine.py — AES-256-GCM + Argon2id key derivation
-│   ├── backup_engine.py — Auto timestamped encrypted backups
-│   └── main.py          — CLI interface + KeyManager class
-├── build_gui.py         — PyInstaller build script
-├── init_vault.py        — First-time vault setup
-├── USB_DEPLOYMENT/      — Compiled EXEs for portable USB use
-│   ├── key_manager.exe       — CLI version
-│   └── key_manager_gui.exe   — GUI version ✅ WORKING
+│   ├── gui_main.py        — v1 GUI: CustomTkinter dark GUI (display-only)
+│   ├── gui_main_v2.py     — v2 GUI: Adds account/address/mnemonic creation dialogs
+│   ├── crypto_engine.py   — AES-256-GCM + Argon2id key derivation (shared)
+│   ├── backup_engine.py   — Auto timestamped encrypted backups (shared)
+│   └── main.py            — CLI interface + KeyManager class (shared)
+├── build_gui.py           — v1 PyInstaller build script
+├── build_gui_v2.py        — v2 PyInstaller build script (builds gui_main_v2)
+├── backups/               — v1 backup files (restore point)
+│   ├── gui_main_v1.py         — Copy of v1 GUI source
+│   ├── build_gui_v1.py        — Copy of v1 build script
+│   ├── README_v1.md           — Copy of v1 README
+│   └── STATUS_v1.md           — Copy of v1 STATUS
+├── init_vault.py          — First-time vault setup
+├── USB_DEPLOYMENT/        — Compiled EXEs for portable USB use
+│   ├── key_manager.exe         — CLI version
+│   └── key_manager_gui.exe     — GUI version (v2 build)
 └── README.md
 ```
 
@@ -36,10 +62,12 @@ key_manager/
 |-----------|--------|-------|
 | Crypto Engine | ✅ Working | AES-256-GCM + Argon2id, solid implementation |
 | CLI (key_manager.exe) | ✅ Working | Full CLI functionality |
-| GUI Source Code | ✅ Working | CustomTkinter dark theme, dashboard layout |
-| GUI EXE (key_manager_gui.exe) | ✅ Working | Rebuilt June 2026, all login crash bugs fixed |
+| GUI v1 Source (gui_main.py) | ✅ Working | CustomTkinter dark theme, display-only |
+| GUI v2 Source (gui_main_v2.py) | ✅ Working | v2: Adds account/address/mnemonic creation dialogs |
+| GUI EXE (key_manager_gui.exe) | ✅ Working | v2 build — rebuild via `python build_gui_v2.py` |
 | Backup Engine | ✅ Working | Timestamped encrypted backups |
 | Vault Init | ✅ Working | Creates encrypted vault on first run |
+| v1 Backups (backups/) | ✅ Complete | All v1 core files preserved with `_v1` suffix |
 
 ## GUI Fix History (June 2026)
 
@@ -83,6 +111,26 @@ The vault currently holds data for the LP Sentinel project:
 - Pool positions, wallet addresses, chain data
 - All encrypted with AES-256-GCM
 
+## v2 Release Notes (June 19, 2026)
+
+### New Features
+1. **Add Account** — Create a new account, optionally assigned to a pool, directly from the GUI left panel.
+2. **Add Address** — Add a new wallet address (coin, chain, address, notes) to any existing account via a modal dialog.
+3. **Add Mnemonic** — Add or update a 24-word recovery phrase for any account, encrypted and stored in the vault.
+4. **Left panel refresh** — Account list dynamically rebuilds after add operations, showing live address counts.
+5. **Toast notifications** — Visual feedback overlay for all add operations (success/error).
+
+### Files Changed in v2
+- `src/gui_main_v2.py` — New file (v2 GUI with add dialogs + `refresh_left_panel`)
+- `build_gui_v2.py` — New file (PyInstaller build script targeting `gui_main_v2.py`)
+- `src/main.py` — `add_address()` signature extended with optional `notes` parameter (backward compatible)
+
+### Files Backed Up to `backups/` (v1 restore point)
+- `backups/gui_main_v1.py` — Copy of `src/gui_main.py`
+- `backups/build_gui_v1.py` — Copy of `build_gui.py`
+- `backups/README_v1.md` — Copy of `README.md`
+- `backups/STATUS_v1.md` — Copy of `STATUS.md`
+
 ## Future Integration Path
 
 ### Phase 1: Get GUI Working ✅ COMPLETE
@@ -90,6 +138,13 @@ The vault currently holds data for the LP Sentinel project:
 - [x] Test on Windows 11
 - [x] Verify vault load/save works
 - [x] Copy to BitLocker-encrypted USB
+
+### Phase 1.5: v2 — GUI Add Functionality ✅ COMPLETE
+- [x] Back up v1 core files to `backups/` with `_v1` suffix
+- [x] Create `src/gui_main_v2.py` with Add Account / Address / Mnemonic dialogs
+- [x] Create `build_gui_v2.py` for v2 EXE build
+- [x] Update docs (`.clinerules`, `README.md`, `STATUS.md`) with versioning rules
+- [x] Build & test v2 in script mode
 
 ### Phase 2: OpenClaw Integration
 - [ ] Create API wrapper (Flask/FastAPI) for programmatic access
@@ -113,4 +168,4 @@ The vault currently holds data for the LP Sentinel project:
 
 ---
 
-*Status report updated June 18, 2026. GUI is fully functional in both script and EXE modes.*
+*Status report updated June 19, 2026. v2 released — GUI now supports adding accounts, addresses, and mnemonics. v1 backed up to `backups/`.*

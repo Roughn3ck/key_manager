@@ -177,14 +177,38 @@ class KeyManager:
             self.address_db["pools"][pool].setdefault("accounts", []).append(account_name)
         return True
     
-    def add_private_key(self, account_name: str, private_key: str, password: str) -> bool:
-        """Add or update a private key for an account."""
-        self.address_db.setdefault("private_keys", {})[account_name] = private_key
+    def add_private_key(self, account_name: str, private_key: str, password: str,
+                        chain: str = "") -> bool:
+        """Add a chain-specific private key to an account.
+
+        Stores keys as a list of {chain, key} dicts per account, supporting
+        multiple chain-specific keys. Backward-compatible: if existing data
+        is a plain string, it is migrated to a list on first append.
+        """
+        pk_store = self.address_db.setdefault("private_keys", {})
+        existing = pk_store.get(account_name)
+
+        # Migrate legacy single-string format to list format
+        if existing is None:
+            pk_store[account_name] = []
+        elif isinstance(existing, str):
+            pk_store[account_name] = [{"chain": "", "key": existing}]
+
+        pk_store[account_name].append({"chain": chain, "key": private_key})
         return self.save_encrypted_data(password)
-    
-    def show_private_key(self, account_name: str) -> Optional[str]:
-        """Get private key for an account, or None if not found."""
-        return self.address_db.get("private_keys", {}).get(account_name)
+
+    def show_private_key(self, account_name: str) -> List[Dict[str, str]]:
+        """Get private keys for an account, or empty list if not found.
+
+        Returns a list of {chain, key} dicts. Backward-compatible: if legacy
+        single-string format is found, returns it as a single-item list.
+        """
+        existing = self.address_db.get("private_keys", {}).get(account_name)
+        if existing is None:
+            return []
+        if isinstance(existing, str):
+            return [{"chain": "", "key": existing}]
+        return existing
     
     def change_password(self, old_password: str, new_password: str) -> bool:
         """Change the vault password by re-encrypting with new password."""
@@ -203,7 +227,7 @@ class KeyManager:
         except Exception:
             return False
     
-    def add_address(self, account: str, coin: str, chain: str, address: str, 
+    def add_address(self, account: str, coin: str, chain: str, address: str,
                     password: str, notes: str = "") -> bool:
         """Add an address to an account."""
         if account not in self.address_db["accounts"]:
@@ -222,6 +246,26 @@ class KeyManager:
         
         self.address_db["accounts"][account]["addresses"].append(addr_entry)
         return self.save_encrypted_data(password)
+
+    def delete_address(self, account: str, index: int, password: str) -> bool:
+        """Delete an address at the given 0-based index from an account.
+
+        Args:
+            account: Account name.
+            index: 0-based index into the account's addresses list.
+            password: Vault password for re-encryption.
+
+        Returns:
+            True if the address was found and deleted, False otherwise.
+        """
+        accounts = self.address_db.get("accounts", {})
+        if account not in accounts:
+            return False
+        addresses = accounts[account].get("addresses", [])
+        if 0 <= index < len(addresses):
+            addresses.pop(index)
+            return self.save_encrypted_data(password)
+        return False
     
     def import_csv(self, csv_path: str, password: str) -> tuple:
         """Import addresses from a CSV file.
@@ -495,6 +539,28 @@ def add_address(ctx, account: str, coin: str, chain: str, address: str, notes: s
 
 @cli.command()
 @click.argument('account')
+@click.argument('index', type=int)
+@click.pass_context
+def delete_address(ctx, account: str, index: int):
+    """Delete an address from an account by its 0-based index.
+
+    Use 'addresses <account>' to see the index of each address.
+    """
+    manager, password = get_manager_with_session(ctx)
+
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
+        sys.exit(1)
+
+    if manager.delete_address(account, index, password):
+        console.print(f"[green]✓ Address {index} deleted from {account}[/green]")
+    else:
+        console.print("[red]Failed to delete address. Check account name and index.[/red]")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('account')
 @click.argument('mnemonic', nargs=-1)
 @click.pass_context
 def add_mnemonic(ctx, account: str, mnemonic: tuple):
@@ -571,17 +637,19 @@ def show_mnemonic(ctx, account: str):
 @cli.command()
 @click.argument('account')
 @click.argument('private_key')
+@click.option('--chain', default='', help='Chain label for this key (e.g. DASH, BTC, EVM). Leave empty for no chain.')
 @click.pass_context
-def add_key(ctx, account: str, private_key: str):
-    """Add or update a private key for an account."""
+def add_key(ctx, account: str, private_key: str, chain: str):
+    """Add a chain-specific private key to an account. Multiple keys per account are supported."""
     manager, password = get_manager_with_session(ctx)
     
     if not password:
         console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
         sys.exit(1)
     
-    if manager.add_private_key(account, private_key, password):
-        console.print(f"[green]✓ Private key added for {account}[/green]")
+    if manager.add_private_key(account, private_key, password, chain):
+        chain_label = f" [{chain}]" if chain else ""
+        console.print(f"[green]✓ Private key{chain_label} added for {account}[/green]")
     else:
         console.print("[red]Failed to add private key[/red]")
 
@@ -590,28 +658,39 @@ def add_key(ctx, account: str, private_key: str):
 @click.argument('account')
 @click.pass_context
 def show_key(ctx, account: str):
-    """Show the private key for an account. Requires password re-entry for security."""
+    """Show all private keys for an account. Requires password re-entry for security."""
     manager, password = get_manager_with_session(ctx)
     
     if not password:
         console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
         sys.exit(1)
     
-    key = manager.show_private_key(account)
-    if key is None:
+    keys = manager.show_private_key(account)
+    if not keys:
         console.print(f"[red]No private key found for account '{account}'[/red]")
         sys.exit(1)
     
     # Re-verify password for sensitive operation
-    verify = click.prompt("Re-enter password to view private key", hide_input=True)
+    verify = click.prompt("Re-enter password to view private keys", hide_input=True)
     if verify != password:
         console.print("[red]Password incorrect[/red]")
         sys.exit(1)
     
+    # Display each key with its chain label
+    lines = []
+    for entry in keys:
+        chain = entry.get("chain", "")
+        key_val = entry.get("key", "")
+        if chain:
+            lines.append(f"[cyan][{chain}][/cyan] Key: [green]{key_val}[/green]")
+        else:
+            lines.append(f"[cyan][No Chain Specified][/cyan] Key: [green]{key_val}[/green]")
+    
+    panel_content = "\n".join(lines)
     console.print(Panel(
-        f"[green]{key}[/green]",
-        title=f"Private Key for {account}",
-        subtitle="⚠ Never share this key with anyone"
+        panel_content,
+        title=f"Private Keys for {account}",
+        subtitle="⚠ Never share these keys with anyone"
     ))
 
 

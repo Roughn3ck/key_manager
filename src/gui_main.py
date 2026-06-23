@@ -21,6 +21,18 @@ if sys.platform == 'win32' and getattr(sys, 'frozen', False):
         ctypes.windll.kernel32.FreeConsole()
     except Exception:
         pass
+    # After FreeConsole(), the original stdout/stderr handles are invalid.
+    # Writing to them (print/traceback) raises OSError and crashes the app.
+    # Redirect to a log file next to the EXE so errors remain diagnosable,
+    # falling back to devnull if the log file cannot be opened.
+    try:
+        _log_path = os.path.join(os.path.dirname(sys.executable), 'gui_debug.log')
+        _log_file = open(_log_path, 'a', encoding='utf-8', errors='replace')
+        sys.stdout = _log_file
+        sys.stderr = _log_file
+    except Exception:
+        sys.stdout = open(os.devnull, 'w', encoding='utf-8', errors='replace')
+        sys.stderr = open(os.devnull, 'w', encoding='utf-8', errors='replace')
 
 import tkinter as tk
 import customtkinter as ctk

@@ -5,18 +5,44 @@ Key Manager is a secure cryptocurrency key storage application with CLI and GUI 
 It encrypts wallet data (24-word mnemonics, addresses, account info) using AES-256-GCM with Argon2id key derivation.
 Designed for portable USB deployment alongside a local CLI workflow.
 
+**Current production version: v2** (June 2026) — adds GUI-based account/address/mnemonic creation.
+
+## Versioning
+
+Key Manager uses semantic versioning for releases. v1 is the original display-only GUI; v2 adds creation dialogs.
+
+| Version | Description | Key Files |
+|---------|-------------|-----------|
+| v1 | Original GUI — display-only | `src/gui_main.py`, `build_gui.py` |
+| v2 | GUI Add functionality — create accounts, add addresses, add mnemonics | `src/gui_main_v2.py`, `build_gui_v2.py` |
+
+### Versioning Rules (MUST follow for all future versions)
+1. New versions introduce a `_v<N>` suffix on all new/modified working files (e.g., `gui_main_v2.py`, `build_gui_v2.py`).
+2. Previous-version files are preserved untouched as the baseline — never edit `gui_main.py` or `build_gui.py` (these are v1).
+3. Core files of the previous version are backed up in the `backups/` directory with a `_v1` suffix (e.g., `backups/gui_main_v1.py`, `backups/build_gui_v1.py`, `backups/README_v1.md`, `backups/STATUS_v1.md`). This enables restoration.
+4. Shared infrastructure (`crypto_engine.py`, `backup_engine.py`, `main.py`) is extended backward-compatibly — both v1 and v2 use the same crypto/KeyManager core.
+5. EXE outputs in `USB_DEPLOYMENT/` are overwritten with the latest version build. The previous EXE is backed up to `backups/` before overwrite.
+6. Documentation (`.clinerules`, `README.md`, `STATUS.md`) is updated with each version release.
+
 ## Project Structure
 ```
 key_manager/
 ├── src/
-│   ├── main.py           # CLI interface (Click-based) + KeyManager class
-│   ├── gui_main.py       # CustomTkinter GUI - dark theme dashboard
-│   ├── crypto_engine.py  # AES-256-GCM encryption + Argon2id KDF
-│   └── backup_engine.py  # Vault backup/restore engine
+│   ├── main.py            # CLI interface (Click-based) + KeyManager class (shared)
+│   ├── gui_main.py        # v1 GUI - CustomTkinter dark theme dashboard (display-only baseline)
+│   ├── gui_main_v2.py     # v2 GUI - Adds account/address/mnemonic creation dialogs
+│   ├── crypto_engine.py   # AES-256-GCM encryption + Argon2id KDF (shared)
+│   └── backup_engine.py   # Vault backup/restore engine (shared)
+├── backups/               # v1 backup files (restore point) with _v1 suffix
+│   ├── gui_main_v1.py         # Copy of v1 GUI source
+│   ├── build_gui_v1.py        # Copy of v1 build script
+│   ├── README_v1.md           # Copy of v1 README
+│   └── STATUS_v1.md           # Copy of v1 STATUS
 ├── USB_DEPLOYMENT/        # Pre-built portable EXEs for USB drives
 │   ├── key_manager.exe       # CLI version (working)
-│   └── key_manager_gui.exe   # GUI version (working, rebuilt June 2026)
-├── build_gui.py           # PyInstaller build script for GUI EXE
+│   └── key_manager_gui.exe   # GUI version (v2 build, rebuilt June 2026)
+├── build_gui.py           # v1 PyInstaller build script (legacy)
+├── build_gui_v2.py        # v2 PyInstaller build script (builds gui_main_v2)
 ├── init_vault.py          # Vault initialization helper
 ├── check_vault.py         # Vault diagnostic script
 ├── show_vault.py          # Vault content viewer
@@ -49,13 +75,29 @@ key_manager/
 
 ### Dual Interface Pattern
 - CLI: `src/main.py` uses Click commands + Rich for output
-- GUI: `src/gui_main.py` uses CustomTkinter with dark theme
-- Both share `KeyManager` class and `CryptoEngine`
+- GUI v1: `src/gui_main.py` uses CustomTkinter with dark theme (display-only)
+- GUI v2: `src/gui_main_v2.py` extends v1 with Add Account / Add Address / Add Mnemonic dialogs + toast notifications + `refresh_left_panel()`
+- Both GUI versions and CLI share `KeyManager` class and `CryptoEngine`
+
+### v2 GUI Add Functionality (June 2026)
+v2 introduces modal dialogs accessible from the dashboard:
+1. **Add Account** — creates a new account (optionally assigned to a pool), saves to vault, refreshes left panel.
+2. **Add Address** — adds `{coin, chain, address, notes}` to the selected account via `key_manager.add_address()` (which now accepts an optional `notes` parameter — backward compatible).
+3. **Add Mnemonic** — stores/updates a 24-word recovery phrase for the selected account via `key_manager.add_mnemonic()`.
+4. **Add Private Key** (v2.2) — adds a chain-specific private key to an account via `key_manager.add_private_key(account, key, password, chain)`. Supports multiple keys per account with chain labels (BTC, EVM, DASH, etc., plus "Blank/None" and "Custom...").
+All add operations re-encrypt and save the vault, then call `refresh_left_panel()` to update the account list. Toast notifications provide visual feedback.
+
+### v2.2 Multi-Key & Mnemonic Fix (June 2026)
+- **Private Keys schema upgrade**: `private_keys` changed from `{account: "key_string"}` to `{account: [{chain: "DASH", key: "Xv3..."}, ...]}`. Backward-compatible: legacy string format auto-migrates to list on first append.
+- **Private Keys display**: The detail panel now shows all stored private keys sequentially with chain labels: `[Chain Name] Key: [key]` or `[No Chain Specified] Key: [key]`.
+- **Mnemonic section independence**: The Recovery Phrase section is now always shown (even when an account has no addresses). If no mnemonic is stored, displays "No mnemonic stored for this account."
+- **CLI `add-key`**: Now accepts `--chain` option for chain-specific key labels.
+- **CLI `show-key`**: Lists all stored private keys with chain labels.
 
 ### Portable vs Local Paths
 - **Frozen (EXE)**: `base_dir = os.path.dirname(sys.executable)` → vault in `<exe_dir>/.key_manager/`
 - **Script**: `base_dir = project_root` → vault in `~/.key_manager/` (default) or custom `data_dir`
-- `PortableKeyManager` in `gui_main.py` overrides the data directory for portability
+- `PortableKeyManager` in `gui_main.py` / `gui_main_v2.py` overrides the data directory for portability
 
 ## Critical Code Areas & Known Patterns
 
@@ -71,10 +113,10 @@ The GUI was crashing on login in both script and EXE modes. Three bugs were iden
 **Key lesson:** Always guard `self.*` widget references with `hasattr()` checks in any callback that might fire before or after the widget lifecycle. Widget creation order matters — do not start timers or callbacks until all referenced widgets exist.
 
 ### Remaining GUI Issues (from earlier review, verify current state)
-1. **Hardcoded accounts**: Left panel may still use hardcoded pool/account dicts instead of loading from `self.key_manager.address_db["pools"]`. Verify before extending.
+1. **Hardcoded accounts**: Left panel may still use hardcoded pool/account dicts instead of loading from `self.key_manager.address_db["pools"]`. v2's `refresh_left_panel()` loads live data from `address_db`. Verify v1 before extending v1.
 2. **Mnemonic reveal**: `verify_password()` was called with `json.dumps(self.key_manager.address_db)` (decrypted data) but expects the encrypted JSON string. May still fail. Verify before using reveal feature.
 3. **Fragile PortableKeyManager proxy**: `__dict__.update()` + `__getattr__` pattern can break when `KeyManager` sets attributes after `__init__`. Be cautious when adding new KeyManager attributes.
-4. **No visual notifications**: `show_notification()` only prints to console; no toast/popup feedback.
+4. **No visual notifications**: `show_notification()` only prints to console; no toast/popup feedback. **v2** adds a `show_toast()` overlay method for visual feedback on add operations.
 
 ### Import Path Handling
 - `sys.path.insert(0, ...)` is used in multiple files to enable `from crypto_engine import ...`
@@ -94,15 +136,18 @@ PyInstaller      # Build tool for EXE creation
 ```
 
 ## Build & Deploy
-- GUI EXE: `python build_gui.py` → `dist/key_manager_gui.exe` → copied to `USB_DEPLOYMENT/`
+- **v2 GUI EXE (current):** `python build_gui_v2.py` → `dist/key_manager_gui.exe` → copied to `USB_DEPLOYMENT/`
+- **v1 GUI EXE (legacy):** `python build_gui.py` → only use to restore v1 baseline
 - CLI EXE: PyInstaller with `src/main.py` as entry
 - Output goes to `USB_DEPLOYMENT/` for USB drive deployment
 - Build with `--onefile --windowed` for GUI, `--onefile` for CLI
 - Resulting GUI EXE should be ~50-100MB (Python runtime + all deps bundled)
+- Before overwriting `USB_DEPLOYMENT/key_manager_gui.exe`, back up the previous EXE to `backups/`
 
 ## Running
-- **Script mode (development):** `python src/gui_main.py` — now works correctly
-- **EXE mode (portable):** `USB_DEPLOYMENT\key_manager_gui.exe` — now works correctly
+- **v2 Script mode (development, current):** `python src/gui_main_v2.py` — full add functionality
+- **v1 Script mode (legacy):** `python src/gui_main.py` — display-only
+- **EXE mode (portable):** `USB_DEPLOYMENT\key_manager_gui.exe` — v2 build
 - **CLI:** `python src/main.py` or `USB_DEPLOYMENT\key_manager.exe`
 
 ## Testing
@@ -132,3 +177,6 @@ PyInstaller      # Build tool for EXE creation
 - No password storage — password is held in memory only during active session
 - On lock/session expiry: clear `current_password`, `revealed_mnemonics`, and `address_db` references
 - Never call `FreeConsole()` in script mode — only when frozen (EXE)
+
+## System Directive
+System Directive: DO NOT output raw JSON blocks for tool usage (such as {"name": "write_to_file"}). You MUST strictly use Anthropic-style XML tags to invoke system tools. Do not deviate from the requested structural wrappers.
