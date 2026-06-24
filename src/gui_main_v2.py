@@ -1524,13 +1524,17 @@ class KeyManagerGUI:
         name_entry.pack(fill="x", pady=(0, 10))
         name_entry.focus_set()
 
-        # Pool dropdown (optional)
+        # Pool field — a ttk.Combobox that shows existing pools but also
+        # allows the user to type a new pool name (auto-created on save).
         pools = list(self.key_manager.address_db.get("pools", {}).keys())
-        pool_options = ["(Unassigned)"] + pools
-        ctk.CTkLabel(form, text="Pool (optional):").pack(anchor="w")
-        pool_var = ctk.StringVar(value=pool_options[0])
-        pool_menu = ctk.CTkOptionMenu(form, variable=pool_var, values=pool_options, width=300)
-        pool_menu.pack(fill="x", pady=(0, 10))
+        self._style_combobox()
+        import tkinter.ttk as ttk
+        pool_values = ["(Unassigned)"] + pools
+        ctk.CTkLabel(form, text="Pool (optional — type to create a new pool):").pack(anchor="w")
+        pool_var = ctk.StringVar(value="(Unassigned)")
+        pool_combo = ttk.Combobox(form, textvariable=pool_var, values=pool_values,
+                                  width=40, style="Dark.TCombobox")
+        pool_combo.pack(fill="x", pady=(0, 10))
 
         status_label = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(size=11))
         status_label.pack()
@@ -1540,8 +1544,8 @@ class KeyManagerGUI:
             if not name:
                 status_label.configure(text="Account name required", text_color="red")
                 return
-            pool = pool_var.get()
-            pool = None if pool == "(Unassigned)" else pool
+            pool = pool_var.get().strip()
+            pool = None if pool == "(Unassigned)" or pool == "" else pool
             try:
                 if self.key_manager.add_account(name, pool):
                     self.key_manager.save_encrypted_data(self.current_password)

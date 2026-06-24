@@ -155,12 +155,39 @@ class KeyManager:
         """Get mnemonic for an account, or None if not found."""
         return self.address_db.get("mnemonics", {}).get(account_name)
     
+    def add_pool(self, pool_name: str, description: str = "") -> bool:
+        """Create a new pool if it doesn't already exist.
+
+        Args:
+            pool_name: Name of the pool to create.
+            description: Optional description for the pool.
+
+        Returns:
+            True if the pool was created, False if it already exists.
+        """
+        if pool_name in self.address_db.get("pools", {}):
+            return False
+        self.address_db.setdefault("pools", {})[pool_name] = {
+            "description": description,
+            "accounts": []
+        }
+        return True
+
     def add_account(self, account_name: str, pool: Optional[str] = None) -> bool:
-        """Create a new account entry, optionally in a pool."""
+        """Create a new account entry, optionally in a pool.
+
+        If the pool doesn't exist yet, it is created automatically.
+        """
         if account_name in self.address_db.get("accounts", {}):
             return False
         self.address_db.setdefault("accounts", {})[account_name] = {"addresses": [], "notes": ""}
-        if pool and pool in self.address_db.get("pools", {}):
+        if pool:
+            # Auto-create the pool if it doesn't exist
+            if pool not in self.address_db.get("pools", {}):
+                self.address_db.setdefault("pools", {})[pool] = {
+                    "description": "",
+                    "accounts": []
+                }
             self.address_db["pools"][pool].setdefault("accounts", []).append(account_name)
         return True
     
