@@ -49,7 +49,9 @@ import queue
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from crypto_engine import CryptoEngine
-from backup_engine import BackupEngine
+# BackupEngine import removed — backups are deprecated; users copy
+# key_vault.encrypted manually.  The BackupEngine created an unwanted
+# "backups" subfolder on every login.
 
 # Determine if we're running from EXE or script
 if getattr(sys, 'frozen', False):
@@ -193,6 +195,13 @@ class PortableKeyManager:
         """Get mnemonic for an account."""
         return self.address_db.get("mnemonics", {}).get(account_name)
 
+    def initialize_vault(self, password: str) -> bool:
+        """Initialize a new encrypted vault (delegate to underlying KeyManager)."""
+        self._manager.address_db = self.address_db
+        result = self._manager.initialize_vault(password)
+        self.address_db = self._manager.address_db
+        return result
+
     def change_password(self, old_password: str, new_password: str) -> bool:
         """Change the vault password."""
         result = self._manager.change_password(old_password, new_password)
@@ -204,6 +213,13 @@ class PortableKeyManager:
         """Delegate to underlying KeyManager (handles CSV and Excel)."""
         self._manager.address_db = self.address_db
         result = self._manager.import_file(file_path, password)
+        self.address_db = self._manager.address_db
+        return result
+
+    def delete_account(self, account_name: str, password: str) -> bool:
+        """Delegate to underlying KeyManager (deletes account + all data)."""
+        self._manager.address_db = self.address_db
+        result = self._manager.delete_account(account_name, password)
         self.address_db = self._manager.address_db
         return result
 
@@ -227,7 +243,6 @@ class KeyManagerGUI:
 
         # Initialize components
         self.crypto = CryptoEngine()
-        self.backup_engine = None
         self.key_manager = None
 
         # Session management
@@ -396,9 +411,6 @@ class KeyManagerGUI:
                 # Create session file for CLI interoperability
                 self.key_manager.create_session(password)
 
-                # Initialize backup engine
-                self.backup_engine = BackupEngine(self.key_manager.data_dir)
-
                 # Update UI
                 self.login_status_label.configure(
                     text="\u2713 Vault unlocked successfully",
@@ -427,22 +439,18 @@ class KeyManagerGUI:
     def create_main_dashboard(self):
         """Create the main dashboard after successful login."""
         try:
-            # Clear login screen
+            # Clear login screen (destroys all root children including
+            # the notification label, so we must reset those references)
             for widget in self.root.winfo_children():
                 widget.destroy()
+            self._notification_label = None
+            self._notification_timer = None
 
             # Create main layout first (creates status bar with session_timer_label)
             self.create_main_layout()
 
             # Start session timer only after status bar exists
             self.start_session_timer()
-
-            # Now that status bar exists, update backup count
-            if self.backup_engine and hasattr(self, 'backup_status_label'):
-                backup_count = self.backup_engine.get_backup_count()
-                self.backup_status_label.configure(
-                    text=f"Backups: {backup_count}"
-                )
         except Exception as e:
             print(f"Dashboard creation error: {e}")
             import traceback
@@ -560,6 +568,19 @@ class KeyManagerGUI:
         )
         import_btn.pack(pady=2)
 
+        delete_account_btn = ctk.CTkButton(
+            action_frame,
+            text="\u2716 Delete Account",
+            command=self.show_delete_account_dialog,
+            width=220,
+            height=30,
+            corner_radius=10,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=("#dc3545", "#c82333"),
+            hover_color=("#c82333", "#a71d2a")
+        )
+        delete_account_btn.pack(pady=2)
+
     def create_right_panel(self, parent):
         """Create right panel with chain view and addresses."""
         right_panel = ctk.CTkFrame(parent, corner_radius=0)
@@ -592,14 +613,6 @@ class KeyManagerGUI:
             font=ctk.CTkFont(size=12)
         )
         self.session_timer_label.pack(side="left", padx=20)
-
-        # Backup status
-        self.backup_status_label = ctk.CTkLabel(
-            status_bar,
-            text="Backups: 0",
-            font=ctk.CTkFont(size=12)
-        )
-        self.backup_status_label.pack(side="left", padx=20)
 
         # Change password button
         chg_pw_btn = ctk.CTkButton(
@@ -1419,6 +1432,74 @@ class KeyManagerGUI:
         y = self.root.winfo_y() + (self.root.winfo_height() - dialog.winfo_height()) // 2
         dialog.geometry(f"+{x}+{y}")
 
+    def show_delete_account_dialog(self):
+        """Dialog to delete an account and all its data."""
+        if not self.current_password:
+            self.show_notification("Vault not unlocked", error=True)
+            return
+
+        account_names = self._get_all_account_names()
+        if not account_names:
+            self.show_notification("No accounts to delete", error=True)
+            return
+
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Delete Account")
+        dialog.geometry("420x280")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        self._center_dialog(dialog)
+
+        ctk.CTkLabel(dialog, text="Delete Account",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
+
+        form = ctk.CTkFrame(dialog, fg_color="transparent")
+        form.pack(pady=10, padx=20, fill="x")
+
+        ctk.CTkLabel(form, text="Select Account:").pack(anchor="w")
+        default_account = self.current_account if self.current_account else account_names[0]
+        acct_var = ctk.StringVar(value=default_account)
+        acct_menu = ctk.CTkOptionMenu(form, variable=acct_var, values=account_names, width=300)
+        acct_menu.pack(fill="x", pady=(0, 10))
+
+        ctk.CTkLabel(form,
+                     text="\u26A0 This will permanently delete the account and ALL its\n"
+                          "addresses, mnemonic, and private keys. This cannot be undone.",
+                     font=ctk.CTkFont(size=10), text_color="orange").pack(anchor="w")
+
+        status_label = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(size=11))
+        status_label.pack()
+
+        def do_delete():
+            account = acct_var.get().strip()
+            if not account:
+                status_label.configure(text="Select an account to delete", text_color="red")
+                return
+            try:
+                if self.key_manager.delete_account(account, self.current_password):
+                    self.show_notification(f"Account '{account}' deleted")
+                    dialog.destroy()
+                    # Clear current account if it was the one deleted
+                    if self.current_account == account:
+                        self.current_account = None
+                        self.current_pool = None
+                        self.right_panel_title.configure(
+                            text="Select an account to view addresses"
+                        )
+                        self.show_placeholder_view()
+                    self.refresh_left_panel()
+                else:
+                    status_label.configure(text="Failed to delete account", text_color="red")
+            except Exception as e:
+                status_label.configure(text=f"Error: {e}", text_color="red")
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=15)
+        ctk.CTkButton(btn_frame, text="Delete", command=do_delete, width=100,
+                      fg_color=("#dc3545", "#c82333")).pack(side="left", padx=10)
+        ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy, width=100,
+                      fg_color="gray30").pack(side="left", padx=10)
+
     def show_add_account_dialog(self):
         """Dialog to create a new account, optionally in a pool."""
         if not self.current_password:
@@ -1846,7 +1927,6 @@ class KeyManagerGUI:
                 if self.key_manager.initialize_vault(pw):
                     self.current_password = pw
                     self.key_manager.create_session(pw)
-                    self.backup_engine = BackupEngine(self.key_manager.data_dir)
                     self.show_notification("Vault initialized successfully")
                     dialog.destroy()
                     self.root.after(500, self.create_main_dashboard)

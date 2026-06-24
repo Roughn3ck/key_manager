@@ -55,29 +55,16 @@ class KeyManager:
         self.data_file = self.data_dir / DATA_FILE
         self.session_file = self.data_dir / SESSION_FILE
         
-        # Default address database structure
+        # Start with an empty vault — the user creates pools and accounts
+        # as needed.  Previously this was pre-populated with development
+        # pools/accounts (Genesis, SafetyNet, etc.) which were specific to
+        # the original developer and not appropriate for a general release.
         self.address_db = {
             "version": "1.0",
-            "pools": {
-                "Genesis": {
-                    "description": "Genesis pool",
-                    "accounts": ["GSS", "Expenses", "G1", "G2", "G3", "G4", "G5", "G6"]
-                },
-                "SafetyNet": {
-                    "description": "SafetyNet pool",
-                    "accounts": ["N1", "N2", "N3", "N4", "N5"]
-                },
-                "Foundation": {
-                    "description": "Foundation pool",
-                    "accounts": ["F1", "F2", "F3", "F4", "F5"]
-                },
-                "Seed": {
-                    "description": "Seed pool",
-                    "accounts": ["S1", "S2", "S3", "S4", "S5"]
-                }
-            },
+            "pools": {},
             "accounts": {},
-            "mnemonics": {}
+            "mnemonics": {},
+            "private_keys": {}
         }
     
     def load_encrypted_data(self, password: str) -> bool:
@@ -247,6 +234,38 @@ class KeyManager:
         self.address_db["accounts"][account]["addresses"].append(addr_entry)
         return self.save_encrypted_data(password)
 
+    def delete_account(self, account_name: str, password: str) -> bool:
+        """Delete an account and all its data (addresses, mnemonic, private keys).
+
+        Also removes the account from any pool it belongs to.
+
+        Args:
+            account_name: Name of the account to delete.
+            password: Vault password for re-encryption.
+
+        Returns:
+            True if the account was found and deleted, False otherwise.
+        """
+        accounts = self.address_db.get("accounts", {})
+        if account_name not in accounts:
+            return False
+
+        # Remove the account entry
+        del accounts[account_name]
+
+        # Remove from any pool
+        for pool_data in self.address_db.get("pools", {}).values():
+            if account_name in pool_data.get("accounts", []):
+                pool_data["accounts"].remove(account_name)
+
+        # Remove mnemonic if present
+        self.address_db.get("mnemonics", {}).pop(account_name, None)
+
+        # Remove private keys if present
+        self.address_db.get("private_keys", {}).pop(account_name, None)
+
+        return self.save_encrypted_data(password)
+
     def delete_address(self, account: str, index: int, password: str) -> bool:
         """Delete an address at the given 0-based index from an account.
 
@@ -278,15 +297,24 @@ class KeyManager:
         errors = []
         
         try:
-            with open(csv_path, 'r', newline='', encoding='utf-8') as f:
+            # Use utf-8-sig to strip any BOM (byte order mark) that Excel
+            # adds when saving CSV files on Windows.  Without this the first
+            # column header becomes '\ufeffAccount' instead of 'Account',
+            # causing every row to be skipped.
+            with open(csv_path, 'r', newline='', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
                 for row_num, row in enumerate(reader, start=2):
                     try:
-                        account = row.get('Account', '').strip()
-                        coin = row.get('Coin', '').strip()
-                        chain = row.get('Chain', '').strip()
-                        address = row.get('Address', '').strip()
-                        notes = row.get('Notes', '').strip()
+                        # Normalise header keys to strip whitespace/BOM remnants
+                        normalised_row = {}
+                        for k, v in row.items():
+                            if k is not None:
+                                normalised_row[k.strip()] = v
+                        account = normalised_row.get('Account', '').strip()
+                        coin = normalised_row.get('Coin', '').strip()
+                        chain = normalised_row.get('Chain', '').strip()
+                        address = normalised_row.get('Address', '').strip()
+                        notes = normalised_row.get('Notes', '').strip()
                         
                         if not account:
                             skipped += 1
