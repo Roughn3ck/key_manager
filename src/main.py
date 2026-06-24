@@ -334,6 +334,128 @@ class KeyManager:
         except Exception as e:
             return (0, 0, [f"Error reading CSV: {str(e)}"])
     
+    def import_file(self, file_path: str, password: str) -> tuple:
+        """Import addresses from a CSV or Excel (.xlsx/.xls) file.
+
+        Detects file type by extension and delegates to the appropriate
+        parser.  Both formats require columns: Account, Address.
+        Optional columns: Coin, Chain, Notes.
+
+        Args:
+            file_path: Path to the CSV or Excel file.
+            password: Vault password for re-encryption.
+
+        Returns:
+            Tuple of (added_count, skipped_count, error_messages)
+        """
+        ext = os.path.splitext(file_path)[1].lower()
+        if ext == '.csv':
+            return self.import_csv(file_path, password)
+        elif ext in ('.xlsx', '.xls'):
+            return self.import_excel(file_path, password)
+        else:
+            return (0, 0, [f"Unsupported file type: {ext} (use .csv, .xlsx, or .xls)"])
+
+    def import_excel(self, excel_path: str, password: str) -> tuple:
+        """Import addresses from an Excel (.xlsx/.xls) file.
+
+        Requires openpyxl.  Columns expected: Account, Address.
+        Optional: Coin, Chain, Notes.
+
+        Returns:
+            Tuple of (added_count, skipped_count, error_messages)
+        """
+        added = 0
+        skipped = 0
+        errors = []
+
+        try:
+            from openpyxl import load_workbook
+        except ImportError:
+            return (0, 0, ["openpyxl is required to import Excel files. Install with: pip install openpyxl"])
+
+        try:
+            wb = load_workbook(excel_path, read_only=True, data_only=True)
+            ws = wb.active
+
+            rows = ws.iter_rows(values_only=True)
+            try:
+                headers = next(rows)
+            except StopIteration:
+                return (0, 0, ["Excel file appears to be empty"])
+
+            # Build a lowercase header→index map
+            header_map = {}
+            for idx, h in enumerate(headers):
+                if h is not None:
+                    header_map[str(h).strip().lower()] = idx
+
+            # Validate required columns
+            if 'account' not in header_map or 'address' not in header_map:
+                return (0, 0, ["Excel must have 'Account' and 'Address' columns"])
+
+            for row_num, row in enumerate(rows, start=2):
+                try:
+                    def get_col(name):
+                        idx = header_map.get(name)
+                        if idx is None or idx >= len(row):
+                            return ''
+                        val = row[idx]
+                        return str(val).strip() if val is not None else ''
+
+                    account = get_col('account')
+                    coin = get_col('coin')
+                    chain = get_col('chain')
+                    address = get_col('address')
+                    notes = get_col('notes')
+
+                    if not account:
+                        skipped += 1
+                        continue
+
+                    if not address:
+                        # Still create the account entry
+                        if account not in self.address_db["accounts"]:
+                            self.address_db["accounts"][account] = {
+                                "addresses": [],
+                                "notes": notes
+                            }
+                        skipped += 1
+                        continue
+
+                    if account not in self.address_db["accounts"]:
+                        self.address_db["accounts"][account] = {
+                            "addresses": [],
+                            "notes": ""
+                        }
+
+                    addr_entry = {
+                        "coin": coin,
+                        "chain": chain,
+                        "address": address
+                    }
+                    if notes:
+                        addr_entry["notes"] = notes
+
+                    self.address_db["accounts"][account]["addresses"].append(addr_entry)
+                    added += 1
+
+                except Exception as e:
+                    errors.append(f"Row {row_num}: {str(e)}")
+                    skipped += 1
+
+            wb.close()
+
+            if added > 0:
+                self.save_encrypted_data(password)
+
+            return (added, skipped, errors)
+
+        except FileNotFoundError:
+            return (0, 0, [f"Excel file not found: {excel_path}"])
+        except Exception as e:
+            return (0, 0, [f"Error reading Excel: {str(e)}"])
+
     def list_accounts(self) -> None:
         """Display all accounts organized by pool."""
         table = Table(title="Accounts by Pool")

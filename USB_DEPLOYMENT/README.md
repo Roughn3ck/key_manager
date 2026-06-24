@@ -1,253 +1,216 @@
 # Key Manager - Secure Crypto Key Storage
 
-## 📋 What is Key Manager?
+## Quick Start
 
-Key Manager is a secure application for storing and managing your cryptocurrency wallet information. It's designed to keep your sensitive data safe with multiple layers of encryption, making it ideal for storing:
+1. **Copy** `key_manager_gui.exe` to a USB drive (or any folder)
+2. **Run** it — double-click the EXE
+3. **Click** "Initialize New Vault" on the login screen
+4. **Create** a master password (there is NO recovery if you lose it)
+5. **Start adding** your accounts, addresses, mnemonics, and private keys
 
-- **24-word recovery phrases (mnemonics)**
-- **Cryptocurrency wallet addresses**
-- **Account information for different coins and networks**
+That's it. No installation. No Python. No dependencies. Just run the EXE.
 
-Think of it as a digital safe for your crypto keys that you can carry on a USB drive.
+> **Important:** The EXE is completely self-contained. It runs on **any Windows computer** without Python installed. All libraries (Python runtime, crypto, GUI framework) are bundled inside the ~38MB EXE.
 
-## 🎨 New Modern GUI (Version 2.0)
+## What is Key Manager?
 
-Key Manager now features a modern, dark-themed graphical interface with enhanced security features:
+Key Manager is a secure application for storing and managing your cryptocurrency wallet information. It encrypts your data with **AES-256-GCM** authenticated encryption and **Argon2id** key derivation — the same standards used by password managers and crypto exchanges.
 
-### GUI Features:
-- **Modern Dark Theme** - Easy on the eyes with CustomTkinter
-- **Secure Login Screen** - Password-only entry with Argon2id/AES validation
-- **Dashboard Layout** - Left panel with account list, right panel with chain view
-- **Clipboard Interface** - Copy buttons for addresses with multi-copy queue
-- **5-Minute Session Rule** - Auto-lock after 5 minutes of inactivity
-- **Secure Mnemonic Reveal** - Password re-entry required to view 24-word phrases
-- **Automatic Backups** - Timestamped encrypted backups of your vault
+You can store:
+- **Wallet addresses** organized by account and chain
+- **24-word recovery phrases (mnemonics)** — encrypted, hidden by default, revealed on demand
+- **Private keys** — multiple chain-specific keys per account
+- **Account notes** for additional context
 
-### Two Interfaces Available:
-1. **CLI Interface** - Original command-line tool (`key_manager.exe`)
-2. **GUI Interface** - New graphical interface (`key_manager_gui.exe`)
+Everything is encrypted at rest. Your master password is never stored — it exists only in memory during your active session.
 
-## 🔒 Security Features
+## GUI Features (v2.4)
 
-### Dual-Layer Protection
-1. **USB Drive Encryption (BitLocker)** - The entire USB drive is encrypted
-2. **Application Encryption (AES-256-GCM)** - Your data is encrypted again inside the application
+### Core Features
+- **Modern Dark Theme** — Easy on the eyes, built with CustomTkinter
+- **Secure Login Screen** — Password-only entry with AES-256-GCM/Argon2id validation
+- **Initialize New Vault** — Create a new encrypted vault directly from the GUI (no CLI needed)
+- **Change Password** — Change your master password from within the GUI
+- **Session Auto-Lock** — 5-minute inactivity timeout automatically locks the vault
+- **Toast Notifications** — Visual feedback for all operations
 
-### How Your Data is Protected
-- **Master Password Required** - You create one strong password to access everything
-- **Military-Grade Encryption** - Uses the same encryption standards as banks and governments
-- **No Internet Connection Needed** - Works completely offline for maximum security
-- **Automatic Locking** - Data is automatically encrypted when you close the program
+### Managing Your Data
+- **Add Account** — Create accounts, optionally organized into pools/groups
+- **Add Address** — Standardized chain dropdown (BTC Taproot, EVM, ZEC, etc.) with Custom option
+- **Add Mnemonic** — Store 24-word recovery phrases, encrypted and hidden by default
+- **Add Private Key** — Chain-specific private keys with standardized chain labels
+- **Delete Address** — Remove individual addresses with confirmation dialog
+- **Copy to Clipboard** — One-click copy of any address
 
-## 📦 What's Included
+## Importing Addresses from CSV or Excel
 
-### Files in This Package:
-- `key_manager.exe` - The CLI program (original command-line interface)
-- `key_manager_gui.exe` - The new GUI program (modern graphical interface)
-- `USB_DEPLOYMENT/` - Folder containing the ready-to-use programs
-- `address_database.json` - Sample database with 124 cryptocurrency addresses (for reference)
-- `src/backup_engine.py` - Automated backup system with timestamped encrypted copies
-- `src/gui_main.py` - Modern GUI implementation using CustomTkinter
-- `build_gui.py` - PyInstaller build script for creating portable EXE
-- Various support files for developers
+You can bulk-import addresses from a CSV (`.csv`) or Excel (`.xlsx`, `.xls`) file instead of adding them one by one. This is the fastest way to populate your vault.
 
-## 🚀 Getting Started
+### Required Format
 
-### For Non-Technical Users:
+Your file must have a header row with these column names:
 
-1. **Copy to USB Drive:**
-   - Copy the entire `USB_DEPLOYMENT` folder to your BitLocker-encrypted USB drive
-   - The `key_manager.exe` file inside is your program
+| Column | Required | Description |
+|--------|----------|-------------|
+| **Account** | Yes | The account name (e.g., "Ledger 1", "Hardware Wallet") |
+| **Coin** | Yes | The chain/type — must match the dropdown values below |
+| **Address** | Yes | The wallet address |
+| **Notes** | No | Optional notes (e.g., "Hot wallet", "Exchange deposit") |
+| **Chain** | No | Optional — usually left empty (the Coin field is the primary type) |
 
-2. **Running the Program:**
-   - Double-click `key_manager.exe` to open the program
-   - **Important:** The window will close immediately if you just double-click
-   - **Correct way:** Right-click on `key_manager.exe` and select "Open in Terminal" or run from Command Prompt
+### Valid Coin Values
 
-3. **First-Time Setup:**
-   ```
-   key_manager.exe init
-   ```
-   - This creates your secure vault
-   - You'll be prompted to create a master password
-   - **Remember this password!** If you lose it, your data is permanently locked
+The **Coin** column must match these values exactly (they match the GUI dropdown):
 
-## 💡 How to Use (Step by Step)
+```
+BTC Taproot (bc1p)
+BTC SegWit (bc1q)
+BTC (Bitcoin)
+EVM (Ethereum / Arbitrum / Base)
+EVM ERC-20
+EVM Railgun
+SOL (Solana)
+ZEC (Zcash)
+ZEC Transparent
+ZEC Orchard
+XMR (Monero)
+DASH (Dash)
+RUNE (THORChain)
+SUI (Sui)
+TRON (Tron)
+ATOM (Cosmos)
+DOT (Polkadot)
+ADA (Cardano)
+XRP (Ripple)
+SCRT (Secret Network)
+```
 
-### Using the GUI Interface:
+You can also use **any custom chain name** (e.g., `KASPA`, `AVAX`) — it will be stored as-is.
 
-1. **Run the GUI Program:**
-   ```
-   key_manager_gui.exe
-   ```
-   Or from Python:
-   ```
-   python src/gui_main.py
-   ```
+### Example CSV
 
-2. **Login Screen:**
-   - Enter your master password
-   - Click "Unlock Vault" or press Enter
-   - The vault will unlock and show the main dashboard
+```csv
+Account,Coin,Address,Notes
+Ledger 1,BTC Taproot (bc1p),bc1p...your...address,Cold storage
+Ledger 1,EVM (Ethereum / Arbitrum / Base),0x...your...address,Main ETH
+Trezor,DASH (Dash),X...your...address,
+Trezor,ZEC Transparent,t1...your...address,Zcash transparent
+Exchange,EVM ERC-20,0x...token...address,USDT
+```
 
-3. **Main Dashboard:**
-   - **Left Panel:** Click any account to select it
-   - **Right Panel:** View addresses and copy them to clipboard
-   - **Session Timer:** Shows remaining time before auto-lock (5 minutes)
-   - **Status Bar:** Shows backup count and lock button
+### Example Excel
 
-4. **Viewing Mnemonics:**
-   - Click "Reveal Mnemonic" for accounts that have recovery phrases
-   - Re-enter your master password for security
-   - Mnemonic will auto-hide after 5 minutes
+| Account | Coin | Address | Notes |
+|---------|------|---------|-------|
+| Ledger 1 | BTC Taproot (bc1p) | bc1p...your...address | Cold storage |
+| Ledger 1 | EVM (Ethereum / Arbitrum / Base) | 0x...your...address | Main ETH |
+| Trezor | DASH (Dash) | X...your...address | |
+| Trezor | ZEC Transparent | t1...your...address | Zcash transparent |
+| Exchange | EVM ERC-20 | 0x...token...address | USDT |
 
-### Using the CLI Interface:
+### How to Import
 
-1. **Initialize a New Vault** (First time only):
-   ```
-   key_manager.exe init
-   ```
+1. Prepare your CSV or Excel file with the correct format above
+2. Open Key Manager and unlock your vault
+3. Click **"Import Addresses"** in the left panel
+4. Select your `.csv` or `.xlsx` file
+5. Review the import summary (addresses added, skipped, errors)
+6. Your addresses are now in the vault — organized by account
 
-2. **Unlock Your Vault** (Every time you use it):
-   ```
-   key_manager.exe unlock
-   ```
+> **Tip:** The import dialog shows a formatting guide with all valid Coin values. You can also run `key_manager import-csv --format-guide` from the CLI to see the same guide.
 
-3. **See Available Commands:**
-   ```
-   key_manager.exe --help
-   ```
+## Supported Chains (Dropdown)
 
-### Managing Your Crypto Data:
+The standardized chain dropdown includes:
 
-4. **List All Accounts:**
-   ```
-   key_manager.exe accounts
-   ```
+- **BTC:** BTC Taproot (bc1p), BTC SegWit (bc1q), BTC (Bitcoin)
+- **EVM:** EVM (Ethereum / Arbitrum / Base), EVM ERC-20, EVM Railgun
+- **Privacy:** ZEC (Zcash), ZEC Transparent, ZEC Orchard, XMR (Monero)
+- **Other:** SOL (Solana), DASH (Dash), RUNE (THORChain), SUI (Sui), TRON (Tron), ATOM (Cosmos), DOT (Polkadot), ADA (Cardano), XRP (Ripple), SCRT (Secret Network)
+- **Custom...** — type your own chain name for unsupported chains
 
-5. **View Addresses:**
-   ```
-   key_manager.exe addresses
-   ```
-   Or view a specific account:
-   ```
-   key_manager.exe addresses "G1"
-   ```
+## File Locations
 
-6. **Add a New Address:**
-   ```
-   key_manager.exe add-address "AccountName" "BTC" "P2TR" "bc1q..."
-   ```
+### Portable Mode (USB Drive — Default)
 
-7. **Add a Recovery Phrase (24 words):**
-   ```
-   key_manager.exe add-mnemonic "AccountName" "word1 word2 ... word24"
-   ```
+When you run `key_manager_gui.exe` from a USB drive or folder:
 
-8. **Generate a Secure Password:**
-   ```
-   key_manager.exe gen-password
-   ```
+- **Program:** `USB_DRIVE\key_manager_gui.exe`
+- **Encrypted Vault:** `USB_DRIVE\.key_manager\key_vault.encrypted`
 
-9. **Check Vault Status:**
-   ```
-   key_manager.exe status
-   ```
+The vault is stored **alongside the EXE** in a hidden `.key_manager` folder. Everything stays on the USB drive — your data goes where your USB goes.
 
-## 🏗️ Account Structure
+### Script Mode (Development)
 
-Your crypto accounts are organized into "pools" for easy management:
+When running from Python source code:
 
-### Four Main Pools:
-1. **Genesis Pool** - 6 accounts (G1, G2, G3, G4, G5, G6)
-2. **SafetyNet Pool** - 5 accounts (N1, N2, N3, N4, N5)
-3. **Foundation Pool** - 5 accounts (F1, F2, F3, F4, F5)
-4. **Seed Pool** - 5 accounts (S1, S2, S3, S4, S5)
+- **Encrypted Vault:** `~/.key_manager/key_vault.encrypted` (your home directory)
 
-### Additional Accounts:
-- Main, G SS, Expenses, Monero, Logos, and more
+## Security
 
-## 🔧 Troubleshooting
+- **Encryption:** AES-256-GCM authenticated encryption
+- **Key Derivation:** Argon2id (64MB memory, 3 iterations, 4 lanes)
+- **Password Storage:** None — password exists only in memory during active session
+- **Auto-Lock:** 5-minute inactivity timeout clears sensitive data
+- **Sensitive Data:** Mnemonics and private keys are masked by default, revealed only on demand with password re-entry, auto-hide after 5 minutes
+- **No Telemetry:** No data ever leaves your computer
 
-### Common Issues:
+## Account Structure
 
-**Problem:** "The program opens and closes immediately"
-**Solution:** Run from Command Prompt instead of double-clicking
+Key Manager starts as a **blank slate**. You create your own accounts and organize them however you like:
 
-**Problem:** "ModuleNotFoundError: No module named 'click'"
-**Solution:** All dependencies are already included in the executable - this shouldn't happen with the provided `key_manager.exe`
+- Create accounts with any name (e.g., "Ledger 1", "Trezor", "Exchange")
+- Optionally organize accounts into pools/groups
+- Most users will only need one or two accounts
+- The structure is entirely up to you
 
-**Problem:** "Failed to unlock vault"
-**Solution:** 
-- Make sure you're using the correct password
-- Check that `key_vault.encrypted` exists in the same folder
-- If you lost your password, you cannot recover the data (this is for security)
+## CLI (Advanced — Optional)
 
-**Problem:** "Command not recognized"
-**Solution:** Make sure you're typing commands exactly as shown, including the `.exe` extension
+Key Manager also includes a command-line interface for power users and automation. This is optional — the GUI handles everything most users need.
 
-## 📁 File Locations
+**CLI Commands:**
+```
+key_manager init                              # Initialize a new vault
+key_manager unlock                            # Unlock an existing vault
+key_manager accounts                          # List all accounts
+key_manager addresses [account]               # Show addresses
+key_manager add-address <account> <coin> <chain> <address> [--notes=...]
+key_manager delete-address <account> <index>  # Delete address by index
+key_manager add-account <account> [--pool=...] # Create an account
+key_manager add-mnemonic <account> <24 words> # Store a mnemonic
+key_manager show-mnemonic <account>            # View mnemonic (requires re-entry)
+key_manager add-key <account> <key> [--chain=...] # Add a private key
+key_manager show-key <account>                # View private keys
+key_manager import-csv <file_path> [--format-guide]  # Import from CSV/Excel
+key_manager change-password                   # Change master password
+key_manager lock                               # Lock the session
+key_manager status                             # Show vault statistics
+key_manager gen-password                       # Generate a secure password
+```
 
-### Where Your Data is Stored:
-- **Encrypted Data:** `C:\Users\[YourUsername]\.key_manager\key_vault.encrypted`
-- **Program Files:** Wherever you copied the `USB_DEPLOYMENT` folder
+> **Note:** The CLI is a developer/power-user tool. Most users should use the GUI EXE exclusively.
 
-### Backup Recommendations:
-1. **Regular Backups:** Copy your `key_vault.encrypted` file to multiple secure locations
-2. **Password Storage:** Keep your master password in a secure password manager
-3. **USB Drive:** Keep the USB drive in a safe, physically secure location
+## Technical Details
 
-## 🛡️ Security Best Practices
+- **GUI Framework:** CustomTkinter (dark theme)
+- **Encryption:** cryptography library (AES-256-GCM + Argon2id)
+- **Build Tool:** PyInstaller (onefile EXE)
+- **Python:** 3.14
+- **Portable:** No installation required, runs from any folder/USB
 
-### Do:
-- ✅ Use a strong, unique master password (12+ characters, mix of letters, numbers, symbols)
-- ✅ Store the USB drive in a safe or lockbox
-- ✅ Make regular backups of your `key_vault.encrypted` file
-- ✅ Test restoring from backup periodically
-- ✅ Keep the program offline (no internet connection)
+## Version
 
-### Don't:
-- ❌ Don't share your master password with anyone
-- ❌ Don't store the password with the USB drive
-- ❌ Don't use the program on public or untrusted computers
-- ❌ Don't forget to make backups
-- ❌ Don't lose your master password (data is irrecoverable)
-
-## 🔄 Updating the Program
-
-### For Future Updates:
-1. Download the new version
-2. Copy it to your USB drive (overwrite the old `key_manager.exe`)
-3. Your existing `key_vault.encrypted` data will still work
-
-## 🤝 Getting Help
-
-### If You Need Assistance:
-1. **Check This README** - Most questions are answered here
-2. **Review Available Commands** - Run `key_manager.exe --help`
-3. **Look at Sample Data** - The `address_database.json` shows the structure
-4. **Contact Support** - If you're still having issues
-
-## 📊 What's Already Set Up
-
-This package comes pre-configured with:
-- ✅ 124 cryptocurrency addresses across 28 accounts
-- ✅ 4 organized pools (Genesis, SafetyNet, Foundation, Seed)
-- ✅ Support for multiple coins: BTC, ETH, DASH, ZEC, XMR, SOL, DOT, ATOM, RUNE, SCRT, SUI
-- ✅ Ready-to-use executable (no Python installation needed)
-- ✅ All security features enabled
-
-## 🎯 Quick Start Summary
-
-1. **Copy** `USB_DEPLOYMENT` folder to encrypted USB drive
-2. **Open** Command Prompt in that folder
-3. **Initialize:** `key_manager.exe init` (first time only)
-4. **Unlock:** `key_manager.exe unlock` (each use)
-5. **Explore:** Try `accounts`, `addresses`, `status` commands
-6. **Secure:** Make backups and store password safely
+**v2.4** — June 2026
+- Initialize vault from GUI (no CLI needed)
+- Import addresses from CSV/Excel with formatting guide
+- Change password from GUI
+- Delete addresses from GUI
+- Removed "Add to Queue" button (simplified UI)
+- Standardized chain dropdown with 20+ predefined chains + Custom option
+- Multi-key private key support with chain labels
+- Blank slate (no pre-determined accounts/pools — users create their own)
+- Mnemonic section always visible (independent of addresses)
+- Private key section always visible (independent of addresses)
 
 ---
-
-**Remember:** Your crypto security is only as strong as your practices. This tool provides the technology, but you provide the careful handling that keeps your assets safe.
-
-*Last Updated: March 19, 2026*
+*Key Manager — Your crypto keys, encrypted, portable, yours.*

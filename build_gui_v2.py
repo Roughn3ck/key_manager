@@ -48,6 +48,7 @@ def build_gui_exe():
         '--hidden-import=queue',
         '--hidden-import=pathlib',
         '--hidden-import=datetime',
+        '--hidden-import=openpyxl',
         '--collect-all=customtkinter',
         '--collect-all=cryptography',
         '--collect-all=argon2',

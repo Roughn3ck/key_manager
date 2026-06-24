@@ -200,6 +200,13 @@ class PortableKeyManager:
             self.address_db = self._manager.address_db
         return result
 
+    def import_file(self, file_path: str, password: str) -> tuple:
+        """Delegate to underlying KeyManager (handles CSV and Excel)."""
+        self._manager.address_db = self.address_db
+        result = self._manager.import_file(file_path, password)
+        self.address_db = self._manager.address_db
+        return result
+
 
 # Use the portable version
 KeyManager = PortableKeyManager
@@ -694,7 +701,7 @@ class KeyManagerGUI:
 
         coin_label = ctk.CTkLabel(
             info_frame,
-            text=address_data.get("coin", "Unknown"),
+            text=address_data.get("coin", ""),
             font=ctk.CTkFont(size=14, weight="bold")
         )
         coin_label.pack(anchor="w")
@@ -1486,7 +1493,8 @@ class KeyManagerGUI:
 
         dialog = ctk.CTkToplevel(self.root)
         dialog.title("Add New Address")
-        dialog.geometry("500x450")
+        dialog.geometry("540x620")
+        dialog.minsize(540, 520)
         dialog.transient(self.root)
         dialog.grab_set()
         self._center_dialog(dialog)
@@ -1494,7 +1502,9 @@ class KeyManagerGUI:
         ctk.CTkLabel(dialog, text="Add New Address",
                      font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
 
-        form = ctk.CTkFrame(dialog, fg_color="transparent")
+        # Scrollable form so all fields (and the Save button) remain
+        # accessible even if the window/dialog is shorter than the content.
+        form = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
         form.pack(pady=10, padx=20, fill="both", expand=True)
 
         # Account dropdown - default to currently selected account
@@ -1505,12 +1515,18 @@ class KeyManagerGUI:
                                        font=ctk.CTkFont(size=13))
         acct_menu.pack(fill="x", pady=(0, 10))
 
+        # Coin (user-defined, free text)
+        ctk.CTkLabel(form, text="Coin (optional):").pack(anchor="w")
+        coin_entry = ctk.CTkEntry(form, placeholder_text="e.g. Ethereum, Bitcoin, USDT", width=420)
+        coin_entry.pack(fill="x", pady=(0, 10))
+
         # Standardized Type / Chain dropdown
-        ctk.CTkLabel(form, text="Type / Chain:").pack(anchor="w")
-        type_var = ctk.StringVar(value=CHAIN_OPTIONS[0])
+        ctk.CTkLabel(form, text="Chain (optional):").pack(anchor="w")
+        type_var = ctk.StringVar(value="(None)")
+        chain_opts = ["(None)"] + CHAIN_OPTIONS
         self._style_combobox()
         import tkinter.ttk as ttk
-        type_combo = ttk.Combobox(form, textvariable=type_var, values=CHAIN_OPTIONS,
+        type_combo = ttk.Combobox(form, textvariable=type_var, values=chain_opts,
                                   state="readonly", width=55, style="Dark.TCombobox")
         type_combo.pack(fill="x", pady=(0, 10))
 
@@ -1549,23 +1565,29 @@ class KeyManagerGUI:
 
         def do_add():
             account = acct_var.get().strip()
-            selected_type = type_var.get().strip()
-            if selected_type == "Custom...":
+            coin_name = coin_entry.get().strip()
+            selected_chain = type_var.get().strip()
+            if selected_chain == "Custom...":
                 custom_chain = custom_entry.get().strip()
                 if not custom_chain:
                     status_label.configure(text="Custom chain name is required", text_color="red")
                     return
                 chain_type = custom_chain
+            elif selected_chain == "(None)":
+                chain_type = ""
             else:
-                chain_type = selected_type
+                chain_type = selected_chain
             address = address_entry.get().strip()
             notes = notes_entry.get().strip()
-            if not all([account, chain_type, address]):
-                status_label.configure(text="Account, type/chain, and address are required", text_color="red")
+            if not account or not address:
+                status_label.configure(text="Account and address are required", text_color="red")
+                return
+            if not coin_name and not chain_type:
+                status_label.configure(text="Either Coin or Chain must be specified", text_color="red")
                 return
             try:
                 # Store the standardized type as coin; chain left empty for unified display
-                if self.key_manager.add_address(account, chain_type, "", address,
+                if self.key_manager.add_address(account, coin_name, chain_type, address,
                                                 self.current_password, notes):
                     self.show_notification(f"Address added to '{account}'")
                     dialog.destroy()
@@ -1918,7 +1940,12 @@ class KeyManagerGUI:
 
         file_path = filedialog.askopenfilename(
             title="Select CSV or Excel file to import",
-            filetypes=[("CSV files", "*.csv"), ("Excel files", "*.xlsx *.xls"), ("All files", "*.*")]
+            filetypes=[
+                ("CSV and Excel files", "*.csv *.xlsx *.xls"),
+                ("CSV files", "*.csv"),
+                ("Excel files", "*.xlsx *.xls"),
+                ("All files", "*.*"),
+            ]
         )
         if not file_path:
             return
@@ -1938,11 +1965,11 @@ class KeyManagerGUI:
 
         # Formatting guide
         guide_text = (
-            "\nRequired columns: Account, Coin, Address\n"
-            "Optional: Notes, Chain\n\n"
-            "Valid Coin values (match dropdown exactly):\n"
+            "\nRequired columns: Account, Address\n"
+            "Optional: Coin, Chain, Notes\n\n"
+            "Valid Chain values (match Chain dropdown exactly):\n"
             "  BTC Taproot (bc1p), BTC SegWit (bc1q), BTC (Bitcoin)\n"
-            "  EVM (Ethereum / Arbitrum / Base), EVM ERC-20, EVM Railgun\n"
+            "  EVM (Ethereum / Arbitrum / Base), EVM Railgun\n"
             "  SOL (Solana), ZEC (Zcash), ZEC Transparent, ZEC Orchard\n"
             "  XMR (Monero), DASH (Dash), RUNE (THORChain)\n"
             "  SUI (Sui), TRON (Tron), ATOM (Cosmos), DOT (Polkadot)\n"
