@@ -2,22 +2,37 @@
 
 *Secure offline crypto key vault with BIP39 derivation engine.*
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v3.0-success)]()
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v3.1-success)]()
 
-## 📥 Download
+## Download
 
-**Latest release: [ColdStack v3.0 — BIP39 Derivation Engine](https://github.com/Roughn3ck/key_manager/releases/tag/v3.0)**
+**Latest release: [ColdStack v3.1 - ColdStack Rebrand + Update Check](https://github.com/Roughn3ck/key_manager/releases/tag/v3.1)**
 
 | File | Size | Description |
 |------|------|-------------|
-| `key_manager_gui.exe` | ~45MB | Full GUI application with v3 derivation engine |
-| `key_manager.exe` | ~35MB | CLI version for headless operations |
+| `coldstack.exe` | ~45MB | Full GUI application - ColdStack branded, v3.1 with derivation + update check |
 
-> No installation required. Just download, run, and click "Initialize New Vault". Works on any Windows 10/11 machine — no Python needed.
+> The CLI executable (`key_manager.exe`) has been deprecated and removed from USB_DEPLOYMENT as of v3.1. The CLI source remains available for script-mode use (`python src/main.py`).
+
+> No installation required. Just download, run, and click "Initialize New Vault". Works on any Windows 10/11 machine - no Python needed.
 
 ---
 
-## v3.0 Features — BIP39 Mnemonic Derivation (June 2026)
+## v3.1 Features - ColdStack Rebrand + Check for Updates (June 2026)
+
+- **Brand rebrand**: GUI is now branded "ColdStack" (window title, login screen, version label)
+- **Check for Updates button**: User-initiated update check in the status bar. Makes a single GitHub API call to check for newer releases. Offline by default - no background polling, no telemetry.
+- **Threaded network request**: Update check runs in a background thread so the GUI stays responsive
+- **EXE rename**: GUI executable is now `coldstack.exe`
+- **CLI EXE deprecated**: The `key_manager.exe` CLI executable is no longer built or distributed. CLI remains available via script mode only (`python src/main.py`).
+- **Vault co-located with app**: The vault (`key_vault.encrypted`) now lives in the same directory as the application, not in `~/.key_manager/`.
+
+### Running v3.1
+- **GUI (script mode):** `python src/gui_main_v3_1.py`
+- **Build EXE:** `python build_gui_v3_1.py` -> `USB_DEPLOYMENT/coldstack.exe`
+- **CLI (script mode only):** `python src/main.py derive-address --account "MyAccount" --chain "EVM (Ethereum / Arbitrum / Base)" --index 0`
+
+## v3.0 Features - BIP39 Mnemonic Derivation (June 2026)
 
 Key Manager v3 adds a full BIP39 mnemonic-to-address derivation engine:
 
@@ -31,7 +46,7 @@ Key Manager v3 adds a full BIP39 mnemonic-to-address derivation engine:
 
 ### Running v3
 - **GUI (script mode):** `python src/gui_main_v3.py`
-- **Build EXE:** `python build_gui_v3.py` → `USB_DEPLOYMENT/key_manager_gui.exe`
+- **Build EXE:** `python build_gui_v3.py` -> `USB_DEPLOYMENT/key_manager_gui.exe` (legacy v3)
 - **CLI:** `python src/main.py derive-address --account "MyAccount" --chain "EVM (Ethereum / Arbitrum / Base)" --index 0`
 
 ### Supported Derivation Chains
@@ -52,8 +67,8 @@ Key Manager v3 adds a full BIP39 mnemonic-to-address derivation engine:
 
 ## Quick Start
 
-1. **Copy** `key_manager_gui.exe` to a USB drive (or any folder)
-2. **Run** it — double-click the EXE
+1. **Copy** `coldstack.exe` to a USB drive (or any folder)
+2. **Run** it - double-click the EXE
 3. **Click** "Initialize New Vault" on the login screen
 4. **Create** a master password (there is NO recovery if you lose it)
 5. **Start adding** your accounts, addresses, mnemonics, and private keys
@@ -64,39 +79,39 @@ That's it. No installation. No Python. No dependencies. Just run the EXE.
 
 ## What is ColdStack?
 
-ColdStack is a secure application for storing and managing your cryptocurrency wallet information. It encrypts your data with **AES-256-GCM** authenticated encryption and **Argon2id** key derivation — the same standards used by password managers and crypto exchanges.
+ColdStack is a secure application for storing and managing your cryptocurrency wallet information. It encrypts your data with **AES-256-GCM** authenticated encryption and **Argon2id** key derivation - the same standards used by password managers and crypto exchanges.
 
 You can store:
 - **Wallet addresses** organized by account and chain
-- **24-word recovery phrases (mnemonics)** — encrypted, hidden by default, revealed on demand
-- **Private keys** — multiple chain-specific keys per account
+- **24-word recovery phrases (mnemonics)** - encrypted, hidden by default, revealed on demand
+- **Private keys** - multiple chain-specific keys per account
 - **Account notes** for additional context
 
-Everything is encrypted at rest. Your master password is never stored — it exists only in memory during your active session.
+Everything is encrypted at rest. Your master password is never stored - it exists only in memory during your active session.
 
 ## Two Interfaces
 
 ### GUI (Windows EXE)
-- **File:** `key_manager_gui.exe` (built from `src/gui_main_v3.py`)
-- **For:** Human use — view, add, manage accounts and keys
-- **Features:** Dark theme, add accounts/addresses/mnemonics, BIP39 derivation, CSV/Excel import, auto-lock
+- **File:** `coldstack.exe` (built from `src/gui_main_v3_1.py`)
+- **For:** Human use - view, add, manage accounts and keys
+- **Features:** Dark theme, add accounts/addresses/mnemonics, BIP39 derivation, CSV/Excel import, check for updates, auto-lock
 
 ### Headless Agent (Python)
 - **File:** `src/key_manager_agent.py`
-- **For:** AI agent use — Vault signs and broadcasts transactions via HTTP
-- **Port:** 8842 (localhost only — binds to `127.0.0.1`)
+- **For:** AI agent use - Vault signs and broadcasts transactions via HTTP
+- **Port:** 8842 (localhost only - binds to `127.0.0.1`)
 - **Protocol:** JSON over HTTP POST
 
 ```
-┌─────────────┐     ┌──────────────────────────┐     ┌─────────────────┐
-│  USB Drive   │     │  key_manager_agent.py    │     │  Vault (AI)     │
-│  (F:\)       │     │  (headless process)       │     │  (DeepSeek V3.2)│
-│              │     │                           │     │                 │
-│ key_vault    │────▶│  unlock(password)         │◀────│  sends JSON     │
-│ .encrypted   │     │  decrypt in memory        │     │  commands via   │
-│              │     │  sign tx internally       │     │  HTTP to :8842  │
-│              │     │  NEVER return privkey     │     │                 │
-└─────────────┘     └──────────────────────────┘     └─────────────────┘
++-------------+     +--------------------------+     +-----------------+
+|  USB Drive   |     |  key_manager_agent.py    |     |  Vault (AI)     |
+|  (F:\)       |     |  (headless process)      |     |  (DeepSeek V3.2)|
+|              |     |                          |     |                 |
+| key_vault    |---->|  unlock(password)        |<----|  sends JSON     |
+| .encrypted   |     |  decrypt in memory       |     |  commands via   |
+|              |     |  sign tx internally      |     |  HTTP to :8842  |
+|              |     |  NEVER return privkey    |     |                 |
++-------------+     +--------------------------+     +-----------------+
 ```
 
 ### Headless Agent Commands
@@ -119,27 +134,28 @@ python3 src/key_manager_agent.py --vault /path/to/key_vault.encrypted --serve --
 
 **Security rules for AI agents:**
 - NEVER request or log private keys
-- ALWAYS use `sign_tx` or `broadcast_tx` — keys stay internal
+- ALWAYS use `sign_tx` or `broadcast_tx` - keys stay internal
 - ALWAYS send `{"cmd": "lock"}` when done
 - Password comes from `KEY_MANAGER_PASSWORD` env var only
 
-## ColdStack GUI Features (v3.0)
+## ColdStack GUI Features (v3.1)
 
 ### Core Features
-- **Modern Dark Theme** — Easy on the eyes, built with CustomTkinter
-- **Secure Login Screen** — Password-only entry with AES-256-GCM/Argon2id validation
-- **Initialize New Vault** — Create a new encrypted vault directly from the GUI (no CLI needed)
-- **Change Password** — Change your master password from within the GUI
-- **Session Auto-Lock** — 5-minute inactivity timeout automatically locks the vault
-- **Toast Notifications** — Visual feedback for all operations
+- **Modern Dark Theme** - Easy on the eyes, built with CustomTkinter
+- **Secure Login Screen** - Password-only entry with AES-256-GCM/Argon2id validation
+- **Initialize New Vault** - Create a new encrypted vault directly from the GUI (no CLI needed)
+- **Change Password** - Change your master password from within the GUI
+- **Session Auto-Lock** - 5-minute inactivity timeout automatically locks the vault
+- **Toast Notifications** - Visual feedback for all operations
+- **Check for Updates** - User-initiated update check (offline by default, no background polling)
 
 ### Managing Your Data
-- **Add Account** — Create accounts, optionally organized into pools/groups
-- **Add Address** — Standardized chain dropdown (BTC Taproot, EVM, ZEC, etc.) with Custom option
-- **Add Mnemonic** — Store 24-word recovery phrases, encrypted and hidden by default
-- **Add Private Key** — Chain-specific private keys with standardized chain labels
-- **Delete Address** — Remove individual addresses with confirmation dialog
-- **Copy to Clipboard** — One-click copy of any address
+- **Add Account** - Create accounts, optionally organized into pools/groups
+- **Add Address** - Standardized chain dropdown (BTC Taproot, EVM, ZEC, etc.) with Custom option
+- **Add Mnemonic** - Store 24-word recovery phrases, encrypted and hidden by default
+- **Add Private Key** - Chain-specific private keys with standardized chain labels
+- **Delete Address** - Remove individual addresses with confirmation dialog
+- **Copy to Clipboard** - One-click copy of any address
 
 ## Importing Addresses from CSV or Excel
 
@@ -152,10 +168,10 @@ Your file must have a header row with these column names:
 | Column | Required | Description |
 |--------|----------|-------------|
 | **Account** | Yes | The account name (e.g., "Ledger 1", "Hardware Wallet") |
-| **Coin** | Yes | The chain/type — must match the dropdown values below |
+| **Coin** | Yes | The chain/type - must match the dropdown values below |
 | **Address** | Yes | The wallet address |
 | **Notes** | No | Optional notes (e.g., "Hot wallet", "Exchange deposit") |
-| **Chain** | No | Optional — usually left empty (the Coin field is the primary type) |
+| **Chain** | No | Optional - usually left empty (the Coin field is the primary type) |
 
 ### Valid Coin Values
 
@@ -182,16 +198,16 @@ XRP (Ripple)
 SCRT (Secret Network)
 ```
 
-You can also use **any custom chain name** (e.g., `KASPA`, `AVAX`) — it will be stored as-is.
+You can also use **any custom chain name** (e.g., `KASPA`, `AVAX`) - it will be stored as-is.
 
 ### How to Import
 
 1. Prepare your CSV or Excel file with the correct format above
-2. Open Key Manager and unlock your vault
+2. Open ColdStack and unlock your vault
 3. Click **"Import Addresses"** in the left panel
 4. Select your `.csv` or `.xlsx` file
 5. Review the import summary (addresses added, skipped, errors)
-6. Your addresses are now in the vault — organized by account
+6. Your addresses are now in the vault - organized by account
 
 ## Supported Chains (Dropdown)
 
@@ -199,22 +215,22 @@ You can also use **any custom chain name** (e.g., `KASPA`, `AVAX`) — it will b
 - **EVM:** EVM (Ethereum / Arbitrum / Base), EVM ERC-20, EVM Railgun
 - **Privacy:** ZEC (Zcash), ZEC Transparent, ZEC Orchard, XMR (Monero)
 - **Other:** SOL (Solana), DASH (Dash), RUNE (THORChain), SUI (Sui), TRON (Tron), ATOM (Cosmos), DOT (Polkadot), ADA (Cardano), XRP (Ripple), SCRT (Secret Network)
-- **Custom...** — type your own chain name for unsupported chains
+- **Custom...** - type your own chain name for unsupported chains
 
 ## File Locations
 
-### Portable Mode (USB Drive — Default)
+### Portable Mode (USB Drive - Default)
 
-When you run `key_manager_gui.exe` from a USB drive or folder:
+When you run `coldstack.exe` from a USB drive or folder:
 
-- **Program:** `USB_DRIVE\key_manager_gui.exe`
-- **Encrypted Vault:** `USB_DRIVE\.key_manager\key_vault.encrypted`
+- **Program:** `USB_DRIVE\coldstack.exe`
+- **Encrypted Vault:** `USB_DRIVE\key_vault.encrypted` (co-located with the EXE)
 
 ### Script Mode (Development)
 
 When running from Python source code:
 
-- **Encrypted Vault:** `~/.key_manager/key_vault.encrypted` (your home directory)
+- **Encrypted Vault:** `<project_root>/key_vault.encrypted` (co-located with the application)
 
 ### Headless Agent Mode
 
@@ -226,46 +242,46 @@ When running from Python source code:
 
 - **Encryption:** AES-256-GCM authenticated encryption
 - **Key Derivation:** Argon2id (64MB memory, 3 iterations, 4 lanes)
-- **Password Storage:** None — password exists only in memory during active session
+- **Password Storage:** None - password exists only in memory during active session
 - **Auto-Lock:** 5-minute inactivity timeout clears sensitive data (GUI); `--timeout` for agent
 - **Sensitive Data:** Mnemonics and private keys are masked by default, revealed only on demand
-- **No Telemetry:** No data ever leaves your computer
-- **Agent binds to localhost only** — no external network access to the signing service
+- **No Telemetry:** No data ever leaves your computer (except the user-initiated update check, which only queries the GitHub releases API)
+- **Agent binds to localhost only** - no external network access to the signing service
 
 ## Account Structure
 
-Key Manager starts as a **blank slate**. You create your own accounts and organize them however you like:
+ColdStack starts as a **blank slate**. You create your own accounts and organize them however you like:
 
 - Create accounts with any name (e.g., "Ledger 1", "Trezor", "Exchange")
 - Optionally organize accounts into pools/groups
 - Most users will only need one or two accounts
 - The structure is entirely up to you
 
-## ColdStack CLI (Advanced — Optional)
+## ColdStack CLI (Script Mode Only - EXE Deprecated)
 
-ColdStack also includes a command-line interface for power users and automation.
+ColdStack also includes a command-line interface for power users and automation. **Note:** As of v3.1, the CLI executable (`key_manager.exe`) is no longer built or distributed. The CLI is available only via script mode (`python src/main.py`).
 
 **CLI Commands:**
 ```
-key_manager init                              # Initialize a new vault
-key_manager unlock                            # Unlock an existing vault
-key_manager accounts                          # List all accounts
-key_manager addresses [account]               # Show addresses
-key_manager add-address <account> <coin> <chain> <address> [--notes=...]
-key_manager delete-address <account> <index>  # Delete address by index
-key_manager add-account <account> [--pool=...] # Create an account
-key_manager add-mnemonic <account> <24 words> # Store a mnemonic
-key_manager show-mnemonic <account>            # View mnemonic (requires re-entry)
-key_manager add-key <account> <key> [--chain=...] # Add a private key
-key_manager show-key <account>                # View private keys
-key_manager import-csv <file_path> [--format-guide]  # Import from CSV/Excel
-key_manager change-password                   # Change master password
-key_manager lock                               # Lock the session
-key_manager status                             # Show vault statistics
-key_manager gen-password                       # Generate a secure password
-key_manager derive-address <account> --chain <chain> [--index=0] [--list-chains]  # Derive from mnemonic
-key_manager generate-mnemonic [--strength=256]   # Generate a new BIP39 mnemonic
-key_manager validate-mnemonic <account>           # Validate stored mnemonic checksum
+python src/main.py init                              # Initialize a new vault
+python src/main.py unlock                            # Unlock an existing vault
+python src/main.py accounts                          # List all accounts
+python src/main.py addresses [account]               # Show addresses
+python src/main.py add-address <account> <coin> <chain> <address> [--notes=...]
+python src/main.py delete-address <account> <index>  # Delete address by index
+python src/main.py add-account <account> [--pool=...] # Create an account
+python src/main.py add-mnemonic <account> <24 words> # Store a mnemonic
+python src/main.py show-mnemonic <account>            # View mnemonic (requires re-entry)
+python src/main.py add-key <account> <key> [--chain=...] # Add a private key
+python src/main.py show-key <account>                # View private keys
+python src/main.py import-csv <file_path> [--format-guide]  # Import from CSV/Excel
+python src/main.py change-password                   # Change master password
+python src/main.py lock                               # Lock the session
+python src/main.py status                             # Show vault statistics
+python src/main.py gen-password                       # Generate a secure password
+python src/main.py derive-address <account> --chain <chain> [--index=0] [--list-chains]  # Derive from mnemonic
+python src/main.py generate-mnemonic [--strength=256]   # Generate a new BIP39 mnemonic
+python src/main.py validate-mnemonic <account>           # Validate stored mnemonic checksum
 ```
 
 ## Technical Details
@@ -279,7 +295,17 @@ key_manager validate-mnemonic <account>           # Validate stored mnemonic che
 
 ## Version
 
-**v3.0** — June 2026 — ColdStack brand launch
+**v3.1** - June 2026 - ColdStack rebrand + Check for Updates
+- GUI rebranded to "ColdStack" (window title, login screen, version label, class `ColdStackGUI`)
+- "Check for Updates" button in status bar (user-initiated, offline by default, threaded)
+- GUI EXE renamed from `key_manager_gui.exe` to `coldstack.exe`
+- CLI EXE deprecated and removed from USB_DEPLOYMENT (CLI source remains for script-mode use)
+- Vault now co-located with the application (not in `~/.key_manager/`)
+- Build script fixes: backup name corrected, launcher script rebranded
+- No new dependencies (update check uses stdlib `urllib.request`)
+- Backward compatible: existing vaults work without migration
+
+**v3.0** - June 2026 - BIP39 derivation engine launch
 - BIP39 mnemonic-to-address derivation engine (7 chains: EVM, BTC Taproot/SegWit/Legacy, Solana, Dash, Sui)
 - "Derive Addresses" and "Derive All Chains" buttons in mnemonic section
 - "Derive from Mnemonic" checkbox in Add Private Key dialog
@@ -288,18 +314,18 @@ key_manager validate-mnemonic <account>           # Validate stored mnemonic che
 - Schema enhancement: private keys/addresses store derivation metadata (source, path, index)
 - Fully backward-compatible: v2 vaults open without migration
 
-**v2.4** — June 2026
+**v2.4** - June 2026
 - Initialize vault from GUI (no CLI needed)
 - Import addresses from CSV/Excel with formatting guide
 - Change password from GUI
 - Delete addresses from GUI
 - Standardized chain dropdown with 20+ predefined chains + Custom option
 - Multi-key private key support with chain labels
-- Blank slate (no pre-determined accounts/pools — users create their own)
+- Blank slate (no pre-determined accounts/pools - users create their own)
 - Mnemonic section always visible (independent of addresses)
 - Private key section always visible (independent of addresses)
 - **NEW:** Headless agent (`key_manager_agent.py`) for AI-driven signing via HTTP
 
 ---
-*ColdStack — Your crypto keys, encrypted, portable, yours.*
-*Built by [Kris Racette](https://krisracette.me) — [Executive Mind](https://executivemind.io)*
+*ColdStack - Your crypto keys, encrypted, portable, yours.*
+*Built by [Kris Racette](https://krisracette.me) - [Executive Mind](https://executivemind.io)*

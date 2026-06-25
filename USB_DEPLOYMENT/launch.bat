@@ -1,9 +1,9 @@
 @echo off
 echo ========================================
-echo   Key Manager - Secure Crypto Vault
+echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting Key Manager GUI v3...
+echo Starting ColdStack v3.1...
 echo.
-key_manager_gui.exe
+coldstack.exe
 pause

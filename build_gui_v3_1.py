@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-PyInstaller build script for Key Manager GUI v3.
+PyInstaller build script for ColdStack GUI v3.1.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v3 (June 2026)
-Builds: src/gui_main_v3.py
-Output: USB_DEPLOYMENT/key_manager_gui.exe (overwrites previous, with backup)
+Version: v3.1 (June 2026) - ColdStack rebrand + Check for Updates
+Builds: src/gui_main_v3_1.py
+Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
 """
 import os
 import sys
@@ -25,7 +25,7 @@ def clean_build_dirs():
 
 def build_gui_exe():
     """Build the GUI executable using PyInstaller."""
-    print("Building Key Manager GUI v3 executable...")
+    print("Building ColdStack v3.1 executable...")
 
     project_dir = Path(__file__).parent.resolve()
 
@@ -35,8 +35,8 @@ def build_gui_exe():
 
     # PyInstaller arguments for onefile portable EXE
     args = [
-        str(project_dir / 'src' / 'gui_main_v3.py'),
-        '--name=key_manager_gui_v3',
+        str(project_dir / 'src' / 'gui_main_v3_1.py'),
+        '--name=coldstack',
         '--onefile',
         '--console',  # Use console mode to avoid DLL ordinal errors; GUI hides console via FreeConsole()
         *icon_args,
@@ -94,7 +94,7 @@ def build_gui_exe():
 
 def copy_to_usb_deployment():
     """Copy the built EXE to USB_DEPLOYMENT folder, backing up the previous EXE."""
-    exe_path = Path('dist') / 'key_manager_gui_v3.exe'
+    exe_path = Path('dist') / 'coldstack.exe'
     usb_dir = Path('USB_DEPLOYMENT')
 
     if not exe_path.exists():
@@ -105,11 +105,11 @@ def copy_to_usb_deployment():
     usb_dir.mkdir(exist_ok=True)
 
     # Back up the previous EXE before overwriting (versioning rule 5)
-    target_path = usb_dir / 'key_manager_gui.exe'
+    target_path = usb_dir / 'coldstack.exe'
     backups_dir = Path('backups')
     backups_dir.mkdir(exist_ok=True)
     if target_path.exists():
-        backup_path = backups_dir / 'key_manager_gui_v2.exe'
+        backup_path = backups_dir / 'key_manager_gui_v3.exe'
         print(f"Backing up previous EXE to {backup_path}...")
         shutil.copy2(target_path, backup_path)
 
@@ -152,8 +152,8 @@ def create_portable_package():
     print("\n" + "=" * 60)
     print("PORTABLE BUILD COMPLETE!")
     print("=" * 60)
-    print("Executable: USB_DEPLOYMENT/key_manager_gui.exe")
-    print(f"Size: {(Path('USB_DEPLOYMENT/key_manager_gui.exe').stat().st_size / (1024 * 1024)):.2f} MB")
+    print("Executable: USB_DEPLOYMENT/coldstack.exe")
+    print(f"Size: {(Path('USB_DEPLOYMENT/coldstack.exe').stat().st_size / (1024 * 1024)):.2f} MB")
     print("\nThe application is ready to run from an encrypted USB drive.")
     print("No installation required - just copy the USB_DEPLOYMENT folder.")
     print("=" * 60)
@@ -165,12 +165,12 @@ def create_launcher_script():
     """Create a simple launcher script for the USB drive."""
     launcher_content = """@echo off
 echo ========================================
-echo   Key Manager - Secure Crypto Vault
+echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting Key Manager GUI v3...
+echo Starting ColdStack v3.1...
 echo.
-key_manager_gui.exe
+coldstack.exe
 pause
 """
 
@@ -219,7 +219,7 @@ def main():
     print(f"Working directory: {os.getcwd()}")
 
     print("=" * 60)
-    print("Key Manager GUI v3 - Portable EXE Builder")
+    print("ColdStack v3.1 - Portable EXE Builder")
     print("=" * 60)
 
     # Check dependencies

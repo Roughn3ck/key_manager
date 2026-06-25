@@ -1,6 +1,8 @@
 """
-Key Manager GUI - Modern dark-themed interface for secure key management.
+ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
+
+Version: v3.1 (June 2026) — ColdStack rebrand + Check for Updates
 """
 import sys
 import os
@@ -49,6 +51,7 @@ import queue
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 from crypto_engine import CryptoEngine
+from derivation_engine import DerivationEngine
 # BackupEngine import removed — backups are deprecated; users copy
 # key_vault.encrypted manually.  The BackupEngine created an unwanted
 # "backups" subfolder on every login.
@@ -85,6 +88,9 @@ CHAIN_OPTIONS = [
     "Custom...",
 ]
 
+# Chains supported by the DerivationEngine (subset of CHAIN_OPTIONS)
+DERIVATION_CHAINS = list(DerivationEngine.SUPPORTED_CHAINS.keys())
+
 
 class PortableKeyManager:
     """KeyManager that stores vault in the same directory as the executable.
@@ -95,17 +101,14 @@ class PortableKeyManager:
     def __init__(self, data_dir: Optional[Path] = None):
         from main import KeyManager as OriginalKeyManager
 
-        # Only override the data directory when running from a frozen EXE
-        # (portable USB deployment). In script mode, fall back to the default
-        # ~/.key_manager/ location handled by KeyManager itself so the GUI
-        # uses the same vault as the CLI.
+        # Always use base_dir (project root in script mode or EXE directory
+        # in frozen mode) so the vault lives alongside the application, not
+        # in ~/.key_manager/.  This keeps the database co-located with the
+        # GUI for easy backup and portability.
         if data_dir is None:
-            if getattr(sys, 'frozen', False):
-                data_dir = Path(base_dir)
-            else:
-                data_dir = None  # let KeyManager use its default (~/.key_manager)
+            data_dir = Path(base_dir)
 
-        self.data_dir = data_dir if data_dir is not None else Path.home() / ".key_manager"
+        self.data_dir = data_dir
         self.data_dir.mkdir(parents=True, exist_ok=True)
 
         # Create the underlying KeyManager with the resolved data directory
@@ -137,10 +140,15 @@ class PortableKeyManager:
         return result
 
     def add_address(self, account: str, coin: str, chain: str, address: str, password: str,
-                    notes: str = "") -> bool:
+                    notes: str = "",
+                    derivation_path=None, derivation_index=None, source="manual") -> bool:
         """Delegate to underlying KeyManager."""
         self._manager.address_db = self.address_db
-        result = self._manager.add_address(account, coin, chain, address, password, notes)
+        result = self._manager.add_address(
+            account, coin, chain, address, password, notes,
+            derivation_path=derivation_path,
+            derivation_index=derivation_index,
+            source=source)
         self.address_db = self._manager.address_db
         return result
 
@@ -175,10 +183,18 @@ class PortableKeyManager:
         return result
 
     def add_private_key(self, account_name: str, private_key: str, password: str,
-                        chain: str = "") -> bool:
-        """Delegate to underlying KeyManager (supports chain-specific multi-key)."""
+                        chain: str = "",
+                        source: str = "manual",
+                        derivation_path=None, address_index=None,
+                        derived_address=None) -> bool:
+        """Delegate to underlying KeyManager (supports chain-specific multi-key + v3 metadata)."""
         self._manager.address_db = self.address_db
-        result = self._manager.add_private_key(account_name, private_key, password, chain)
+        result = self._manager.add_private_key(
+            account_name, private_key, password, chain,
+            source=source,
+            derivation_path=derivation_path,
+            address_index=address_index,
+            derived_address=derived_address)
         self.address_db = self._manager.address_db
         return result
 
@@ -233,12 +249,12 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("dark-blue")
 
 
-class KeyManagerGUI:
-    """Main GUI application for Key Manager."""
+class ColdStackGUI:
+    """Main GUI application for ColdStack — secure offline crypto key vault."""
 
     def __init__(self):
         self.root = ctk.CTk()
-        self.root.title("Key Manager - Secure Crypto Vault")
+        self.root.title("ColdStack - Secure Crypto Key Vault")
         self.root.geometry("1200x800")
 
         # Initialize components
@@ -277,7 +293,7 @@ class KeyManagerGUI:
         # Title
         title_label = ctk.CTkLabel(
             main_frame,
-            text="\U0001F510 Key Manager",
+            text="\U0001F510 ColdStack",
             font=ctk.CTkFont(size=32, weight="bold")
         )
         title_label.pack(pady=(40, 20))
@@ -285,14 +301,14 @@ class KeyManagerGUI:
         # Subtitle
         subtitle_label = ctk.CTkLabel(
             main_frame,
-            text="Secure Crypto Key Storage",
+            text="Secure Offline Crypto Key Vault",
             font=ctk.CTkFont(size=16)
         )
         subtitle_label.pack(pady=(0, 10))
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v2.4 - Init, Import, Password Change",
+            text="v3.1 — ColdStack | BIP39 Derivation + Update Check",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )
@@ -636,6 +652,103 @@ class KeyManagerGUI:
         )
         logout_btn.pack(side="right", padx=20)
 
+        # Check for Updates button (user-initiated, offline by default)
+        update_btn = ctk.CTkButton(
+            status_bar,
+            text="Check for Updates",
+            command=self.check_for_updates,
+            width=130,
+            height=25,
+            font=ctk.CTkFont(size=12)
+        )
+        update_btn.pack(side="right", padx=20)
+
+    def check_for_updates(self):
+        """Check GitHub for a newer release.
+
+        User-initiated only — no background polling.  ColdStack is offline by
+        default; this is the *only* feature that makes a network request, and
+        only after the user explicitly consents.
+        """
+        from tkinter import messagebox
+
+        # Confirm dialog — this makes a network request
+        confirm = messagebox.askyesno(
+            "Check for Updates",
+            "ColdStack will make a single network request to GitHub to check for updates.\n\n"
+            "No other data is sent. Your vault, keys, and passwords never leave your computer.\n\n"
+            "Continue?",
+            parent=self.root
+        )
+        if not confirm:
+            return
+
+        # Run the network request in a background thread so the Tkinter
+        # event loop (and the GUI) stays responsive while we wait.
+        def _do_check():
+            try:
+                import urllib.request
+                import urllib.error
+                import json as json_module
+
+                url = "https://api.github.com/repos/Roughn3ck/key_manager/releases/latest"
+                req = urllib.request.Request(url, headers={
+                    "Accept": "application/vnd.github.v3+json",
+                    "User-Agent": "ColdStack/3.1"
+                })
+
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    data = json_module.loads(response.read().decode('utf-8'))
+
+                latest_tag = data.get("tag_name", "v0")
+                release_url = data.get("html_url", "https://github.com/Roughn3ck/key_manager/releases")
+                release_name = data.get("name", "Latest Release")
+
+                current_version = "3.1"
+                latest_version = latest_tag.lstrip("v")
+
+                # Simple version comparison (handles major.minor[.patch])
+                def parse_version(v):
+                    parts = []
+                    for p in v.split("."):
+                        try:
+                            parts.append(int(p))
+                        except ValueError:
+                            parts.append(0)
+                    return parts
+
+                if parse_version(latest_version) > parse_version(current_version):
+                    self.root.after(0, lambda: messagebox.showinfo(
+                        "Update Available",
+                        f"A new version is available!\n\n"
+                        f"Current: v{current_version}\n"
+                        f"Latest: {latest_tag} — {release_name}\n\n"
+                        f"Download: {release_url}",
+                        parent=self.root
+                    ))
+                else:
+                    self.root.after(0, lambda: messagebox.showinfo(
+                        "Up to Date",
+                        f"ColdStack v{current_version} is up to date.\n\n"
+                        f"Latest release: {latest_tag}",
+                        parent=self.root
+                    ))
+            except urllib.error.URLError:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Connection Error",
+                    "Could not connect to GitHub. Check your internet connection and try again.\n\n"
+                    "ColdStack is offline by default — this is the only feature that requires internet.",
+                    parent=self.root
+                ))
+            except Exception as e:
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Update Check Failed",
+                    f"An error occurred while checking for updates:\n{str(e)}",
+                    parent=self.root
+                ))
+
+        threading.Thread(target=_do_check, daemon=True).start()
+
     def show_placeholder_view(self):
         """Show placeholder when no account is selected."""
         for widget in self.chain_view_container.winfo_children():
@@ -936,15 +1049,24 @@ class KeyManagerGUI:
         )
         self.pk_status_label.pack(pady=5)
 
-        # Build a display string: one line per key with chain label
+        # Build a display string: one line per key with chain label + derivation metadata
         display_lines = []
         for entry in keys:
             chain = entry.get("chain", "")
             key_val = entry.get("key", "")
+            source = entry.get("source", "manual")
+            dpath = entry.get("derivation_path")
+            meta_parts = []
+            if dpath:
+                meta_parts.append(dpath)
+            if source == "derived":
+                meta_parts.append("derived")
+            meta = f" | {' '.join(meta_parts)}" if meta_parts else ""
+            link = " \U0001F517" if (source == "derived" and account_name in self.key_manager.address_db.get("mnemonics", {})) else ""
             if chain:
-                display_lines.append(f"[{chain}] Key: {key_val}")
+                display_lines.append(f"[{chain}]{meta}{link} Key: {key_val}")
             else:
-                display_lines.append(f"[No Chain Specified] Key: {key_val}")
+                display_lines.append(f"[No Chain Specified]{meta}{link} Key: {key_val}")
         full_display = "\n".join(display_lines)
 
         # Store for reveal/hide/copy operations
@@ -1168,6 +1290,34 @@ class KeyManagerGUI:
             fg_color="gray30"
         )
         self.hide_mnemonic_button.pack(side="left", padx=5)
+
+        # v3: Derivation buttons
+        derive_frame = ctk.CTkFrame(mnemonic_frame, fg_color="transparent")
+        derive_frame.pack(pady=(0, 15))
+
+        derive_btn = ctk.CTkButton(
+            derive_frame,
+            text="Derive Addresses",
+            command=lambda a=account_name: self.show_derivation_dialog(a),
+            width=150,
+            height=35,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=("#fd7e14", "#dc6602"),
+            hover_color=("#e6750c", "#c25802")
+        )
+        derive_btn.pack(side="left", padx=5)
+
+        derive_all_btn = ctk.CTkButton(
+            derive_frame,
+            text="Derive All Chains",
+            command=lambda a=account_name: self.show_derive_all_chains_dialog(a),
+            width=150,
+            height=35,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=("#17a2b8", "#138496"),
+            hover_color=("#138496", "#117a8b")
+        )
+        derive_all_btn.pack(side="left", padx=5)
 
     def reveal_mnemonic(self, account_name):
         """Reveal mnemonic with password re-entry."""
@@ -1841,6 +1991,84 @@ class KeyManagerGUI:
                                    width=80, height=25, fg_color="gray30")
         toggle_btn.pack(anchor="w", pady=(0, 10))
 
+        # v3: Derive from Mnemonic checkbox
+        derive_var = ctk.CTkCheckBox(form, text="Derive from Mnemonic")
+        derive_var.pack(anchor="w", pady=(0, 5))
+
+        # v3: Derivation fields (hidden by default)
+        derive_fields_frame = ctk.CTkFrame(form, fg_color="transparent")
+
+        ctk.CTkLabel(derive_fields_frame, text="Derivation Chain:").pack(anchor="w")
+        deriv_chain_var = ctk.StringVar(value=DERIVATION_CHAINS[0])
+        self._style_combobox()
+        import tkinter.ttk as ttk
+        deriv_chain_combo = ttk.Combobox(derive_fields_frame, textvariable=deriv_chain_var,
+                                         values=DERIVATION_CHAINS, state="readonly",
+                                         width=55, style="Dark.TCombobox")
+        deriv_chain_combo.pack(fill="x", pady=(0, 5))
+
+        ctk.CTkLabel(derive_fields_frame, text="Address Index:").pack(anchor="w")
+        deriv_index_entry = ctk.CTkEntry(derive_fields_frame, placeholder_text="0", width=100)
+        deriv_index_entry.insert(0, "0")
+        deriv_index_entry.pack(anchor="w", pady=(0, 5))
+
+        derive_btn_pk = ctk.CTkButton(derive_fields_frame, text="Derive Key",
+                                      command=lambda: None, width=120, height=30,
+                                      fg_color=("#fd7e14", "#dc6602"))
+        derive_btn_pk.pack(anchor="w", pady=(0, 5))
+
+        derive_status = ctk.CTkLabel(derive_fields_frame, text="", font=ctk.CTkFont(size=10))
+        derive_status.pack(anchor="w")
+
+        # Store derived metadata for saving
+        derived_meta = {"path": None, "index": None, "address": None}
+
+        def on_derive_toggle():
+            if derive_var.get():
+                acct = acct_var.get().strip()
+                mnemonic = self.key_manager.show_mnemonic(acct)
+                if not mnemonic:
+                    derive_status.configure(text="No mnemonic stored for this account. Add a mnemonic first.", text_color="orange")
+                    derive_var.deselect()
+                    return
+                derive_fields_frame.pack(fill="x", pady=(0, 10))
+                pk_entry.configure(state="disabled")
+                derive_status.configure(text="", text_color="gray60")
+            else:
+                derive_fields_frame.pack_forget()
+                pk_entry.configure(state="normal")
+                derived_meta["path"] = None
+                derived_meta["index"] = None
+                derived_meta["address"] = None
+
+        derive_var.configure(command=on_derive_toggle)
+
+        def do_derive_pk():
+            acct = acct_var.get().strip()
+            mnemonic = self.key_manager.show_mnemonic(acct)
+            if not mnemonic:
+                derive_status.configure(text="No mnemonic for this account", text_color="red")
+                return
+            chain = deriv_chain_var.get()
+            try:
+                idx = int(deriv_index_entry.get() or "0")
+            except ValueError:
+                idx = 0
+            try:
+                result = DerivationEngine.derive_from_mnemonic(mnemonic, chain, address_index=idx)
+                pk_entry.configure(state="normal")
+                pk_entry.delete(0, "end")
+                pk_entry.insert(0, result["private_key"])
+                pk_entry.configure(state="disabled")
+                derived_meta["path"] = result["path"]
+                derived_meta["index"] = idx
+                derived_meta["address"] = result["address"]
+                derive_status.configure(text=f"Derived: {result['address'][:30]}...", text_color="green")
+            except Exception as e:
+                derive_status.configure(text=f"Error: {e}", text_color="red")
+
+        derive_btn_pk.configure(command=do_derive_pk)
+
         # Warning label
         ctk.CTkLabel(form,
                      text="\u26A0 This private key will be encrypted. Keep your master password safe.",
@@ -1867,8 +2095,18 @@ class KeyManagerGUI:
                 status_label.configure(text="Account and private key are required", text_color="red")
                 return
             try:
-                if self.key_manager.add_private_key(account, private_key,
-                                                    self.current_password, chain_label):
+                # v3: Include derivation metadata if derived from mnemonic
+                if derive_var.get() and derived_meta["path"]:
+                    success = self.key_manager.add_private_key(
+                        account, private_key, self.current_password, chain_label,
+                        source="derived",
+                        derivation_path=derived_meta["path"],
+                        address_index=derived_meta["index"],
+                        derived_address=derived_meta["address"])
+                else:
+                    success = self.key_manager.add_private_key(
+                        account, private_key, self.current_password, chain_label)
+                if success:
                     self.show_notification(f"Private key added to '{account}'")
                     dialog.destroy()
                     # If currently viewing this account, refresh the view
@@ -1884,6 +2122,215 @@ class KeyManagerGUI:
         ctk.CTkButton(btn_frame, text="Save Private Key", command=do_add, width=140).pack(side="left", padx=10)
         ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy, width=100,
                       fg_color="gray30").pack(side="left", padx=10)
+
+    def show_derivation_dialog(self, account_name):
+        """Open a dialog to derive addresses from the account's stored mnemonic."""
+        mnemonic = self.key_manager.show_mnemonic(account_name)
+        if not mnemonic:
+            self.show_notification("No mnemonic stored for this account", error=True)
+            return
+
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Derive Addresses from Mnemonic")
+        dialog.geometry("600x550")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        self._center_dialog(dialog)
+
+        ctk.CTkLabel(dialog, text="Derive Addresses from Mnemonic",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 5))
+        ctk.CTkLabel(dialog, text=f"Account: {account_name}",
+                     font=ctk.CTkFont(size=12), text_color="gray60").pack(pady=(0, 10))
+
+        form = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
+        form.pack(pady=10, padx=20, fill="both", expand=True)
+
+        # Chain dropdown
+        ctk.CTkLabel(form, text="Chain:").pack(anchor="w")
+        chain_var = ctk.StringVar(value=DERIVATION_CHAINS[0])
+        self._style_combobox()
+        import tkinter.ttk as ttk
+        chain_combo = ttk.Combobox(form, textvariable=chain_var, values=DERIVATION_CHAINS,
+                                    state="readonly", width=55, style="Dark.TCombobox")
+        chain_combo.pack(fill="x", pady=(0, 10))
+
+        # Derivation path (auto-populated, editable)
+        ctk.CTkLabel(form, text="Derivation Path:").pack(anchor="w")
+        path_entry = ctk.CTkEntry(form, width=420, font=ctk.CTkFont(size=12, family="monospace"))
+        path_entry.pack(fill="x", pady=(0, 10))
+
+        def update_path(event=None):
+            ch = chain_var.get()
+            cfg = DerivationEngine.SUPPORTED_CHAINS.get(ch, {})
+            path_entry.delete(0, "end")
+            path_entry.insert(0, cfg.get("path", ""))
+
+        chain_combo.bind("<<ComboboxSelected>>", update_path)
+        update_path()
+
+        # Address index
+        ctk.CTkLabel(form, text="Address Index:").pack(anchor="w")
+        index_entry = ctk.CTkEntry(form, placeholder_text="0", width=100)
+        index_entry.insert(0, "0")
+        index_entry.pack(anchor="w", pady=(0, 10))
+
+        # Results frame
+        result_frame = ctk.CTkFrame(form, fg_color="transparent")
+        result_frame.pack(fill="x", pady=(10, 0))
+
+        addr_label = ctk.CTkLabel(result_frame, text="", font=ctk.CTkFont(size=11), wraplength=500)
+        addr_label.pack(anchor="w")
+        pk_label = ctk.CTkLabel(result_frame, text="", font=ctk.CTkFont(size=11, family="monospace"),
+                                wraplength=500)
+        pk_label.pack(anchor="w", pady=(5, 0))
+
+        status_label = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(size=11))
+        status_label.pack()
+
+        last_result = {"data": None}
+
+        def do_derive():
+            ch = chain_var.get()
+            try:
+                idx = int(index_entry.get() or "0")
+            except ValueError:
+                idx = 0
+            try:
+                result = DerivationEngine.derive_from_mnemonic(mnemonic, ch, address_index=idx)
+                last_result["data"] = result
+                addr_label.configure(text=f"Address: {result['address']}", text_color="#51cf94")
+                pk_label.configure(text=f"Private Key: {result['private_key'][:40]}...", text_color="gray70")
+                status_label.configure(text="Derived successfully", text_color="green")
+            except Exception as e:
+                status_label.configure(text=f"Error: {e}", text_color="red")
+
+        def do_save():
+            if not last_result["data"]:
+                status_label.configure(text="Derive an address first", text_color="orange")
+                return
+            r = last_result["data"]
+            try:
+                self.key_manager.add_address(
+                    account_name, r["chain"], r["chain"], r["address"],
+                    self.current_password, notes="Derived",
+                    derivation_path=r["path"], source="derived")
+                self.key_manager.add_private_key(
+                    account_name, r["private_key"], self.current_password, r["chain"],
+                    source="derived", derivation_path=r["path"],
+                    derived_address=r["address"])
+                self.show_notification(f"Derived address+key saved to '{account_name}'")
+                status_label.configure(text="Saved!", text_color="green")
+                self.refresh_left_panel()
+                if self.current_account == account_name:
+                    self.select_account(self.current_pool or "Unassigned", account_name)
+            except Exception as e:
+                status_label.configure(text=f"Save error: {e}", text_color="red")
+
+        def do_derive_another():
+            try:
+                idx = int(index_entry.get() or "0") + 1
+            except ValueError:
+                idx = 1
+            index_entry.delete(0, "end")
+            index_entry.insert(0, str(idx))
+            do_derive()
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=15)
+        ctk.CTkButton(btn_frame, text="Derive", command=do_derive, width=100).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="Save to Account", command=do_save, width=140,
+                      fg_color=("#28a745", "#1e7e34")).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="Derive Another", command=do_derive_another, width=120,
+                      fg_color=("#007bff", "#0056b3")).pack(side="left", padx=5)
+        ctk.CTkButton(btn_frame, text="Close", command=dialog.destroy, width=80,
+                      fg_color="gray30").pack(side="left", padx=5)
+
+        dialog.after(300, do_derive)
+
+    def show_derive_all_chains_dialog(self, account_name):
+        """Derive addresses for all supported chains and show a summary."""
+        mnemonic = self.key_manager.show_mnemonic(account_name)
+        if not mnemonic:
+            self.show_notification("No mnemonic stored for this account", error=True)
+            return
+
+        dialog = ctk.CTkToplevel(self.root)
+        dialog.title("Derive All Chains")
+        dialog.geometry("650x600")
+        dialog.transient(self.root)
+        dialog.grab_set()
+        self._center_dialog(dialog)
+
+        ctk.CTkLabel(dialog, text="Derive All Chains from Mnemonic",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 5))
+        ctk.CTkLabel(dialog, text=f"Account: {account_name}",
+                     font=ctk.CTkFont(size=12), text_color="gray60").pack(pady=(0, 10))
+
+        scroll = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
+        scroll.pack(pady=10, padx=20, fill="both", expand=True)
+
+        status_label = ctk.CTkLabel(dialog, text="Deriving...", font=ctk.CTkFont(size=11), text_color="yellow")
+        status_label.pack()
+
+        results = {}
+
+        def do_derive_all():
+            results.clear()
+            for widget in scroll.winfo_children():
+                widget.destroy()
+            chains = list(DerivationEngine.SUPPORTED_CHAINS.keys())
+            total = len(chains)
+            
+            def derive_next(idx=0):
+                if idx >= total:
+                    status_label.configure(text=f"Derived {len(results)} chains", text_color="green")
+                    return
+                chain = chains[idx]
+                status_label.configure(text=f"Deriving {idx+1}/{total}: {chain}...", text_color="yellow")
+                try:
+                    data = DerivationEngine.derive_from_mnemonic(mnemonic, chain)
+                    results[chain] = data
+                    row = ctk.CTkFrame(scroll, corner_radius=8)
+                    row.pack(fill="x", pady=3, padx=5)
+                    info = ctk.CTkFrame(row, fg_color="transparent")
+                    info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+                    ctk.CTkLabel(info, text=chain, font=ctk.CTkFont(size=12, weight="bold")).pack(anchor="w")
+                    ctk.CTkLabel(info, text=data["address"], font=ctk.CTkFont(size=10), wraplength=400).pack(anchor="w")
+                    ctk.CTkButton(row, text="Save", width=70, height=28,
+                                  command=lambda c=chain, d=data: self._save_derived_to_account(
+                                      account_name, c, d, status_label)).pack(side="right", padx=10, pady=8)
+                except Exception as e:
+                    ctk.CTkLabel(scroll, text=f"{chain}: ERROR - {e}",
+                                 font=ctk.CTkFont(size=11), text_color="red").pack(anchor="w", pady=2)
+                dialog.after(50, lambda: derive_next(idx + 1))
+            
+            derive_next(0)
+
+        btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+        btn_frame.pack(pady=15)
+        ctk.CTkButton(btn_frame, text="Close", command=dialog.destroy, width=100,
+                      fg_color="gray30").pack(side="left", padx=5)
+
+        dialog.after(300, do_derive_all)
+
+    def _save_derived_to_account(self, account_name, chain, data, status_label):
+        """Save a derived address+key to the account."""
+        try:
+            self.key_manager.add_address(
+                account_name, chain, chain, data["address"],
+                self.current_password, notes="Derived",
+                derivation_path=data["path"], source="derived")
+            self.key_manager.add_private_key(
+                account_name, data["private_key"], self.current_password, chain,
+                source="derived", derivation_path=data["path"],
+                derived_address=data["address"])
+            self.show_notification(f"Saved {chain} to '{account_name}'")
+            status_label.configure(text=f"Saved {chain}", text_color="green")
+            self.refresh_left_panel()
+            if self.current_account == account_name:
+                self.select_account(self.current_pool or "Unassigned", account_name)
+        except Exception as e:
+            status_label.configure(text=f"Error: {e}", text_color="red")
 
     def show_init_vault_dialog(self):
         """Dialog to initialize a new vault from the GUI."""
@@ -2117,8 +2564,8 @@ class KeyManagerGUI:
 
 
 def main():
-    """Main entry point for GUI application."""
-    app = KeyManagerGUI()
+    """Main entry point for ColdStack GUI application."""
+    app = ColdStackGUI()
     app.run()
 
 
