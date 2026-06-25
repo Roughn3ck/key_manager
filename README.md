@@ -1,5 +1,18 @@
 # Key Manager - Secure Crypto Key Storage
 
+## 📥 Download
+
+**Latest release: [v3.0 — BIP39 Derivation Engine](https://github.com/Roughn3ck/key_manager/releases/tag/v3.0)**
+
+| File | Size | Description |
+|------|------|-------------|
+| `key_manager_gui.exe` | ~45MB | Full GUI application with v3 derivation engine |
+| `key_manager.exe` | ~35MB | CLI version for headless operations |
+
+> No installation required. Just download, run, and click "Initialize New Vault". Works on any Windows 10/11 machine — no Python needed.
+
+---
+
 ## v3.0 Features — BIP39 Mnemonic Derivation (June 2026)
 
 Key Manager v3 adds a full BIP39 mnemonic-to-address derivation engine:
