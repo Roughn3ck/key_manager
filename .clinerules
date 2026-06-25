@@ -1,220 +1,155 @@
-# Key Manager - Cline Project Rules
+# ColdStack — Cline Project Rules
 
 ## Project Overview
-Key Manager is a secure cryptocurrency key storage application with CLI and GUI interfaces.
-It encrypts wallet data (24-word mnemonics, addresses, account info) using AES-256-GCM with Argon2id key derivation.
-Designed for portable USB deployment alongside a local CLI workflow.
+ColdStack is a secure cryptocurrency key storage application with a GUI interface.
+It encrypts wallet data (24-word mnemonics, addresses, private keys) using AES-256-GCM with Argon2id key derivation.
+Designed for portable USB deployment alongside a local script-mode workflow.
 
-**Current production version: v4.0** (June 2026) - Price Feeds + Wallet Balances + Go Online Toggle. GUI is branded "ColdStack"; CLI source remains "key_manager" (script-mode only, CLI EXE deprecated). v3 adds BIP39 derivation. v4 adds balance fetching + CoinGecko price feeds.
+**Current production version: v4.1** (June 2026) — Go Online toggle, wallet balance fetching (15+ chains), CoinGecko price feeds, ERC-20 token support, compact card layout, currency toggle.
+
+**Next version: v5.0** — LP Engine module (Hyperliquid venue adapter, LP position dashboard, strategy suggestions).
+
+## ⚠️ CRITICAL: Always Compile After Changes
+
+**After ANY change to Python source files in `src/`, you MUST compile a fresh `coldstack.exe`:**
+
+```bash
+cd B:\Github\key_manager
+python build_gui_v4.py
+```
+
+This builds the EXE and copies it to `USB_DEPLOYMENT/coldstack.exe`. The build script:
+1. Cleans `build/` and `dist/` directories
+2. Runs PyInstaller with all hidden imports
+3. Backs up the previous EXE to `backups/`
+4. Copies the new EXE to `USB_DEPLOYMENT/coldstack.exe`
+5. Creates `USB_DEPLOYMENT/launch.bat`
+
+**Never leave `USB_DEPLOYMENT/coldstack.exe` stale.** If you touch `src/`, you rebuild. No exceptions.
+
+If the build fails, fix the error before considering the task complete. A stale EXE is worse than no EXE.
 
 ## Versioning
 
-Key Manager uses semantic versioning for releases. v1 is the original display-only GUI; v3 adds BIP39 mnemonic derivation.
-
 | Version | Description | Key Files |
 |---------|-------------|-----------|
-| v1 | Original GUI - display-only | `src/gui_main.py`, `build_gui.py` |
-| v2 | GUI Add functionality - create accounts, add addresses, add mnemonics | `src/gui_main_v2.py`, `build_gui_v2.py` |
-| v3 | GUI BIP39 derivation - derive addresses/keys from mnemonics | `src/gui_main_v3.py`, `build_gui_v3.py`, `src/derivation_engine.py` |
-| v3.1 | ColdStack rebrand + Check for Updates button | `src/gui_main_v3_1.py`, `build_gui_v3_1.py`, `key_manager_gui_v3_1.spec` |
-| v4.0 | Price Feeds + Wallet Balances + Go Online | `src/gui_main_v4.py`, `build_gui_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |
+| v4.1 | Go Online toggle + balance fetching + price feeds + ERC-20 + compact cards | `src/gui_main_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |
+| v5.0 (in progress) | LP Engine + Hyperliquid adapter + strategy suggestions | `src/lp_engine.py`, `src/venue_adapters/hyperliquid_adapter.py`, `src/lp_gui_poc.py` |
 
-### Versioning Rules (MUST follow for all future versions)
-1. New versions introduce a `_v<N>` suffix on all new/modified working files (e.g., `gui_main_v2.py`, `build_gui_v2.py`).
-2. Previous-version files are preserved untouched as the baseline - never edit `gui_main.py` or `build_gui.py` (these are v1).
-3. Core files of the previous version are backed up in the `backups/` directory with a `_v1` suffix (e.g., `backups/gui_main_v1.py`, `backups/build_gui_v1.py`, `backups/README_v1.md`, `backups/STATUS_v1.md`). This enables restoration.
-4. Shared infrastructure (`crypto_engine.py`, `backup_engine.py`, `main.py`) is extended backward-compatibly - both v1 and v2 use the same crypto/KeyManager core.
-5. EXE outputs in `USB_DEPLOYMENT/` are overwritten with the latest version build. The previous EXE is backed up to `backups/` before overwrite.
-6. Documentation (`.clinerules`, `README.md`, `STATUS.md`) is updated with each version release.
+### Versioning Rules
+1. New versions introduce a `_v<N>` suffix on new/modified GUI files (e.g., `gui_main_v4.py`, `gui_main_v5.py`).
+2. Previous-version files are preserved untouched as the baseline.
+3. Core shared files (`crypto_engine.py`, `backup_engine.py`, `main.py`) are extended backward-compatibly.
+4. EXE output in `USB_DEPLOYMENT/` is overwritten with the latest version build. Previous EXE is backed up to `backups/` before overwrite.
+5. Documentation (`.clinerules`, `README.md`) is updated with each version release.
 
 ## Project Structure
 ```
 key_manager/
 ├── src/
-│   ├── main.py            # CLI interface (Click-based) + KeyManager class (shared, script-mode only)
-│   ├── gui_main.py        # v1 GUI - CustomTkinter dark theme dashboard (display-only baseline)
-│   ├── gui_main_v2.py     # v2 GUI - Adds account/address/mnemonic creation dialogs (preserved)
-│   ├── gui_main_v3.py     # v3 GUI - BIP39 derivation dialogs + enhanced PK display (preserved)
-│   ├── gui_main_v3_1.py   # v3.1 GUI - ColdStack rebrand + Check for Updates (preserved)
-│   ├── gui_main_v4.py     # v4.0 GUI - Go Online toggle + inline balances + price feeds
-│   ├── balance_engine.py  # v4.0: Fetch wallet balances via public RPC
-│   ├── price_engine.py    # v4.0: Fetch crypto prices via CoinGecko
-│   ├── crypto_engine.py   # AES-256-GCM encryption + Argon2id KDF (shared)
-│   ├── derivation_engine.py # BIP39 mnemonic-to-address derivation (v3)
-│   └── backup_engine.py   # Vault backup/restore engine (shared)
-├── backups/               # Backup files for restoration
-│   ├── (v1 backups in backups/v1/)
-│   ├── gui_main_v2.py         # Copy of v2 GUI source
-│   ├── build_gui_v2.py        # Copy of v2 build script
-│   ├── README_v2.md           # Copy of v2 README
-│   ├── STATUS_v2.md           # Copy of v2 STATUS
-│   └── key_manager_gui_v2.exe # Copy of v2 GUI EXE
-│   ├── gui_main_v1.py         # Copy of v1 GUI source
-│   ├── build_gui_v1.py        # Copy of v1 build script
-│   ├── README_v1.md           # Copy of v1 README
-│   └── STATUS_v1.md           # Copy of v1 STATUS
-├── USB_DEPLOYMENT/        # Pre-built portable EXE for USB drives
-│   └── coldstack.exe         # GUI version (v3.1 build - ColdStack branded)
-│   (key_manager.exe CLI EXE deprecated and removed from USB_DEPLOYMENT as of v3.1)
-├── build_gui.py           # v1 PyInstaller build script (legacy)
-├── build_gui_v2.py        # v2 PyInstaller build script (builds gui_main_v2) (preserved)
-├── build_gui_v3.py        # v3 PyInstaller build script (builds gui_main_v3) (preserved)
-├── build_gui_v3_1.py      # v3.1 PyInstaller build script (builds gui_main_v3_1 -> coldstack.exe)
-├── key_manager_gui_v3_1.spec  # v3.1 PyInstaller spec (name='coldstack')
-├── test_derivation.py     # v3 BIP39 derivation parity + multi-chain tests
-├── init_vault.py          # Vault initialization helper
-├── check_vault.py         # Vault diagnostic script
-├── show_vault.py          # Vault content viewer
-├── import_addresses.py    # Import addresses from CSV
-├── import_addresses_to_vault.py  # Import addresses into encrypted vault
-├── process_excel.py       # Excel address processing
-├── debug_paths.py         # Path resolution debugging
-├── address_database.json  # Unencrypted reference/template address data
-├── sample_addresses.csv   # Sample CSV for import testing
-├── setup.py               # Package setup
-├── requirements.txt       # Python dependencies
-├── STATUS.md              # Project status tracking
-└── FINAL_PATHS.txt        # Path configuration notes
+│   ├── gui_main_v4.py         # v4.1 GUI — ColdStack, Go Online, balances, prices
+│   ├── balance_engine.py      # v4.1: Fetch wallet balances via public RPC (15+ chains)
+│   ├── price_engine.py        # v4.1: CoinGecko price feeds (60s in-memory cache)
+│   ├── lp_engine.py           # v5.0: LP Engine core (LPPosition, VenueAdapter, StrategyEngine)
+│   ├── venue_adapters/
+│   │   ├── __init__.py         # Auto-registers adapters on import
+│   │   └── hyperliquid_adapter.py  # v5.0: Hyperliquid L1 + HyperEVM adapter
+│   ├── lp_gui_poc.py          # v5.0: LP tab UI proof-of-concept (Tkinter)
+│   ├── crypto_engine.py       # AES-256-GCM encryption + Argon2id KDF (shared)
+│   ├── derivation_engine.py   # BIP39 mnemonic-to-address derivation (v3)
+│   ├── backup_engine.py       # Vault backup/restore engine (shared)
+│   └── main.py                # CLI interface (Click-based, script-mode only)
+├── build_gui_v4.py            # PyInstaller build script (builds gui_main_v4 → coldstack.exe)
+├── key_manager_gui_v4.spec    # PyInstaller spec (name='coldstack')
+├── coldstack.spec             # Duplicate spec (kept for compatibility)
+├── USB_DEPLOYMENT/
+│   ├── coldstack.exe          # Current production EXE (v4.1 build)
+│   ├── launch.bat             # Launcher script
+│   └── README.md              # USB deployment readme
+├── backups/                   # Previous version backups
+├── .clinerules                # This file
+├── README.md                  # Project readme
+├── requirements.txt           # Python dependencies
+└── STATUS.md                  # Project status tracking
 ```
 
-## Key Architecture Decisions
+## Key Architecture
 
 ### Data Flow
 - **Encrypted vault** (`key_vault.encrypted`) is the single source of truth
-- Vault location (v3.1): the root directory where ColdStack runs - project root in script mode, EXE directory in frozen mode. The vault is co-located with the application for easy backup and portability.
-- `KeyManager.address_db` holds the in-memory decrypted data after unlock
-- Data structure: `{ version, pools: {name: {description, accounts:[]}}, accounts: {name: {addresses:[], notes}}, mnemonics: {name: phrase} }`
+- Vault is co-located with ColdStack (project root in script mode, EXE directory in frozen mode)
+- `KeyManager.address_db` holds in-memory decrypted data after unlock
+- Data structure: `{ version, pools, accounts, mnemonics, private_keys }`
 
 ### Crypto Stack
 - **Argon2id** for key derivation (64MB memory, 3 iterations, 4 lanes)
 - **AES-256-GCM** for authenticated encryption (12-byte nonce, 16-byte tag)
 - Salt and nonce are randomly generated per encryption operation
-- `CryptoEngine.encrypt_json()` -> JSON string with base64-encoded salt/nonce/tag/ciphertext
-- `CryptoEngine.verify_password()` attempts full decrypt to validate (no separate password hash)
+- Password is held in memory only during active session — never written to disk
 
-### Dual Interface Pattern
-- CLI: `src/main.py` uses Click commands + Rich for output (script-mode only; CLI EXE deprecated as of v3.1)
-- GUI v1: `src/gui_main.py` uses CustomTkinter with dark theme (display-only)
-- GUI v2: `src/gui_main_v2.py` extends v1 with Add Account / Add Address / Add Mnemonic dialogs + toast notifications + `refresh_left_panel()`
-- GUI v3: `src/gui_main_v3.py` extends v2 with BIP39 derivation dialogs, enhanced private key display, "Derive from Mnemonic" checkbox, incremental `derive_all_chains` via `dialog.after()`
-- GUI v3.1: `src/gui_main_v3_1.py` rebrands the GUI to "ColdStack" (class `ColdStackGUI`), adds a user-initiated "Check for Updates" button to the status bar. The update check makes a single GitHub API call (`urllib.request`) in a background thread - no background polling, offline by default.
-- All GUI versions and CLI share `KeyManager` class and `CryptoEngine`
-- v3 adds `DerivationEngine` class (`src/derivation_engine.py`) for BIP39 HD wallet derivation
+### Go Online Architecture (v4.1)
+- **Offline by default** — zero network requests unless user enables "Go Online" in Settings
+- **Balance Engine**: Fetches wallet balances via public RPC endpoints (no API keys). Supports EVM (ETH, ARB, BASE, BSC, POLY, OPT), BTC, SOL, DASH, SUI, ZEC, XRP, ADA, ATOM, SCRT, RUNE, HyperEVM (HYPE). Uses stdlib `urllib.request`.
+- **Price Engine**: CoinGecko API (free tier, no API key). 60-second in-memory cache. Never written to disk.
+- **ERC-20 Token Support**: Configurable token contract addresses per EVM chain.
+- **Currency Toggle**: USD, AUD, CAD, EUR, CHF, or None. Stored in encrypted vault.
+- Only public addresses are queried — private keys and mnemonics NEVER leave the vault.
 
-### v2 GUI Add Functionality (June 2026)
-v2 introduces modal dialogs accessible from the dashboard:
-1. **Add Account** - creates a new account (optionally assigned to a pool), saves to vault, refreshes left panel.
-2. **Add Address** - adds `{coin, chain, address, notes}` to the selected account via `key_manager.add_address()` (which now accepts an optional `notes` parameter - backward compatible).
-3. **Add Mnemonic** - stores/updates a 24-word recovery phrase for the selected account via `key_manager.add_mnemonic()`.
-4. **Add Private Key** (v2.2) - adds a chain-specific private key to an account via `key_manager.add_private_key(account, key, password, chain)`. Supports multiple keys per account with chain labels (BTC, EVM, DASH, etc., plus "Blank/None" and "Custom...").
-All add operations re--encrypt and save the vault, then call `refresh_left_panel()` to update the account list. Toast notifications provide visual feedback.
+### LP Engine Architecture (v5.0 — in progress)
+- **lp_engine.py**: Core module with `LPPosition` dataclass, `VenueAdapter` ABC, `StrategyEngine`, `LPEngine` facade
+- **venue_adapters/**: One file per venue. Each adapter implements `can_handle()`, `fetch_position()`, `fetch_all_positions()`, `fetch_fees_earned()`
+- **Read-only**: Adapters never sign transactions, never access private keys
+- **Offline-aware**: Same pattern as balance engine — raises `OfflineError` when offline
+- **Strategy Engine**: Analyzes LPPosition and returns status (🟢/⚠️/🚨) + suggested action (Hold/Rebalance/Withdraw)
+- **No new dependencies**: Uses stdlib `urllib.request` only
 
-### v2.2 Multi-Key & Mnemonic Fix (June 2026)
-- **Private Keys schema upgrade**: `private_keys` changed from `{account: "key_string"}` to `{account: [{chain: "DASH", key: "Xv3..."}, ...]}`. Backward-compatible: legacy string format auto-migrates to list on first append.
-- **Private Keys display**: The detail panel now shows all stored private keys sequentially with chain labels: `[Chain Name] Key: [key]` or `[No Chain Specified] Key: [key]`.
-- **Mnemonic section independence**: The Recovery Phrase section is now always shown (even when an account has no addresses). If no mnemonic is stored, displays "No mnemonic stored for this account."
-- **CLI `add-key`**: Now accepts `--chain` option for chain-specific key labels.
-- **CLI `show-key`**: Lists all stored private keys with chain labels.
-
-
-
-### v3 BIP39 Derivation Engine (June 2026)
-- **DerivationEngine** (`src/derivation_engine.py`): Stateless class that derives addresses + private keys from BIP39 mnemonics using `hdwallet` library.
-  - 7 supported chains: EVM, BTC Taproot (BIP86), BTC SegWit (BIP84), BTC Legacy (BIP44), Solana, Dash, Sui
-  - Manual bech32/bech32m encoding for BTC SegWit/Taproot (hdwallet returns legacy P2PKH for all BTC types)
-  - EIP-55 checksummed EVM addresses via keccak256
-  - `derive_from_mnemonic()`, `derive_multiple()`, `derive_all_chains()`, `validate_mnemonic()`, `generate_mnemonic()`
-- **Schema enhancement**: Private keys store `source`, `derivation_path`, `address_index`, `derived_address`. Addresses store `derivation_path`, `derivation_index`, `source`. Backward-compatible.
-- **GUI dialogs**: `show_derivation_dialog()`, `show_derive_all_chains_dialog()`, `_save_derived_to_account()`.
-- **Derive All Chains** uses incremental `dialog.after(50, ...)` to avoid blocking the Tkinter event loop.
-- **PortableKeyManager delegates** updated to pass through all v3 parameters.
-- **CLI commands**: `derive-address`, `generate-mnemonic`, `validate-mnemonic`.
-- **Dependencies**: `hdwallet`, `mnemonic` (+ transitive: coincurve, base58, cbor2, pynacl, ed25519-blake2b, crcmod, pycryptodome).
-
-### v3.1 ColdStack Rebrand + Update Check (June 2026)
-- **Brand rebrand**: GUI-facing strings changed from "Key Manager" to "ColdStack" (window title, login screen, version label, module/class docstrings). Main GUI class renamed `KeyManagerGUI` -> `ColdStackGUI`. `PortableKeyManager` class name unchanged (wraps core `KeyManager`).
-- **Check for Updates button**: Added to the status bar (right side, between session timer and Lock button). User-initiated only - shows a confirm dialog, then makes a single `urllib.request` call to the GitHub releases API in a background `threading.Thread`. Results are marshaled back to Tkinter via `self.root.after(0, ...)`. No background polling. Offline by default.
-- **EXE rename**: GUI EXE output changed from `key_manager_gui.exe` to `coldstack.exe`.
-- **CLI EXE deprecated**: The `key_manager.exe` CLI executable is no longer built or distributed in `USB_DEPLOYMENT/` as of v3.1. The CLI source (`src/main.py`) remains available for script-mode use (`python src/main.py`).
-- **Build script fixes**: `copy_to_usb_deployment()` backup name fixed from `key_manager_gui_v2.exe` to `key_manager_gui_v3.exe`. `create_launcher_script()` content updated to ColdStack branding.
-- **Vault path policy change**: As of v3.1, the vault (`key_vault.encrypted`) always lives in the root directory where ColdStack runs (project root in script mode, EXE directory in frozen mode) - not in `~/.key_manager/`.
+### Dual Interface
+- **GUI** (`src/gui_main_v4.py`): CustomTkinter dark theme. This is the primary interface. Built as `coldstack.exe` via PyInstaller.
+- **CLI** (`src/main.py`): Click-based, script-mode only. CLI EXE is deprecated. Used for development and scripting.
 
 ### Portable vs Local Paths
-- **Frozen (EXE)**: `base_dir = os.path.dirname(sys.executable)` -> vault in `<exe_dir>/key_vault.encrypted`
-- **Script**: `base_dir = project_root` -> vault in `<project_root>/key_vault.encrypted`
-- `PortableKeyManager` in `gui_main_v3_1.py` always uses `base_dir` for the vault location (no longer falls back to `~/.key_manager/`)
+- **Frozen (EXE)**: `base_dir = os.path.dirname(sys.executable)` → vault in `<exe_dir>/key_vault.encrypted`
+- **Script**: `base_dir = project_root` → vault in `<project_root>/key_vault.encrypted`
+- `PortableKeyManager` always uses `base_dir` for vault location
 
-## Critical Code Areas & Known Patterns
+## Build & Deploy
 
-### GUI Fix History (June 2026)
-The GUI was crashing on login in both script and EXE modes. Three bugs were identified and fixed:
+**Current build command (v4.1):**
+```bash
+cd B:\Github\key_manager
+python build_gui_v4.py
+```
 
-1. **`FreeConsole()` crashing script mode**: `ctypes.windll.kernel32.FreeConsole()` was called unconditionally at startup. In script mode, this detaches stdout/stderr from the terminal, causing a fatal "I/O operation on closed file" error. **Fix:** `FreeConsole()` now only runs when `getattr(sys, 'frozen', False)` is `True` (EXE mode only). Never call `FreeConsole()` in script mode.
+- Builds `src/gui_main_v4.py` → `dist/coldstack.exe` → copies to `USB_DEPLOYMENT/coldstack.exe`
+- Output: ~45MB self-contained EXE (Python runtime + all deps bundled)
+- `--onefile --console` mode (FreeConsole hides console at runtime on Windows)
+- Previous EXE backed up to `backups/coldstack_v4.exe` before overwrite
+- All hidden imports for customtkinter, cryptography, argon2, hdwallet, mnemonic, etc. are in the build script
 
-2. **Session timer started before status bar existed**: `attempt_login()` -> `start_session_timer()` -> `update_session_timer()` tried to update `self.session_timer_label` before `create_status_bar()` created it. Raised `AttributeError`, crashing immediately after successful login. **Fix:** `start_session_timer()` is now called after `create_status_bar()`. Backup status update guarded with `hasattr(self, 'backup_status_label')`.
-
-3. **`update_session_timer()` lacked defensive guards**: Timer callback could fire before/after dashboard widgets existed, crashing. **Fix:** `update_session_timer()` checks `hasattr(self, 'session_timer_label')` before updating and only reschedules if dashboard is active.
-
-**Key lesson:** Always guard `self.*` widget references with `hasattr()` checks in any callback that might fire before or after the widget lifecycle. Widget creation order matters - do not start timers or callbacks until all referenced widgets exist.
-
-### Remaining GUI Issues (from earlier review, verify current state)
-1. **Hardcoded accounts**: Left panel may still use hardcoded pool/account dicts instead of loading from `self.key_manager.address_db["pools"]`. v2's `refresh_left_panel()` loads live data from `address_db`. Verify v1 before extending v1.
-2. **Mnemonic reveal**: `verify_password()` was called with `json.dumps(self.key_manager.address_db)` (decrypted data) but expects the encrypted JSON string. May still fail. Verify before using reveal feature.
-3. **Fragile PortableKeyManager proxy**: `__dict__.update()` + `__getattr__` pattern can break when `KeyManager` sets attributes after `__init__`. Be cautious when adding new KeyManager attributes.
-4. **No visual notifications**: `show_notification()` only prints to console; no toast/popup feedback. **v2** adds a `show_toast()` overlay method for visual feedback on add operations.
-
-### Import Path Handling
-- `sys.path.insert(0, ...)` is used in multiple files to enable `from crypto_engine import ...`
-- When modifying imports, test both script execution and PyInstaller frozen execution
-- The `--add-data=src;src` PyInstaller flag must be maintained
+**When v5.0 is ready:** Create `build_gui_v5.py` that adds `lp_engine.py` and `venue_adapters/` to the PyInstaller data/hidden imports. The LP Engine modules must be included in the build.
 
 ## Dependencies
 ```
 customtkinter    # GUI framework
 cryptography     # AES-GCM + Argon2id
-click            # CLI framework (script-mode only)
-rich             # CLI output formatting (script-mode only)
 pyperclip        # Clipboard operations
 Pillow (PIL)     # Image support for CustomTkinter
 argon2-cffi      # Argon2id password hashing
 PyInstaller      # Build tool for EXE creation
-hdwallet         # BIP32/BIP44/49/84/86 HD wallet derivation (v3)
-mnemonic         # BIP39 mnemonic validation/generation (v3)
+hdwallet         # BIP32/BIP44/49/84/86 HD wallet derivation
+mnemonic         # BIP39 mnemonic validation/generation
+coincurve        # secp256k1 for EVM signing
+base58           # Base58 encoding
+cbor2            # CBOR encoding
+pynacl           # NaCl crypto
+ed25519-blake2b  # Ed25519 for Solana
+crcmod           # CRC for Sui
+pycryptodome     # keccak256 for EVM addresses
 ```
-
-## Build & Deploy
-- **v4.0 GUI EXE (current):** `python build_gui_v4.py` -> `dist/coldstack.exe` -> copied to `USB_DEPLOYMENT/coldstack.exe`
-- **v3.1 GUI EXE (legacy):** `python build_gui_v3_1.py` -> `dist/coldstack.exe` -> copied to `USB_DEPLOYMENT/coldstack.exe`
-- **v3 GUI EXE (legacy):** `python build_gui_v3.py` -> `dist/key_manager_gui_v3.exe` -> only use to restore v3 baseline
-- **v2 GUI EXE (legacy):** `python build_gui_v2.py` -> only use to restore v2 baseline
-- **v1 GUI EXE (legacy):** `python build_gui.py` -> only use to restore v1 baseline
-- **CLI EXE: DEPRECATED** - The `key_manager.exe` CLI executable is no longer built or distributed in `USB_DEPLOYMENT/` as of v3.1. The CLI source (`src/main.py`) remains available for script-mode use (`python src/main.py`).
-- GUI EXE output goes to `USB_DEPLOYMENT/coldstack.exe` for USB drive deployment
-- Build with `--onefile --console` for GUI (FreeConsole hides console at runtime)
-- Resulting GUI EXE should be ~45MB (Python runtime + all deps bundled)
-- Before overwriting `USB_DEPLOYMENT/coldstack.exe`, back up the previous EXE to `backups/`
-
-## Running
-- **v4.0 Script mode (development, current):** `python src/gui_main_v4.py` - Go Online toggle + inline balances + price feeds + full derivation + add functionality
-- **v3.1 Script mode (legacy):** `python src/gui_main_v3_1.py` - ColdStack branding + Check for Updates + full derivation + add functionality
-- **v3 Script mode (legacy):** `python src/gui_main_v3.py` - full derivation + add functionality (preserved)
-- **v2 Script mode (legacy):** `python src/gui_main_v2.py` - full add functionality (preserved)
-- **v1 Script mode (legacy):** `python src/gui_main.py` - display-only
-- **EXE mode (portable):** `USB_DEPLOYMENT\coldstack.exe` - v3.1 build (ColdStack branded)
-- **CLI (script mode only):** `python src/main.py` (CLI EXE deprecated and removed from USB_DEPLOYMENT as of v3.1)
-
-## Testing
-- `test_gui.py` - Tests backup engine and basic GUI imports
-- `test_gui_login.py` - Tests login screen functionality
-- `test_vault.py` - Tests vault creation/unlock
-- `test_portable_vault.py` - Tests portable vault path resolution
-- `test_dashboard.py` - Tests dashboard creation
-- `test_derivation.py` - BIP39 derivation Ian Coleman parity + multi-chain + validation tests (v3)
-- Tests use temporary directories; clean up after runs
 
 ## Coding Conventions
 - Type hints on all function signatures (`Optional[Path]`, `Dict[str, Any]`, etc.)
-- Docstrings on all public methods (Args/Returns pattern)
+- Docstrings on all public methods
 - `pathlib.Path` for file system operations
 - No plain text sensitive data in logs or print statements
 - Error handling: catch specific exceptions, never bare `except:`
@@ -222,15 +157,28 @@ mnemonic         # BIP39 mnemonic validation/generation (v3)
 - GUI: Guard `self.*` widget references with `hasattr()` in callbacks that might fire before widgets exist
 - GUI: Do not start timers/callbacks until all referenced widgets are created
 - Session timeout: 5 minutes of inactivity triggers auto-lock
+- Never call `FreeConsole()` in script mode — only when frozen (EXE)
 
 ## Security Rules
 - Never log or print decrypted mnemonics or addresses in production code
 - Always clear clipboard after copy operations where possible
 - Mnemonics must auto-hide after reveal (5-minute max display)
 - Password fields must use `show="*"` masking
-- No password storage - password is held in memory only during active session
+- No password storage — password is held in memory only during active session
 - On lock/session expiry: clear `current_password`, `revealed_mnemonics`, and `address_db` references
-- Never call `FreeConsole()` in script mode - only when frozen (EXE)
+- LP Engine is read-only — never add signing or transaction execution capabilities
+- Go Online is OFF by default — never change this default
+
+## Known Issues
+- `build_gui_v4.py` backs up previous EXE as `coldstack_v3_1.exe` — should be `coldstack_v4.exe` (needs fix)
+- G5 `lp_address` in `strategy.json` is 66 chars (not a valid 42-char EVM address) — needs clarification for HyperEVM adapter testing
+- LP Engine v5.0 is architecture-only — not yet integrated into `gui_main_v4.py` (needs `gui_main_v5.py` when ready)
+
+## Testing
+- `test_derivation.py` — BIP39 derivation parity + multi-chain tests
+- `test_gui.py`, `test_gui_login.py`, `test_vault.py`, `test_portable_vault.py`, `test_dashboard.py`
+- LP Engine: `python3 -c "from lp_engine import LPEngine; e = LPEngine(online_mode=False); e.fetch_all_positions('0x...')"` → should raise `OfflineError`
+- Always run `python3 -m py_compile src/<file>.py` after editing any source file
 
 ## System Directive
 System Directive: DO NOT output raw JSON blocks for tool usage (such as {"name": "write_to_file"}). You MUST strictly use Anthropic-style XML tags to invoke system tools. Do not deviate from the requested structural wrappers.

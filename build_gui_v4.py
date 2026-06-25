@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """
-PyInstaller build script for ColdStack GUI v4.0.
+PyInstaller build script for ColdStack GUI v4.1.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v4.0 (June 2026) - Price Feeds + Wallet Balances + Go Online Toggle
+Version: v4.1 (June 2026) - Go Online toggle + balance fetching + price feeds + ERC-20
 Builds: src/gui_main_v4.py
 Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
+
+⚠️ After ANY source change, rebuild: python build_gui_v4.py
 """
 import os
 import sys
@@ -23,7 +25,7 @@ def clean_build_dirs():
 
 
 def build_gui_exe():
-    print("Building ColdStack v4.0 executable...")
+    print("Building ColdStack v4.1 executable...")
 
     project_dir = Path(__file__).parent.resolve()
 
@@ -99,7 +101,7 @@ def copy_to_usb_deployment():
     backups_dir = Path('backups')
     backups_dir.mkdir(exist_ok=True)
     if target_path.exists():
-        backup_path = backups_dir / 'coldstack_v3_1.exe'
+        backup_path = backups_dir / 'coldstack_v4.exe'
         print(f"Backing up previous EXE to {backup_path}...")
         shutil.copy2(target_path, backup_path)
 
@@ -140,7 +142,7 @@ echo ========================================
 echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting ColdStack v4.0...
+echo Starting ColdStack v4.1...
 echo.
 coldstack.exe
 pause
@@ -174,7 +176,7 @@ def main():
     print(f"Working directory: {os.getcwd()}")
 
     print("=" * 60)
-    print("ColdStack v4.0 - Portable EXE Builder")
+    print("ColdStack v4.1 - Portable EXE Builder")
     print("=" * 60)
 
     if not check_dependencies():
