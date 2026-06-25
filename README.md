@@ -1,5 +1,38 @@
 # Key Manager - Secure Crypto Key Storage
 
+## v3.0 Features — BIP39 Mnemonic Derivation (June 2026)
+
+Key Manager v3 adds a full BIP39 mnemonic-to-address derivation engine:
+
+- **Derive addresses and private keys** from stored mnemonics using standard HD wallet paths
+- **7 supported chains**: EVM (Ethereum/Arbitrum/Base), BTC Taproot, BTC SegWit, BTC Legacy, Solana, Dash, Sui
+- **GUI integration**: "Derive Addresses" and "Derive All Chains" buttons in the mnemonic section
+- **Derive from Mnemonic** checkbox in the Add Private Key dialog
+- **Enhanced private key display** with derivation path and source indicators
+- **CLI commands**: `derive-address`, `generate-mnemonic`, `validate-mnemonic`
+- **Backward compatible**: v2 vaults open without migration; old keys display correctly
+
+### Running v3
+- **GUI (script mode):** `python src/gui_main_v3.py`
+- **Build EXE:** `python build_gui_v3.py` → `USB_DEPLOYMENT/key_manager_gui.exe`
+- **CLI:** `python src/main.py derive-address --account "MyAccount" --chain "EVM (Ethereum / Arbitrum / Base)" --index 0`
+
+### Supported Derivation Chains
+
+| Chain | Path | Address Format |
+|-------|------|----------------|
+| EVM (Ethereum / Arbitrum / Base) | m/44'/60'/0'/0/0 | 0x... (EIP-55 checksum) |
+| BTC Taproot (bc1p) | m/86'/0'/0'/0/0 | bc1p... (bech32m) |
+| BTC SegWit (bc1q) | m/84'/0'/0'/0/0 | bc1q... (bech32) |
+| BTC Legacy (1...) | m/44'/0'/0'/0/0 | 1... (Base58Check P2PKH) |
+| SOL (Solana) | m/44'/501'/0'/0' | Base58 Ed25519 |
+| DASH (Dash) | m/44'/5'/0'/0/0 | X... (Base58Check P2PKH) |
+| SUI (Sui) | m/44'/784'/0'/0'/0' | 0x... (Ed25519) |
+
+> **Verified against Ian Coleman's BIP39 tool**: The standard test vector produces `0x9858EfFD232B4033E47d90003D41EC34EcaEda94` at `m/44'/60'/0'/0/0`.
+
+
+
 ## Quick Start
 
 1. **Copy** `key_manager_gui.exe` to a USB drive (or any folder)
@@ -10,7 +43,7 @@
 
 That's it. No installation. No Python. No dependencies. Just run the EXE.
 
-> **Important:** The EXE is completely self-contained. It runs on **any Windows computer** without Python installed. All libraries (Python runtime, crypto, GUI framework) are bundled inside the ~38MB EXE.
+> **Important:** The EXE is completely self-contained. It runs on **any Windows computer** without Python installed. All libraries (Python runtime, crypto, GUI framework) are bundled inside the ~45MB EXE.
 
 ## What is Key Manager?
 
@@ -27,7 +60,7 @@ Everything is encrypted at rest. Your master password is never stored — it exi
 ## Two Interfaces
 
 ### GUI (Windows EXE)
-- **File:** `key_manager_gui.exe` (built from `src/gui_main_v2.py`)
+- **File:** `key_manager_gui.exe` (built from `src/gui_main_v3.py`)
 - **For:** Human use — view, add, manage accounts and keys
 - **Features:** Dark theme, add accounts/addresses/mnemonics, CSV/Excel import, auto-lock
 
@@ -73,7 +106,7 @@ python3 src/key_manager_agent.py --vault /path/to/key_vault.encrypted --serve --
 - ALWAYS send `{"cmd": "lock"}` when done
 - Password comes from `KEY_MANAGER_PASSWORD` env var only
 
-## GUI Features (v2.4)
+## GUI Features (v3.0)
 
 ### Core Features
 - **Modern Dark Theme** — Easy on the eyes, built with CustomTkinter
@@ -213,6 +246,9 @@ key_manager change-password                   # Change master password
 key_manager lock                               # Lock the session
 key_manager status                             # Show vault statistics
 key_manager gen-password                       # Generate a secure password
+key_manager derive-address <account> --chain <chain> [--index=0] [--list-chains]  # Derive from mnemonic
+key_manager generate-mnemonic [--strength=256]   # Generate a new BIP39 mnemonic
+key_manager validate-mnemonic <account>           # Validate stored mnemonic checksum
 ```
 
 ## Technical Details
@@ -225,6 +261,15 @@ key_manager gen-password                       # Generate a secure password
 - **Headless Agent:** Python 3.10+, `pycryptodomex`, `cryptography`
 
 ## Version
+
+**v3.0** — June 2026
+- BIP39 mnemonic-to-address derivation engine (7 chains: EVM, BTC Taproot/SegWit/Legacy, Solana, Dash, Sui)
+- "Derive Addresses" and "Derive All Chains" buttons in mnemonic section
+- "Derive from Mnemonic" checkbox in Add Private Key dialog
+- Enhanced private key display with derivation path + source indicators + link icon
+- CLI commands: `derive-address`, `generate-mnemonic`, `validate-mnemonic`
+- Schema enhancement: private keys/addresses store derivation metadata (source, path, index)
+- Fully backward-compatible: v2 vaults open without migration
 
 **v2.4** — June 2026
 - Initialize vault from GUI (no CLI needed)

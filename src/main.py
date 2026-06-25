@@ -192,12 +192,27 @@ class KeyManager:
         return True
     
     def add_private_key(self, account_name: str, private_key: str, password: str,
-                        chain: str = "") -> bool:
+                        chain: str = "",
+                        source: str = "manual",
+                        derivation_path: Optional[str] = None,
+                        address_index: Optional[int] = None,
+                        derived_address: Optional[str] = None) -> bool:
         """Add a chain-specific private key to an account.
 
-        Stores keys as a list of {chain, key} dicts per account, supporting
+        Stores keys as a list of {chain, key, source, derivation_path,
+        address_index, derived_address} dicts per account, supporting
         multiple chain-specific keys. Backward-compatible: if existing data
         is a plain string, it is migrated to a list on first append.
+
+        Args:
+            account_name: Account to add the key to.
+            private_key: The private key string.
+            password: Vault password for re-encryption.
+            chain: Chain label (e.g. "EVM (Ethereum / Arbitrum / Base)").
+            source: "manual" or "derived" (default "manual").
+            derivation_path: HD derivation path if derived (e.g. "m/44'/60'/0'/0/0").
+            address_index: Address index used in derivation.
+            derived_address: The public address corresponding to this key.
         """
         pk_store = self.address_db.setdefault("private_keys", {})
         existing = pk_store.get(account_name)
@@ -206,9 +221,17 @@ class KeyManager:
         if existing is None:
             pk_store[account_name] = []
         elif isinstance(existing, str):
-            pk_store[account_name] = [{"chain": "", "key": existing}]
+            pk_store[account_name] = [{"chain": "", "key": existing, "source": "manual"}]
 
-        pk_store[account_name].append({"chain": chain, "key": private_key})
+        entry: Dict[str, Any] = {"chain": chain, "key": private_key, "source": source}
+        if derivation_path is not None:
+            entry["derivation_path"] = derivation_path
+        if address_index is not None:
+            entry["address_index"] = address_index
+        if derived_address is not None:
+            entry["derived_address"] = derived_address
+
+        pk_store[account_name].append(entry)
         return self.save_encrypted_data(password)
 
     def show_private_key(self, account_name: str) -> List[Dict[str, str]]:
@@ -242,21 +265,41 @@ class KeyManager:
             return False
     
     def add_address(self, account: str, coin: str, chain: str, address: str,
-                    password: str, notes: str = "") -> bool:
-        """Add an address to an account."""
+                    password: str, notes: str = "",
+                    derivation_path: Optional[str] = None,
+                    derivation_index: Optional[int] = None,
+                    source: str = "manual") -> bool:
+        """Add an address to an account.
+
+        Args:
+            account: Account name.
+            coin: Coin label (e.g. "ETH", "BTC").
+            chain: Chain label (e.g. "EVM (Ethereum / Arbitrum / Base)").
+            address: Wallet address string.
+            password: Vault password for re-encryption.
+            notes: Optional notes string.
+            derivation_path: HD derivation path if derived from mnemonic.
+            derivation_index: Address index used in derivation.
+            source: "manual" or "derived" (default "manual").
+        """
         if account not in self.address_db["accounts"]:
             self.address_db["accounts"][account] = {
                 "addresses": [],
                 "notes": ""
             }
         
-        addr_entry = {
+        addr_entry: Dict[str, Any] = {
             "coin": coin,
             "chain": chain,
-            "address": address
+            "address": address,
+            "source": source,
         }
         if notes:
             addr_entry["notes"] = notes
+        if derivation_path is not None:
+            addr_entry["derivation_path"] = derivation_path
+        if derivation_index is not None:
+            addr_entry["derivation_index"] = derivation_index
         
         self.address_db["accounts"][account]["addresses"].append(addr_entry)
         return self.save_encrypted_data(password)
@@ -853,15 +896,19 @@ def show_key(ctx, account: str):
         console.print("[red]Password incorrect[/red]")
         sys.exit(1)
     
-    # Display each key with its chain label
+    # Display each key with its chain label and derivation metadata
     lines = []
     for entry in keys:
         chain = entry.get("chain", "")
         key_val = entry.get("key", "")
+        source = entry.get("source", "manual")
+        dpath = entry.get("derivation_path")
+        st = f" [dim](derived)[/dim]" if source == "derived" else ""
+        pt = f" [dim]{dpath}[/dim]" if dpath else ""
         if chain:
-            lines.append(f"[cyan][{chain}][/cyan] Key: [green]{key_val}[/green]")
+            lines.append(f"[cyan][{chain}][/cyan]{pt}{st} Key: [green]{key_val}[/green]")
         else:
-            lines.append(f"[cyan][No Chain Specified][/cyan] Key: [green]{key_val}[/green]")
+            lines.append(f"[cyan][No Chain Specified][/cyan]{pt}{st} Key: [green]{key_val}[/green]")
     
     panel_content = "\n".join(lines)
     console.print(Panel(
@@ -869,6 +916,74 @@ def show_key(ctx, account: str):
         title=f"Private Keys for {account}",
         subtitle="⚠ Never share these keys with anyone"
     ))
+
+
+
+@cli.command()
+@click.argument('account')
+@click.option('--chain', required=True, help='Chain to derive. Use --list-chains to see options.')
+@click.option('--index', default=0, type=int, help='Address index (default 0)')
+@click.option('--list-chains', is_flag=True, help='List supported chains and exit')
+@click.pass_context
+def derive_address(ctx, account, chain, index, list_chains):
+    """Derive an address from a stored mnemonic using HD wallet derivation."""
+    from derivation_engine import DerivationEngine
+    if list_chains:
+        for ch, cfg in DerivationEngine.SUPPORTED_CHAINS.items():
+            console.print(f"  [cyan]{ch}[/cyan] - {cfg['path']}")
+        return
+    manager, password = get_manager_with_session(ctx)
+    if not password:
+        console.print("[red]No active session.[/red]")
+        sys.exit(1)
+    mnemonic = manager.show_mnemonic(account)
+    if not mnemonic:
+        console.print(f"[red]No mnemonic for {account}[/red]")
+        sys.exit(1)
+    try:
+        result = DerivationEngine.derive_from_mnemonic(mnemonic, chain, address_index=index)
+    except ValueError as e:
+        console.print(f"[red]{e}[/red]")
+        sys.exit(1)
+    console.print(Panel(
+        f"Chain: {result['chain']}\n"
+        f"Path: {result['path']}\n"
+        f"Address: [green]{result['address']}[/green]\n"
+        f"Private Key: [green]{result['private_key']}[/green]",
+        title=f"Derived Address for {account}"))
+
+
+@cli.command()
+@click.option('--strength', default=256, type=int,
+              help='Entropy bits (128=12 words, 256=24 words). Default: 256')
+def generate_mnemonic(strength):
+    """Generate a new BIP39 mnemonic phrase."""
+    from derivation_engine import DerivationEngine
+    m = DerivationEngine.generate_mnemonic(strength=strength)
+    console.print(Panel(
+        f"[green]{m}[/green]",
+        title=f"New BIP39 Mnemonic ({len(m.split())} words)"))
+
+
+@cli.command()
+@click.argument('account')
+@click.pass_context
+def validate_mnemonic(ctx, account):
+    """Validate the BIP39 mnemonic stored for an account."""
+    from derivation_engine import DerivationEngine
+    manager, password = get_manager_with_session(ctx)
+    if not password:
+        console.print("[red]No active session.[/red]")
+        sys.exit(1)
+    mnemonic = manager.show_mnemonic(account)
+    if not mnemonic:
+        console.print(f"[red]No mnemonic for {account}[/red]")
+        sys.exit(1)
+    if DerivationEngine.validate_mnemonic(mnemonic):
+        console.print(f"[green]Mnemonic for {account} is valid[/green]")
+    else:
+        console.print(f"[red]Mnemonic for {account} is INVALID[/red]")
+        sys.exit(1)
 
 
 @cli.command()

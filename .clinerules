@@ -5,16 +5,17 @@ Key Manager is a secure cryptocurrency key storage application with CLI and GUI 
 It encrypts wallet data (24-word mnemonics, addresses, account info) using AES-256-GCM with Argon2id key derivation.
 Designed for portable USB deployment alongside a local CLI workflow.
 
-**Current production version: v2** (June 2026) — adds GUI-based account/address/mnemonic creation.
+**Current production version: v3** (June 2026) — adds BIP39 mnemonic-to-address derivation engine with 7 supported chains.
 
 ## Versioning
 
-Key Manager uses semantic versioning for releases. v1 is the original display-only GUI; v2 adds creation dialogs.
+Key Manager uses semantic versioning for releases. v1 is the original display-only GUI; v3 adds BIP39 mnemonic derivation.
 
 | Version | Description | Key Files |
 |---------|-------------|-----------|
 | v1 | Original GUI — display-only | `src/gui_main.py`, `build_gui.py` |
 | v2 | GUI Add functionality — create accounts, add addresses, add mnemonics | `src/gui_main_v2.py`, `build_gui_v2.py` |
+| v3 | GUI BIP39 derivation — derive addresses/keys from mnemonics | `src/gui_main_v3.py`, `build_gui_v3.py`, `src/derivation_engine.py` |
 
 ### Versioning Rules (MUST follow for all future versions)
 1. New versions introduce a `_v<N>` suffix on all new/modified working files (e.g., `gui_main_v2.py`, `build_gui_v2.py`).
@@ -30,19 +31,29 @@ key_manager/
 ├── src/
 │   ├── main.py            # CLI interface (Click-based) + KeyManager class (shared)
 │   ├── gui_main.py        # v1 GUI - CustomTkinter dark theme dashboard (display-only baseline)
-│   ├── gui_main_v2.py     # v2 GUI - Adds account/address/mnemonic creation dialogs
+│   ├── gui_main_v2.py     # v2 GUI - Adds account/address/mnemonic creation dialogs (preserved)
+│   ├── gui_main_v3.py     # v3 GUI - BIP39 derivation dialogs + enhanced PK display
 │   ├── crypto_engine.py   # AES-256-GCM encryption + Argon2id KDF (shared)
+│   ├── derivation_engine.py # BIP39 mnemonic-to-address derivation (v3)
 │   └── backup_engine.py   # Vault backup/restore engine (shared)
-├── backups/               # v1 backup files (restore point) with _v1 suffix
+├── backups/               # Backup files for restoration
+│   ├── (v1 backups in backups/v1/)
+│   ├── gui_main_v2.py         # Copy of v2 GUI source
+│   ├── build_gui_v2.py        # Copy of v2 build script
+│   ├── README_v2.md           # Copy of v2 README
+│   ├── STATUS_v2.md           # Copy of v2 STATUS
+│   └── key_manager_gui_v2.exe # Copy of v2 GUI EXE
 │   ├── gui_main_v1.py         # Copy of v1 GUI source
 │   ├── build_gui_v1.py        # Copy of v1 build script
 │   ├── README_v1.md           # Copy of v1 README
 │   └── STATUS_v1.md           # Copy of v1 STATUS
 ├── USB_DEPLOYMENT/        # Pre-built portable EXEs for USB drives
 │   ├── key_manager.exe       # CLI version (working)
-│   └── key_manager_gui.exe   # GUI version (v2 build, rebuilt June 2026)
+│   └── key_manager_gui.exe   # GUI version (v3 build, rebuilt June 2026)
 ├── build_gui.py           # v1 PyInstaller build script (legacy)
-├── build_gui_v2.py        # v2 PyInstaller build script (builds gui_main_v2)
+├── build_gui_v2.py        # v2 PyInstaller build script (builds gui_main_v2) (preserved)
+├── build_gui_v3.py        # v3 PyInstaller build script (builds gui_main_v3)
+├── test_derivation.py     # v3 BIP39 derivation parity + multi-chain tests
 ├── init_vault.py          # Vault initialization helper
 ├── check_vault.py         # Vault diagnostic script
 ├── show_vault.py          # Vault content viewer
@@ -77,7 +88,9 @@ key_manager/
 - CLI: `src/main.py` uses Click commands + Rich for output
 - GUI v1: `src/gui_main.py` uses CustomTkinter with dark theme (display-only)
 - GUI v2: `src/gui_main_v2.py` extends v1 with Add Account / Add Address / Add Mnemonic dialogs + toast notifications + `refresh_left_panel()`
-- Both GUI versions and CLI share `KeyManager` class and `CryptoEngine`
+- GUI v3: `src/gui_main_v3.py` extends v2 with BIP39 derivation dialogs, enhanced private key display, "Derive from Mnemonic" checkbox, incremental `derive_all_chains` via `dialog.after()`
+- All GUI versions and CLI share `KeyManager` class and `CryptoEngine`
+- v3 adds `DerivationEngine` class (`src/derivation_engine.py`) for BIP39 HD wallet derivation
 
 ### v2 GUI Add Functionality (June 2026)
 v2 introduces modal dialogs accessible from the dashboard:
@@ -94,10 +107,24 @@ All add operations re-encrypt and save the vault, then call `refresh_left_panel(
 - **CLI `add-key`**: Now accepts `--chain` option for chain-specific key labels.
 - **CLI `show-key`**: Lists all stored private keys with chain labels.
 
+
+
+### v3 BIP39 Derivation Engine (June 2026)
+- **DerivationEngine** (`src/derivation_engine.py`): Stateless class that derives addresses + private keys from BIP39 mnemonics using `hdwallet` library.
+  - 7 supported chains: EVM, BTC Taproot (BIP86), BTC SegWit (BIP84), BTC Legacy (BIP44), Solana, Dash, Sui
+  - Manual bech32/bech32m encoding for BTC SegWit/Taproot (hdwallet returns legacy P2PKH for all BTC types)
+  - EIP-55 checksummed EVM addresses via keccak256
+  - `derive_from_mnemonic()`, `derive_multiple()`, `derive_all_chains()`, `validate_mnemonic()`, `generate_mnemonic()`
+- **Schema enhancement**: Private keys store `source`, `derivation_path`, `address_index`, `derived_address`. Addresses store `derivation_path`, `derivation_index`, `source`. Backward-compatible.
+- **GUI dialogs**: `show_derivation_dialog()`, `show_derive_all_chains_dialog()`, `_save_derived_to_account()`.
+- **Derive All Chains** uses incremental `dialog.after(50, ...)` to avoid blocking the Tkinter event loop.
+- **PortableKeyManager delegates** updated to pass through all v3 parameters.
+- **CLI commands**: `derive-address`, `generate-mnemonic`, `validate-mnemonic`.
+- **Dependencies**: `hdwallet`, `mnemonic` (+ transitive: coincurve, base58, cbor2, pynacl, ed25519-blake2b, crcmod, pycryptodome).
 ### Portable vs Local Paths
 - **Frozen (EXE)**: `base_dir = os.path.dirname(sys.executable)` → vault in `<exe_dir>/.key_manager/`
 - **Script**: `base_dir = project_root` → vault in `~/.key_manager/` (default) or custom `data_dir`
-- `PortableKeyManager` in `gui_main.py` / `gui_main_v2.py` overrides the data directory for portability
+- `PortableKeyManager` in `gui_main.py` / `gui_main_v2.py` / `gui_main_v3.py` overrides the data directory for portability
 
 ## Critical Code Areas & Known Patterns
 
@@ -133,6 +160,8 @@ pyperclip        # Clipboard operations
 Pillow (PIL)     # Image support for CustomTkinter
 argon2-cffi      # Argon2id password hashing
 PyInstaller      # Build tool for EXE creation
+hdwallet         # BIP32/BIP44/49/84/86 HD wallet derivation (v3)
+mnemonic         # BIP39 mnemonic validation/generation (v3)
 ```
 
 ## Build & Deploy
@@ -141,13 +170,14 @@ PyInstaller      # Build tool for EXE creation
 - CLI EXE: PyInstaller with `src/main.py` as entry
 - Output goes to `USB_DEPLOYMENT/` for USB drive deployment
 - Build with `--onefile --windowed` for GUI, `--onefile` for CLI
-- Resulting GUI EXE should be ~50-100MB (Python runtime + all deps bundled)
+- Resulting GUI EXE should be ~45MB (Python runtime + all deps bundled)
 - Before overwriting `USB_DEPLOYMENT/key_manager_gui.exe`, back up the previous EXE to `backups/`
 
 ## Running
-- **v2 Script mode (development, current):** `python src/gui_main_v2.py` — full add functionality
+- **v3 Script mode (development, current):** `python src/gui_main_v3.py` — full derivation + add functionality
+- **v2 Script mode (legacy):** `python src/gui_main_v2.py` — full add functionality (preserved)
 - **v1 Script mode (legacy):** `python src/gui_main.py` — display-only
-- **EXE mode (portable):** `USB_DEPLOYMENT\key_manager_gui.exe` — v2 build
+- **EXE mode (portable):** `USB_DEPLOYMENT\key_manager_gui.exe` — v3 build
 - **CLI:** `python src/main.py` or `USB_DEPLOYMENT\key_manager.exe`
 
 ## Testing
@@ -156,6 +186,7 @@ PyInstaller      # Build tool for EXE creation
 - `test_vault.py` — Tests vault creation/unlock
 - `test_portable_vault.py` — Tests portable vault path resolution
 - `test_dashboard.py` — Tests dashboard creation
+- `test_derivation.py` — BIP39 derivation Ian Coleman parity + multi-chain + validation tests (v3)
 - Tests use temporary directories; clean up after runs
 
 ## Coding Conventions

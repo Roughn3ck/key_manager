@@ -1,5 +1,24 @@
 # Key Manager - Secure Crypto Key Storage
 
+## v3.0 Features — BIP39 Mnemonic Derivation (June 2026)
+
+Key Manager v3 adds a full BIP39 mnemonic-to-address derivation engine:
+
+- **Derive addresses and private keys** from stored mnemonics using standard HD wallet paths
+- **7 supported chains**: EVM (Ethereum/Arbitrum/Base), BTC Taproot, BTC SegWit, BTC Legacy, Solana, Dash, Sui
+- **GUI integration**: "Derive Addresses" and "Derive All Chains" buttons in the mnemonic section
+- **Derive from Mnemonic** checkbox in the Add Private Key dialog
+- **Enhanced private key display** with derivation path and source indicators
+- **CLI commands**: `derive-address`, `generate-mnemonic`, `validate-mnemonic`
+- **Backward compatible**: v2 vaults open without migration; old keys display correctly
+
+### Running v3
+- **GUI (script mode):** `python src/gui_main_v3.py`
+- **Build EXE:** `python build_gui_v3.py` → `USB_DEPLOYMENT/key_manager_gui.exe`
+- **CLI:** `python src/main.py derive-address --account "MyAccount" --chain "EVM (Ethereum / Arbitrum / Base)" --index 0`
+
+
+
 ## Quick Start
 
 1. **Copy** `key_manager_gui.exe` to a USB drive (or any folder)
@@ -23,6 +42,55 @@ You can store:
 - **Account notes** for additional context
 
 Everything is encrypted at rest. Your master password is never stored — it exists only in memory during your active session.
+
+## Two Interfaces
+
+### GUI (Windows EXE)
+- **File:** `key_manager_gui.exe` (built from `src/gui_main_v2.py`)
+- **For:** Human use — view, add, manage accounts and keys
+- **Features:** Dark theme, add accounts/addresses/mnemonics, CSV/Excel import, auto-lock
+
+### Headless Agent (Python)
+- **File:** `src/key_manager_agent.py`
+- **For:** AI agent use — Vault (DeepSeek V3.2) signs and broadcasts transactions via HTTP
+- **Port:** 8842 (localhost only — binds to `127.0.0.1`)
+- **Protocol:** JSON over HTTP POST
+
+```
+┌─────────────┐     ┌──────────────────────────┐     ┌─────────────────┐
+│  USB Drive   │     │  key_manager_agent.py    │     │  Vault (AI)     │
+│  (F:\)       │     │  (headless process)       │     │  (DeepSeek V3.2)│
+│              │     │                           │     │                 │
+│ key_vault    │────▶│  unlock(password)         │◀────│  sends JSON     │
+│ .encrypted   │     │  decrypt in memory        │     │  commands via   │
+│              │     │  sign tx internally       │     │  HTTP to :8842  │
+│              │     │  NEVER return privkey     │     │                 │
+└─────────────┘     └──────────────────────────┘     └─────────────────┘
+```
+
+### Headless Agent Commands
+
+| Command | Purpose | Returns |
+|---------|---------|---------|
+| `{"cmd": "status"}` | Check vault state | Unlocked, account list |
+| `{"cmd": "list_accounts"}` | Full account tree | All accounts + addresses |
+| `{"cmd": "get_address", "account": "G6", "chain": "EVM"}` | Public address | Address only (no keys) |
+| `{"cmd": "sign_tx", "account": "G6", "to": "0x...", "data": "0x...", "chain_id": 42161, "rpc": "...", "chain": "EVM"}` | Sign tx (no broadcast) | Signed hex, from, nonce |
+| `{"cmd": "broadcast_tx", ...}` | Sign + broadcast | TX hash, from, nonce |
+| `{"cmd": "lock"}` | Lock vault | Confirmation |
+
+**Starting the agent:**
+```bash
+# Password from env var (never hardcode)
+export KEY_MANAGER_PASSWORD="your-password"
+python3 src/key_manager_agent.py --vault /path/to/key_vault.encrypted --serve --port 8842 --timeout 600
+```
+
+**Security rules for AI agents:**
+- NEVER request or log private keys
+- ALWAYS use `sign_tx` or `broadcast_tx` — keys stay internal
+- ALWAYS send `{"cmd": "lock"}` when done
+- Password comes from `KEY_MANAGER_PASSWORD` env var only
 
 ## GUI Features (v2.4)
 
@@ -60,9 +128,7 @@ Your file must have a header row with these column names:
 
 ### Valid Coin Values
 
-The **Coin** column must match these values exactly (they match the GUI dropdown):
-
-```
+```text
 BTC Taproot (bc1p)
 BTC SegWit (bc1q)
 BTC (Bitcoin)
@@ -87,27 +153,6 @@ SCRT (Secret Network)
 
 You can also use **any custom chain name** (e.g., `KASPA`, `AVAX`) — it will be stored as-is.
 
-### Example CSV
-
-```csv
-Account,Coin,Address,Notes
-Ledger 1,BTC Taproot (bc1p),bc1p...your...address,Cold storage
-Ledger 1,EVM (Ethereum / Arbitrum / Base),0x...your...address,Main ETH
-Trezor,DASH (Dash),X...your...address,
-Trezor,ZEC Transparent,t1...your...address,Zcash transparent
-Exchange,EVM ERC-20,0x...token...address,USDT
-```
-
-### Example Excel
-
-| Account | Coin | Address | Notes |
-|---------|------|---------|-------|
-| Ledger 1 | BTC Taproot (bc1p) | bc1p...your...address | Cold storage |
-| Ledger 1 | EVM (Ethereum / Arbitrum / Base) | 0x...your...address | Main ETH |
-| Trezor | DASH (Dash) | X...your...address | |
-| Trezor | ZEC Transparent | t1...your...address | Zcash transparent |
-| Exchange | EVM ERC-20 | 0x...token...address | USDT |
-
 ### How to Import
 
 1. Prepare your CSV or Excel file with the correct format above
@@ -117,11 +162,7 @@ Exchange,EVM ERC-20,0x...token...address,USDT
 5. Review the import summary (addresses added, skipped, errors)
 6. Your addresses are now in the vault — organized by account
 
-> **Tip:** The import dialog shows a formatting guide with all valid Coin values. You can also run `key_manager import-csv --format-guide` from the CLI to see the same guide.
-
 ## Supported Chains (Dropdown)
-
-The standardized chain dropdown includes:
 
 - **BTC:** BTC Taproot (bc1p), BTC SegWit (bc1q), BTC (Bitcoin)
 - **EVM:** EVM (Ethereum / Arbitrum / Base), EVM ERC-20, EVM Railgun
@@ -138,22 +179,27 @@ When you run `key_manager_gui.exe` from a USB drive or folder:
 - **Program:** `USB_DRIVE\key_manager_gui.exe`
 - **Encrypted Vault:** `USB_DRIVE\.key_manager\key_vault.encrypted`
 
-The vault is stored **alongside the EXE** in a hidden `.key_manager` folder. Everything stays on the USB drive — your data goes where your USB goes.
-
 ### Script Mode (Development)
 
 When running from Python source code:
 
 - **Encrypted Vault:** `~/.key_manager/key_vault.encrypted` (your home directory)
 
+### Headless Agent Mode
+
+- **Agent script:** `src/key_manager_agent.py`
+- **Vault file:** Any path via `--vault` flag (typically USB drive mount point)
+- **Config:** `KEY_MANAGER_PASSWORD` environment variable
+
 ## Security
 
 - **Encryption:** AES-256-GCM authenticated encryption
 - **Key Derivation:** Argon2id (64MB memory, 3 iterations, 4 lanes)
 - **Password Storage:** None — password exists only in memory during active session
-- **Auto-Lock:** 5-minute inactivity timeout clears sensitive data
-- **Sensitive Data:** Mnemonics and private keys are masked by default, revealed only on demand with password re-entry, auto-hide after 5 minutes
+- **Auto-Lock:** 5-minute inactivity timeout clears sensitive data (GUI); `--timeout` for agent
+- **Sensitive Data:** Mnemonics and private keys are masked by default, revealed only on demand
 - **No Telemetry:** No data ever leaves your computer
+- **Agent binds to localhost only** — no external network access to the signing service
 
 ## Account Structure
 
@@ -166,7 +212,7 @@ Key Manager starts as a **blank slate**. You create your own accounts and organi
 
 ## CLI (Advanced — Optional)
 
-Key Manager also includes a command-line interface for power users and automation. This is optional — the GUI handles everything most users need.
+Key Manager also includes a command-line interface for power users and automation.
 
 **CLI Commands:**
 ```
@@ -188,15 +234,14 @@ key_manager status                             # Show vault statistics
 key_manager gen-password                       # Generate a secure password
 ```
 
-> **Note:** The CLI is a developer/power-user tool. Most users should use the GUI EXE exclusively.
-
 ## Technical Details
 
 - **GUI Framework:** CustomTkinter (dark theme)
 - **Encryption:** cryptography library (AES-256-GCM + Argon2id)
 - **Build Tool:** PyInstaller (onefile EXE)
-- **Python:** 3.14
+- **Python:** 3.14 (GUI), 3.12 (headless agent on WSL)
 - **Portable:** No installation required, runs from any folder/USB
+- **Headless Agent:** Python 3.10+, `pycryptodomex`, `cryptography`
 
 ## Version
 
@@ -205,12 +250,12 @@ key_manager gen-password                       # Generate a secure password
 - Import addresses from CSV/Excel with formatting guide
 - Change password from GUI
 - Delete addresses from GUI
-- Removed "Add to Queue" button (simplified UI)
 - Standardized chain dropdown with 20+ predefined chains + Custom option
 - Multi-key private key support with chain labels
 - Blank slate (no pre-determined accounts/pools — users create their own)
 - Mnemonic section always visible (independent of addresses)
 - Private key section always visible (independent of addresses)
+- **NEW:** Headless agent (`key_manager_agent.py`) for AI-driven signing via HTTP
 
 ---
 *Key Manager — Your crypto keys, encrypted, portable, yours.*

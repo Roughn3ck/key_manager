@@ -1,5 +1,38 @@
 # Key Manager — Status Report
 
+## v3.0 — BIP39 Mnemonic Derivation Engine (June 2026)
+
+### New Features
+- **Derivation Engine** (`src/derivation_engine.py`): Derives addresses and private keys from BIP39 mnemonics using standard HD wallet paths (BIP32/BIP44/BIP49/BIP84/BIP86).
+  - Supported chains: EVM (Ethereum/Arbitrum/Base), BTC Taproot (bc1p), BTC SegWit (bc1q), BTC Legacy (1...), SOL (Solana), DASH (Dash), SUI (Sui)
+  - Manual bech32/bech32m encoding for BTC SegWit/Taproot addresses
+  - EIP-55 checksummed EVM addresses via keccak256
+  - Mnemonic validation and generation (12/24 words)
+- **GUI Derivation Dialogs**: "Derive Addresses" and "Derive All Chains" buttons in the mnemonic section of the account detail panel.
+  - Chain dropdown, editable derivation path, address index
+  - Save derived address + private key to the account with derivation metadata
+  - "Derive Another" for incremental index derivation
+- **Enhanced Private Key Display**: Shows derivation path, source indicator (manual/derived), and link icon (🔗) for keys derived from the account's stored mnemonic.
+- **Add Private Key Dialog**: "Derive from Mnemonic" checkbox — when enabled, the private key is derived from the account's mnemonic instead of manual entry.
+- **CLI Commands**: `derive-address`, `generate-mnemonic`, `validate-mnemonic` added to the CLI.
+- **Schema Enhancement**: Private keys and addresses now optionally store `source`, `derivation_path`, `address_index`, and `derived_address` metadata. Fully backward-compatible — old entries default to `source="manual"`.
+
+### Files Changed
+- `src/derivation_engine.py` (NEW) — BIP39 derivation engine
+- `src/gui_main_v3.py` (NEW) — v3 GUI with derivation integration
+- `build_gui_v3.py` (NEW) — v3 PyInstaller build script
+- `test_derivation.py` (NEW) — Ian Coleman parity + multi-chain tests
+- `src/main.py` (EXTENDED) — Schema fields + new CLI commands
+- `requirements.txt` (UPDATED) — Added hdwallet, mnemonic
+- `USB_DEPLOYMENT/key_manager_gui.exe` (REBUILT) — v3 build
+
+### Testing
+- All 7 derivation tests pass (Ian Coleman parity, BTC formats, multi-chain, validation, generation, multiple derivation, backward compatibility)
+- EVM address matches Ian Coleman BIP39 tool: `0x9858EfFD232B4033E47d90003D41EC34EcaEda94`
+- BTC SegWit produces `bc1q...` (bech32), Taproot produces `bc1p...` (bech32m)
+
+
+
 **Project Location:** `B:\Github\key_manager\`
 **Last Updated:** 2026-06-24
 **Assigned Agent:** Vault (headless agent), Cline (GUI)
