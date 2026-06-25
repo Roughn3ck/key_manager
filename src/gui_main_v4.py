@@ -982,8 +982,13 @@ class ColdStackGUI:
         info_frame = ctk.CTkFrame(card, fg_color="transparent")
         info_frame.pack(side="left", fill="both", expand=True, padx=10, pady=6)
 
-        # Line 1: Coin + chain + derived (all on one line, separated by " - ")
-        line1_parts = [address_data.get("coin", "")]
+        # Line 1: Coin + chain + derived (all on one line, separated by " · ")
+        # Filter out empty strings so a chain-only entry (no coin) does not
+        # render with a leading separator (e.g. "· HYPE (Hyperliquid)").
+        line1_parts = []
+        coin_value = address_data.get("coin", "")
+        if coin_value:
+            line1_parts.append(coin_value)
         chain_value = address_data.get("chain", "")
         if chain_value:
             line1_parts.append(chain_value)
@@ -2363,8 +2368,12 @@ class ColdStackGUI:
 
         addr_label = ctk.CTkLabel(result_frame, text="", font=ctk.CTkFont(size=11), wraplength=500)
         addr_label.pack(anchor="w")
-        pk_label = ctk.CTkLabel(result_frame, text="", font=ctk.CTkFont(size=11, family="monospace"),
-                                wraplength=500)
+        # Private key label is intentionally masked for security — the derived
+        # private key is never shown in the derivation dialog. It is saved
+        # encrypted to the vault on "Save to Account". The user can reveal it
+        # later from the account's Private Keys section (password-protected).
+        pk_label = ctk.CTkLabel(result_frame, text="", font=ctk.CTkFont(size=11),
+                                wraplength=500, text_color="gray60")
         pk_label.pack(anchor="w", pady=(5, 0))
 
         status_label = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(size=11))
@@ -2382,8 +2391,11 @@ class ColdStackGUI:
                 result = DerivationEngine.derive_from_mnemonic(mnemonic, ch, address_index=idx)
                 last_result["data"] = result
                 addr_label.configure(text=f"Address: {result['address']}", text_color="#51cf94")
-                pk_label.configure(text=f"Private Key: {result['private_key'][:40]}...", text_color="gray70")
-                status_label.configure(text="Derived successfully", text_color="green")
+                # SECURITY: Never display the derived private key. Show a masked
+                # placeholder so the user knows a key was derived, but the key
+                # itself is only stored encrypted in the vault.
+                pk_label.configure(text="Private Key: •••••••••••••••• (hidden for security)", text_color="gray60")
+                status_label.configure(text="Derived successfully — use Save to Account to store the key encrypted", text_color="green")
             except Exception as e:
                 status_label.configure(text=f"Error: {e}", text_color="red")
 
@@ -2821,7 +2833,7 @@ class ColdStackGUI:
             dialog.destroy()
             # Re-render current account view to update Check Balance button states
             if self.current_account:
-                self.show_account_addresses(self.current_account)
+                self.select_account(self.current_pool or "Unassigned", self.current_account)
 
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         btn_frame.pack(pady=15)
@@ -2848,17 +2860,20 @@ class ColdStackGUI:
                 self._save_vault_config()
                 self._update_online_indicator()
                 self.show_notification("Online mode enabled")
-                # Re-render current account view to update Check Balance button states
+                # Re-render current account view (full rebuild) to update
+                # Check Balance button states — select_account clears and
+                # repopulates the container so widgets are recreated.
                 if self.current_account:
-                    self.show_account_addresses(self.current_account)
+                    self.select_account(self.current_pool or "Unassigned", self.current_account)
         else:
             self.online_mode = False
             self._save_vault_config()
             self._update_online_indicator()
             self.show_notification("Offline mode - no network requests")
-            # Re-render current account view to update Check Balance button states
+            # Re-render current account view (full rebuild) to update
+            # Check Balance button states.
             if self.current_account:
-                self.show_account_addresses(self.current_account)
+                self.select_account(self.current_pool or "Unassigned", self.current_account)
 
     def refresh_balances(self):
         """Fetch balances for all addresses of the currently selected account."""

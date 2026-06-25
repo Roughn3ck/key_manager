@@ -2,15 +2,15 @@
 
 *Secure offline crypto key vault with BIP39 derivation engine.*
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v4.0-success)]()
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v4.1-success)]()
 
 ## Download
 
-**Latest release: [ColdStack v4.0 - Price Feeds + Wallet Balances + Go Online](https://github.com/Roughn3ck/key_manager/releases/tag/v4.0)**
+**Latest release: [ColdStack v4.1 - Price Feeds + Wallet Balances + Go Online](https://github.com/Roughn3ck/key_manager/releases/tag/v4.1)**
 
 | File | Size | Description |
 |------|------|-------------|
-| `coldstack.exe` | ~45MB | Full GUI application - ColdStack branded, v4.0 with balance fetching + price feeds + Go Online toggle |
+| `coldstack.exe` | ~45MB | Full GUI application - ColdStack branded, v4.1 with balance fetching + price feeds + Go Online toggle |
 
 > The CLI executable (`key_manager.exe`) has been deprecated and removed from USB_DEPLOYMENT as of v3.1. The CLI source remains available for script-mode use (`python src/main.py`).
 
@@ -18,7 +18,7 @@
 
 ---
 
-## v4.0 Features - Price Feeds + Wallet Balances + Go Online (June 2026)
+## v4.1 Features - Price Feeds + Wallet Balances + Go Online (June 2026)
 
 - **Go Online toggle**: Settings dialog with "Go Online" switch (OFF by default). When ON: enables read-only balance fetching and price feeds. Offline by default - no network requests unless explicitly enabled.
 - **Inline balance display**: Balances shown inline on existing address cards (not a separate tab). Native balance by default (e.g., 0.5 ETH, 0.001 BTC). Balance label hidden until a fetch is triggered.
@@ -32,7 +32,7 @@
 - **Re-render on toggle**: Switching online/offline immediately updates button states on all address cards.
 - **Backward compatible**: Existing v3.1 vaults open without migration. Vault config (online_mode, currency) stored in encrypted vault.
 
-### Running v4.0
+### Running v4.1
 - **GUI (script mode):** `python src/gui_main_v4.py`
 - **Build EXE:** `python build_gui_v4.py` -> `USB_DEPLOYMENT/coldstack.exe`
 - **CLI (script mode only):** `python src/main.py`
@@ -322,7 +322,7 @@ python src/main.py validate-mnemonic <account>           # Validate stored mnemo
 
 ## Version
 
-**v4.0** - June 2026 - Price Feeds + Wallet Balances + Go Online
+**v4.1** - June 2026 - Price Feeds + Wallet Balances + Go Online
 - "Go Online" toggle in Settings (offline by default, user-initiated)
 - "Check Balance" button per address card (greyed when offline, active when online)
 - Inline balance display on address cards (EVM, BTC, SOL, DASH, SUI)

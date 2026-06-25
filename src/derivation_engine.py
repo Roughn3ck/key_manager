@@ -215,6 +215,17 @@ class DerivationEngine:
             "semantic": None,
             "cryptocurrency": "Sui",
         },
+        # Hyperliquid L1 / HyperEVM uses the same EVM address (EVM-compatible).
+        # Derivation path and address algorithm are identical to EVM; this entry
+        # simply labels the result as a Hyperliquid address for convenience.
+        "HYPE (Hyperliquid)": {
+            "path": "m/44'/60'/0'/0/0",
+            "address_type": "evm",
+            "coin_type": 60,
+            "derivation_class": "BIP44",
+            "semantic": "p2pkh",
+            "cryptocurrency": "Ethereum",
+        },
     }
 
     # Map cryptocurrency names to hdwallet classes

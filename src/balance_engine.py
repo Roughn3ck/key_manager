@@ -597,18 +597,25 @@ class BalanceEngine:
         chain_lower = check_str.lower()
 
         try:
+            # Railgun shielded addresses cannot be queried publicly
+            if "railgun" in chain_lower:
+                return {"balances": [], "error": "Shielded addresses cannot be queried publicly"}
+
             # Hyperliquid L1 (Spot) - must check BEFORE the HYPE/HyperEVM branch
             if "hyperliquid l1" in chain_lower or "hyperliquid_l1" in chain_lower or "hl1" in chain_lower or "(spot)" in chain_lower:
                 balances = self.fetch_hyperliquid_l1_balances(address)
                 if balances:
                     return {"balances": balances, "error": ""}
-                return {"balances": [], "error": "No L1 spot balances found"}
+                return {"balances": [], "error": "No balances shown on Hyperliquid L1"}
 
             # EVM chains - query all configured EVM RPCs
             if "evm" in chain_lower or "hype" in chain_lower or "hyperliquid" in chain_lower:
                 balances = self.fetch_all_evm_balances(address)
                 if balances:
                     return {"balances": balances, "error": ""}
+                # Distinguish Hyperliquid (HYPE) addresses from generic EVM
+                if "hype" in chain_lower or "hyperliquid" in chain_lower:
+                    return {"balances": [], "error": "No balances shown on Hyperliquid L1. Are you looking for Hype on EVM?"}
                 return {"balances": [], "error": "No balances found on any EVM chain"}
 
             # Bitcoin (all types: Taproot, SegWit, Legacy)
