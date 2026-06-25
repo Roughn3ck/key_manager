@@ -5,7 +5,7 @@ Key Manager is a secure cryptocurrency key storage application with CLI and GUI 
 It encrypts wallet data (24-word mnemonics, addresses, account info) using AES-256-GCM with Argon2id key derivation.
 Designed for portable USB deployment alongside a local CLI workflow.
 
-**Current production version: v3.1** (June 2026) - ColdStack brand rebrand + Check for Updates button. GUI is now branded "ColdStack"; CLI source remains "key_manager" (script-mode only, CLI EXE deprecated). v3 adds BIP39 mnemonic-to-address derivation engine with 7 supported chains.
+**Current production version: v4.0** (June 2026) - Price Feeds + Wallet Balances + Go Online Toggle. GUI is branded "ColdStack"; CLI source remains "key_manager" (script-mode only, CLI EXE deprecated). v3 adds BIP39 derivation. v4 adds balance fetching + CoinGecko price feeds.
 
 ## Versioning
 
@@ -17,6 +17,7 @@ Key Manager uses semantic versioning for releases. v1 is the original display-on
 | v2 | GUI Add functionality - create accounts, add addresses, add mnemonics | `src/gui_main_v2.py`, `build_gui_v2.py` |
 | v3 | GUI BIP39 derivation - derive addresses/keys from mnemonics | `src/gui_main_v3.py`, `build_gui_v3.py`, `src/derivation_engine.py` |
 | v3.1 | ColdStack rebrand + Check for Updates button | `src/gui_main_v3_1.py`, `build_gui_v3_1.py`, `key_manager_gui_v3_1.spec` |
+| v4.0 | Price Feeds + Wallet Balances + Go Online | `src/gui_main_v4.py`, `build_gui_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |
 
 ### Versioning Rules (MUST follow for all future versions)
 1. New versions introduce a `_v<N>` suffix on all new/modified working files (e.g., `gui_main_v2.py`, `build_gui_v2.py`).
@@ -34,7 +35,10 @@ key_manager/
 │   ├── gui_main.py        # v1 GUI - CustomTkinter dark theme dashboard (display-only baseline)
 │   ├── gui_main_v2.py     # v2 GUI - Adds account/address/mnemonic creation dialogs (preserved)
 │   ├── gui_main_v3.py     # v3 GUI - BIP39 derivation dialogs + enhanced PK display (preserved)
-│   ├── gui_main_v3_1.py   # v3.1 GUI - ColdStack rebrand + Check for Updates button
+│   ├── gui_main_v3_1.py   # v3.1 GUI - ColdStack rebrand + Check for Updates (preserved)
+│   ├── gui_main_v4.py     # v4.0 GUI - Go Online toggle + inline balances + price feeds
+│   ├── balance_engine.py  # v4.0: Fetch wallet balances via public RPC
+│   ├── price_engine.py    # v4.0: Fetch crypto prices via CoinGecko
 │   ├── crypto_engine.py   # AES-256-GCM encryption + Argon2id KDF (shared)
 │   ├── derivation_engine.py # BIP39 mnemonic-to-address derivation (v3)
 │   └── backup_engine.py   # Vault backup/restore engine (shared)
@@ -179,7 +183,8 @@ mnemonic         # BIP39 mnemonic validation/generation (v3)
 ```
 
 ## Build & Deploy
-- **v3.1 GUI EXE (current):** `python build_gui_v3_1.py` -> `dist/coldstack.exe` -> copied to `USB_DEPLOYMENT/coldstack.exe`
+- **v4.0 GUI EXE (current):** `python build_gui_v4.py` -> `dist/coldstack.exe` -> copied to `USB_DEPLOYMENT/coldstack.exe`
+- **v3.1 GUI EXE (legacy):** `python build_gui_v3_1.py` -> `dist/coldstack.exe` -> copied to `USB_DEPLOYMENT/coldstack.exe`
 - **v3 GUI EXE (legacy):** `python build_gui_v3.py` -> `dist/key_manager_gui_v3.exe` -> only use to restore v3 baseline
 - **v2 GUI EXE (legacy):** `python build_gui_v2.py` -> only use to restore v2 baseline
 - **v1 GUI EXE (legacy):** `python build_gui.py` -> only use to restore v1 baseline
@@ -190,7 +195,8 @@ mnemonic         # BIP39 mnemonic validation/generation (v3)
 - Before overwriting `USB_DEPLOYMENT/coldstack.exe`, back up the previous EXE to `backups/`
 
 ## Running
-- **v3.1 Script mode (development, current):** `python src/gui_main_v3_1.py` - ColdStack branding + Check for Updates + full derivation + add functionality
+- **v4.0 Script mode (development, current):** `python src/gui_main_v4.py` - Go Online toggle + inline balances + price feeds + full derivation + add functionality
+- **v3.1 Script mode (legacy):** `python src/gui_main_v3_1.py` - ColdStack branding + Check for Updates + full derivation + add functionality
 - **v3 Script mode (legacy):** `python src/gui_main_v3.py` - full derivation + add functionality (preserved)
 - **v2 Script mode (legacy):** `python src/gui_main_v2.py` - full add functionality (preserved)
 - **v1 Script mode (legacy):** `python src/gui_main.py` - display-only

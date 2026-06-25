@@ -2,19 +2,46 @@
 
 *Secure offline crypto key vault with BIP39 derivation engine.*
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v3.1-success)]()
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v4.1-success)]()
 
 ## Download
 
-**Latest release: [ColdStack v3.1 - ColdStack Rebrand + Update Check](https://github.com/Roughn3ck/key_manager/releases/tag/v3.1)**
+**Latest release: [ColdStack v4.1 - Price Feeds + Wallet Balances + Go Online](https://github.com/Roughn3ck/key_manager/releases/tag/v4.1)**
 
 | File | Size | Description |
 |------|------|-------------|
-| `coldstack.exe` | ~45MB | Full GUI application - ColdStack branded, v3.1 with derivation + update check |
+| `coldstack.exe` | ~45MB | Full GUI application - ColdStack branded, v4.1 with balance fetching + price feeds + Go Online toggle |
 
 > The CLI executable (`key_manager.exe`) has been deprecated and removed from USB_DEPLOYMENT as of v3.1. The CLI source remains available for script-mode use (`python src/main.py`).
 
 > No installation required. Just download, run, and click "Initialize New Vault". Works on any Windows 10/11 machine - no Python needed.
+
+---
+
+## v4.1 Features - Price Feeds + Wallet Balances + Go Online (June 2026)
+
+- **Go Online toggle**: Settings dialog with "Go Online" switch (OFF by default). When ON: enables read-only balance fetching and price feeds. Offline by default - no network requests unless explicitly enabled.
+- **Inline balance display**: Balances shown inline on existing address cards (not a separate tab). Native balance by default (e.g., 0.5 ETH, 0.001 BTC). Balance label hidden until a fetch is triggered.
+- **Check Balance button**: Per-card "Check Balance" button on each address card. Greyed out when offline, active when online. Click to fetch balance for that address only.
+- **Compact card layout**: Coin + chain + "derived" tag on ONE line, address below, balance only when fetched, notes only when present. Reduced vertical space per card.
+- **Currency toggle**: Set Default Currency in Settings (USD, AUD, CAD, EUR, CHF, or None). Shows fiat equivalent alongside native balance when set.
+- **Balance Engine**: Fetches wallet balances via public RPC endpoints. Supports EVM (Ethereum, Arbitrum, Base, BSC, Polygon, Optimism), BTC, SOL, DASH, SUI. Uses stdlib `urllib.request` - no new dependencies.
+- **Price Engine**: CoinGecko API (free tier, no API key). 60-second in-memory cache. No persistent storage of prices.
+- **Online/Offline indicator**: Status bar shows green "Online" or grey "Offline". Last refresh timestamp shown subtly.
+- **Manual refresh only**: No auto-refresh or background polling. User clicks "Check Balance" per-card.
+- **Re-render on toggle**: Switching online/offline immediately updates button states on all address cards.
+- **Backward compatible**: Existing v3.1 vaults open without migration. Vault config (online_mode, currency) stored in encrypted vault.
+
+### Running v4.1
+- **GUI (script mode):** `python src/gui_main_v4.py`
+- **Build EXE:** `python build_gui_v4.py` -> `USB_DEPLOYMENT/coldstack.exe`
+- **CLI (script mode only):** `python src/main.py`
+
+### Security
+- **Offline by default**: Zero network requests unless user explicitly enables "Go Online"
+- **Only public addresses queried**: Private keys and mnemonics NEVER leave the vault
+- **No price storage**: Prices cached in-memory only (60s TTL), never written to disk
+- **Config encrypted**: Online mode and currency settings stored in the encrypted vault
 
 ---
 
@@ -294,6 +321,17 @@ python src/main.py validate-mnemonic <account>           # Validate stored mnemo
 - **Headless Agent:** Python 3.10+, `pycryptodomex`, `cryptography`
 
 ## Version
+
+**v4.1** - June 2026 - Price Feeds + Wallet Balances + Go Online
+- "Go Online" toggle in Settings (offline by default, user-initiated)
+- "Check Balance" button per address card (greyed when offline, active when online)
+- Inline balance display on address cards (EVM, BTC, SOL, DASH, SUI)
+- Compact card layout (coin + chain + derived on one line)
+- CoinGecko price feeds with 60s cache (USD, AUD, CAD, EUR, CHF)
+- Balance Engine (`src/balance_engine.py`) and Price Engine (`src/price_engine.py`)
+- Online/Offline indicator in status bar
+- No new dependencies (uses stdlib `urllib.request`)
+- Backward compatible: v3.1 vaults open without migration
 
 **v3.1** - June 2026 - ColdStack rebrand + Check for Updates
 - GUI rebranded to "ColdStack" (window title, login screen, version label, class `ColdStackGUI`)

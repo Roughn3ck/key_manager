@@ -2,18 +2,46 @@
 
 *Secure offline crypto key vault with BIP39 derivation engine.*
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v3.1-success)]()
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v4.0-success)]()
 
 ## Download
 
-**Latest release: [ColdStack v3.1 - ColdStack Rebrand + Update Check](https://github.com/Roughn3ck/key_manager/releases/tag/v3.1)**
+**Latest release: [ColdStack v4.0 - Price Feeds + Wallet Balances + Go Online](https://github.com/Roughn3ck/key_manager/releases/tag/v4.0)**
 
 | File | Size | Description |
 |------|------|-------------|
-| `coldstack.exe` | ~45MB | Full GUI application - ColdStack branded, v3.1 with derivation + update check |
-| `key_manager.exe` | ~35MB | CLI version for headless operations (unchanged) |
+| `coldstack.exe` | ~45MB | Full GUI application - ColdStack branded, v4.0 with balance fetching + price feeds + Go Online toggle |
+
+> The CLI executable (`key_manager.exe`) has been deprecated and removed from USB_DEPLOYMENT as of v3.1. The CLI source remains available for script-mode use (`python src/main.py`).
 
 > No installation required. Just download, run, and click "Initialize New Vault". Works on any Windows 10/11 machine - no Python needed.
+
+---
+
+## v4.0 Features - Price Feeds + Wallet Balances + Go Online (June 2026)
+
+- **Go Online toggle**: Settings dialog with "Go Online" switch (OFF by default). When ON: enables read-only balance fetching and price feeds. Offline by default - no network requests unless explicitly enabled.
+- **Inline balance display**: Balances shown inline on existing address cards (not a separate tab). Native balance by default (e.g., 0.5 ETH, 0.001 BTC). Balance label hidden until a fetch is triggered.
+- **Check Balance button**: Per-card "Check Balance" button on each address card. Greyed out when offline, active when online. Click to fetch balance for that address only.
+- **Compact card layout**: Coin + chain + "derived" tag on ONE line, address below, balance only when fetched, notes only when present. Reduced vertical space per card.
+- **Currency toggle**: Set Default Currency in Settings (USD, AUD, CAD, EUR, CHF, or None). Shows fiat equivalent alongside native balance when set.
+- **Balance Engine**: Fetches wallet balances via public RPC endpoints. Supports EVM (Ethereum, Arbitrum, Base, BSC, Polygon, Optimism), BTC, SOL, DASH, SUI. Uses stdlib `urllib.request` - no new dependencies.
+- **Price Engine**: CoinGecko API (free tier, no API key). 60-second in-memory cache. No persistent storage of prices.
+- **Online/Offline indicator**: Status bar shows green "Online" or grey "Offline". Last refresh timestamp shown subtly.
+- **Manual refresh only**: No auto-refresh or background polling. User clicks "Check Balance" per-card.
+- **Re-render on toggle**: Switching online/offline immediately updates button states on all address cards.
+- **Backward compatible**: Existing v3.1 vaults open without migration. Vault config (online_mode, currency) stored in encrypted vault.
+
+### Running v4.0
+- **GUI (script mode):** `python src/gui_main_v4.py`
+- **Build EXE:** `python build_gui_v4.py` -> `USB_DEPLOYMENT/coldstack.exe`
+- **CLI (script mode only):** `python src/main.py`
+
+### Security
+- **Offline by default**: Zero network requests unless user explicitly enables "Go Online"
+- **Only public addresses queried**: Private keys and mnemonics NEVER leave the vault
+- **No price storage**: Prices cached in-memory only (60s TTL), never written to disk
+- **Config encrypted**: Online mode and currency settings stored in the encrypted vault
 
 ---
 
@@ -22,13 +50,14 @@
 - **Brand rebrand**: GUI is now branded "ColdStack" (window title, login screen, version label)
 - **Check for Updates button**: User-initiated update check in the status bar. Makes a single GitHub API call to check for newer releases. Offline by default - no background polling, no telemetry.
 - **Threaded network request**: Update check runs in a background thread so the GUI stays responsive
-- **EXE rename**: GUI executable is now `coldstack.exe` (CLI remains `key_manager.exe`)
-- **Backward compatible**: Existing vaults at `.key_manager/` still work - no migration needed
+- **EXE rename**: GUI executable is now `coldstack.exe`
+- **CLI EXE deprecated**: The `key_manager.exe` CLI executable is no longer built or distributed. CLI remains available via script mode only (`python src/main.py`).
+- **Vault co-located with app**: The vault (`key_vault.encrypted`) now lives in the same directory as the application, not in `~/.key_manager/`.
 
 ### Running v3.1
 - **GUI (script mode):** `python src/gui_main_v3_1.py`
 - **Build EXE:** `python build_gui_v3_1.py` -> `USB_DEPLOYMENT/coldstack.exe`
-- **CLI (unchanged):** `python src/main.py derive-address --account "MyAccount" --chain "EVM (Ethereum / Arbitrum / Base)" --index 0`
+- **CLI (script mode only):** `python src/main.py derive-address --account "MyAccount" --chain "EVM (Ethereum / Arbitrum / Base)" --index 0`
 
 ## v3.0 Features - BIP39 Mnemonic Derivation (June 2026)
 
@@ -222,13 +251,13 @@ You can also use **any custom chain name** (e.g., `KASPA`, `AVAX`) - it will be 
 When you run `coldstack.exe` from a USB drive or folder:
 
 - **Program:** `USB_DRIVE\coldstack.exe`
-- **Encrypted Vault:** `USB_DRIVE\.key_manager\key_vault.encrypted`
+- **Encrypted Vault:** `USB_DRIVE\key_vault.encrypted` (co-located with the EXE)
 
 ### Script Mode (Development)
 
 When running from Python source code:
 
-- **Encrypted Vault:** `~/.key_manager/key_vault.encrypted` (your home directory)
+- **Encrypted Vault:** `<project_root>/key_vault.encrypted` (co-located with the application)
 
 ### Headless Agent Mode
 
@@ -255,31 +284,31 @@ ColdStack starts as a **blank slate**. You create your own accounts and organize
 - Most users will only need one or two accounts
 - The structure is entirely up to you
 
-## ColdStack CLI (Advanced - Optional)
+## ColdStack CLI (Script Mode Only - EXE Deprecated)
 
-ColdStack also includes a command-line interface for power users and automation.
+ColdStack also includes a command-line interface for power users and automation. **Note:** As of v3.1, the CLI executable (`key_manager.exe`) is no longer built or distributed. The CLI is available only via script mode (`python src/main.py`).
 
 **CLI Commands:**
 ```
-key_manager init                              # Initialize a new vault
-key_manager unlock                            # Unlock an existing vault
-key_manager accounts                          # List all accounts
-key_manager addresses [account]               # Show addresses
-key_manager add-address <account> <coin> <chain> <address> [--notes=...]
-key_manager delete-address <account> <index>  # Delete address by index
-key_manager add-account <account> [--pool=...] # Create an account
-key_manager add-mnemonic <account> <24 words> # Store a mnemonic
-key_manager show-mnemonic <account>            # View mnemonic (requires re-entry)
-key_manager add-key <account> <key> [--chain=...] # Add a private key
-key_manager show-key <account>                # View private keys
-key_manager import-csv <file_path> [--format-guide]  # Import from CSV/Excel
-key_manager change-password                   # Change master password
-key_manager lock                               # Lock the session
-key_manager status                             # Show vault statistics
-key_manager gen-password                       # Generate a secure password
-key_manager derive-address <account> --chain <chain> [--index=0] [--list-chains]  # Derive from mnemonic
-key_manager generate-mnemonic [--strength=256]   # Generate a new BIP39 mnemonic
-key_manager validate-mnemonic <account>           # Validate stored mnemonic checksum
+python src/main.py init                              # Initialize a new vault
+python src/main.py unlock                            # Unlock an existing vault
+python src/main.py accounts                          # List all accounts
+python src/main.py addresses [account]               # Show addresses
+python src/main.py add-address <account> <coin> <chain> <address> [--notes=...]
+python src/main.py delete-address <account> <index>  # Delete address by index
+python src/main.py add-account <account> [--pool=...] # Create an account
+python src/main.py add-mnemonic <account> <24 words> # Store a mnemonic
+python src/main.py show-mnemonic <account>            # View mnemonic (requires re-entry)
+python src/main.py add-key <account> <key> [--chain=...] # Add a private key
+python src/main.py show-key <account>                # View private keys
+python src/main.py import-csv <file_path> [--format-guide]  # Import from CSV/Excel
+python src/main.py change-password                   # Change master password
+python src/main.py lock                               # Lock the session
+python src/main.py status                             # Show vault statistics
+python src/main.py gen-password                       # Generate a secure password
+python src/main.py derive-address <account> --chain <chain> [--index=0] [--list-chains]  # Derive from mnemonic
+python src/main.py generate-mnemonic [--strength=256]   # Generate a new BIP39 mnemonic
+python src/main.py validate-mnemonic <account>           # Validate stored mnemonic checksum
 ```
 
 ## Technical Details
@@ -293,10 +322,23 @@ key_manager validate-mnemonic <account>           # Validate stored mnemonic che
 
 ## Version
 
+**v4.0** - June 2026 - Price Feeds + Wallet Balances + Go Online
+- "Go Online" toggle in Settings (offline by default, user-initiated)
+- "Check Balance" button per address card (greyed when offline, active when online)
+- Inline balance display on address cards (EVM, BTC, SOL, DASH, SUI)
+- Compact card layout (coin + chain + derived on one line)
+- CoinGecko price feeds with 60s cache (USD, AUD, CAD, EUR, CHF)
+- Balance Engine (`src/balance_engine.py`) and Price Engine (`src/price_engine.py`)
+- Online/Offline indicator in status bar
+- No new dependencies (uses stdlib `urllib.request`)
+- Backward compatible: v3.1 vaults open without migration
+
 **v3.1** - June 2026 - ColdStack rebrand + Check for Updates
 - GUI rebranded to "ColdStack" (window title, login screen, version label, class `ColdStackGUI`)
 - "Check for Updates" button in status bar (user-initiated, offline by default, threaded)
 - GUI EXE renamed from `key_manager_gui.exe` to `coldstack.exe`
+- CLI EXE deprecated and removed from USB_DEPLOYMENT (CLI source remains for script-mode use)
+- Vault now co-located with the application (not in `~/.key_manager/`)
 - Build script fixes: backup name corrected, launcher script rebranded
 - No new dependencies (update check uses stdlib `urllib.request`)
 - Backward compatible: existing vaults work without migration
