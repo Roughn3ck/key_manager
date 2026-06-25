@@ -1,8 +1,12 @@
-# Key Manager - Secure Crypto Key Storage
+# ColdStack
+
+*Secure offline crypto key vault with BIP39 derivation engine.*
+
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v3.0-success)]()
 
 ## 📥 Download
 
-**Latest release: [v3.0 — BIP39 Derivation Engine](https://github.com/Roughn3ck/key_manager/releases/tag/v3.0)**
+**Latest release: [ColdStack v3.0 — BIP39 Derivation Engine](https://github.com/Roughn3ck/key_manager/releases/tag/v3.0)**
 
 | File | Size | Description |
 |------|------|-------------|
@@ -58,9 +62,9 @@ That's it. No installation. No Python. No dependencies. Just run the EXE.
 
 > **Important:** The EXE is completely self-contained. It runs on **any Windows computer** without Python installed. All libraries (Python runtime, crypto, GUI framework) are bundled inside the ~45MB EXE.
 
-## What is Key Manager?
+## What is ColdStack?
 
-Key Manager is a secure application for storing and managing your cryptocurrency wallet information. It encrypts your data with **AES-256-GCM** authenticated encryption and **Argon2id** key derivation — the same standards used by password managers and crypto exchanges.
+ColdStack is a secure application for storing and managing your cryptocurrency wallet information. It encrypts your data with **AES-256-GCM** authenticated encryption and **Argon2id** key derivation — the same standards used by password managers and crypto exchanges.
 
 You can store:
 - **Wallet addresses** organized by account and chain
@@ -75,11 +79,11 @@ Everything is encrypted at rest. Your master password is never stored — it exi
 ### GUI (Windows EXE)
 - **File:** `key_manager_gui.exe` (built from `src/gui_main_v3.py`)
 - **For:** Human use — view, add, manage accounts and keys
-- **Features:** Dark theme, add accounts/addresses/mnemonics, CSV/Excel import, auto-lock
+- **Features:** Dark theme, add accounts/addresses/mnemonics, BIP39 derivation, CSV/Excel import, auto-lock
 
 ### Headless Agent (Python)
 - **File:** `src/key_manager_agent.py`
-- **For:** AI agent use — Vault (DeepSeek V3.2) signs and broadcasts transactions via HTTP
+- **For:** AI agent use — Vault signs and broadcasts transactions via HTTP
 - **Port:** 8842 (localhost only — binds to `127.0.0.1`)
 - **Protocol:** JSON over HTTP POST
 
@@ -119,7 +123,7 @@ python3 src/key_manager_agent.py --vault /path/to/key_vault.encrypted --serve --
 - ALWAYS send `{"cmd": "lock"}` when done
 - Password comes from `KEY_MANAGER_PASSWORD` env var only
 
-## GUI Features (v3.0)
+## ColdStack GUI Features (v3.0)
 
 ### Core Features
 - **Modern Dark Theme** — Easy on the eyes, built with CustomTkinter
@@ -237,9 +241,9 @@ Key Manager starts as a **blank slate**. You create your own accounts and organi
 - Most users will only need one or two accounts
 - The structure is entirely up to you
 
-## CLI (Advanced — Optional)
+## ColdStack CLI (Advanced — Optional)
 
-Key Manager also includes a command-line interface for power users and automation.
+ColdStack also includes a command-line interface for power users and automation.
 
 **CLI Commands:**
 ```
@@ -275,7 +279,7 @@ key_manager validate-mnemonic <account>           # Validate stored mnemonic che
 
 ## Version
 
-**v3.0** — June 2026
+**v3.0** — June 2026 — ColdStack brand launch
 - BIP39 mnemonic-to-address derivation engine (7 chains: EVM, BTC Taproot/SegWit/Legacy, Solana, Dash, Sui)
 - "Derive Addresses" and "Derive All Chains" buttons in mnemonic section
 - "Derive from Mnemonic" checkbox in Add Private Key dialog
@@ -297,4 +301,5 @@ key_manager validate-mnemonic <account>           # Validate stored mnemonic che
 - **NEW:** Headless agent (`key_manager_agent.py`) for AI-driven signing via HTTP
 
 ---
-*Key Manager — Your crypto keys, encrypted, portable, yours.*
+*ColdStack — Your crypto keys, encrypted, portable, yours.*
+*Built by [Kris Racette](https://krisracette.me) — [Executive Mind](https://executivemind.io)*
