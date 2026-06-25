@@ -2,14 +2,24 @@
 address_database.json
 *.enc
 *.key
-backups/
-USB_DEPLOYMENT/*.exe
+*.csv
+*.encrypted
+
+# Build artifacts
 dist/
 build/
 __pycache__/
 *.pyc
+
+# Executables (distributed via GitHub Releases, not in repo)
+USB_DEPLOYMENT/*.exe
+
+# Logs
 gui_err.log
 gui_run.log
 dashboard_test.log
-*.csv
-*.encrypted
+USB_DEPLOYMENT/gui_debug.log
+USB_DEPLOYMENT/.key_manager_session
+
+# Backups (local only)
+backups/
