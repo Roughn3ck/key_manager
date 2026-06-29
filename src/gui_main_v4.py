@@ -322,7 +322,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v4.0 - ColdStack | Balances + Price Feeds + Go Online",
+            text="v4.1 - ColdStack | Balances + Price Feeds + Go Online",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )
@@ -742,7 +742,7 @@ class ColdStackGUI:
                 url = "https://api.github.com/repos/Roughn3ck/key_manager/releases/latest"
                 req = urllib.request.Request(url, headers={
                     "Accept": "application/vnd.github.v3+json",
-                    "User-Agent": "ColdStack/3.1"
+                    "User-Agent": "ColdStack/4.1"
                 })
 
                 with urllib.request.urlopen(req, timeout=10) as response:
@@ -752,7 +752,7 @@ class ColdStackGUI:
                 release_url = data.get("html_url", "https://github.com/Roughn3ck/key_manager/releases")
                 release_name = data.get("name", "Latest Release")
 
-                current_version = "3.1"
+                current_version = "4.1"
                 latest_version = latest_tag.lstrip("v")
 
                 # Simple version comparison (handles major.minor[.patch])

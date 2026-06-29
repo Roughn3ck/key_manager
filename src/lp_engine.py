@@ -1,13 +1,13 @@
 """
-LP Engine - Read-only LP position aggregation for ColdStack.
+LP Engine - LP position aggregation + strategy for ColdStack.
 
 Provides a standardized interface for fetching LP positions from any venue.
 Each venue is implemented as a VenueAdapter in venue_adapters/.
 
-Read-only. Stateless. Offline by default (caller must check online_mode).
-No private keys are ever read or used.
+Read-only by default. Write operations are accessed via get_writer(venue_key).
+Offline by default (caller must check online_mode).
 
-Version: v5.0 (June 2026)
+Version: v5.1 (June 2026) - VenueWriter integration + rebalance strategy
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
@@ -102,6 +102,14 @@ class VenueAdapter(ABC):
         """Optional referral URL."""
         return None
 
+    def can_write(self) -> bool:
+        """Return True if this venue has a writer implementation."""
+        return False
+
+    def get_writer(self):
+        """Return a VenueWriter instance if can_write(), otherwise None."""
+        return None
+
 
 class OfflineError(Exception):
     """Raised when an adapter is called while ColdStack is offline."""
@@ -110,7 +118,7 @@ class OfflineError(Exception):
 
 
 class StrategyEngine:
-    """Pure read-only analysis engine for LP positions.
+    """Read-only analysis engine for LP positions.
 
     No network access. Takes an LPPosition and returns status + suggestion.
     """
@@ -118,6 +126,7 @@ class StrategyEngine:
     SAFE_EDGE_BUFFER = 20.0  # pct from either edge considered safe
     NEAR_EDGE_BUFFER = 5.0   # pct from either edge triggers rebalance warning
     PROFIT_TAKE_THRESHOLD = 10.0  # fees > 10% of deposit value
+    REBALANCE_EDGE_THRESHOLD = 20.0  # position drifted beyond 20% through range
 
     def analyze(self, position: LPPosition) -> LPPosition:
         """Analyze position and mutate status / suggestion / emoji."""
@@ -168,6 +177,68 @@ class StrategyEngine:
         if deposit and deposit > 0 and fees and fees > 0:
             return (fees / deposit) * 100 > self.PROFIT_TAKE_THRESHOLD
         return False
+
+    def should_rebalance(self, position: LPPosition) -> tuple[bool, str]:
+        """Return (should_rebalance, reason).
+
+        Triggers:
+        - Position < 20% through range (drifted to one edge)
+        - Position > 80% through range (drifted to other edge)
+        - Fees > 10% of deposit value (profit taking)
+        """
+        pct = position.position_in_range_pct
+        if pct is not None and (pct < 0 or pct > 100):
+            return True, "Position out of range"
+        if pct is not None and pct < self.REBALANCE_EDGE_THRESHOLD:
+            return True, f"Position at {pct:.1f}% through range — lower edge drifted"
+        if pct is not None and pct > (100 - self.REBALANCE_EDGE_THRESHOLD):
+            return True, f"Position at {pct:.1f}% through range — upper edge drifted"
+        if self._should_withdraw(position):
+            return True, "Fees exceed 10% of deposit value"
+        return False, ""
+
+    def compute_recentered_range(
+        self,
+        position: LPPosition,
+        buffer_pct: float = 0.2,
+        tick_spacing: int = 60,
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Calculate new tick range centered on current price with buffer.
+
+        Uses price → tick conversion. Returns (tick_lower, tick_upper).
+        """
+        if position.current_price is None or position.current_price <= 0:
+            return None, None
+
+        # We need decimals; fall back to standard token decimals if unavailable.
+        decimals0 = 18
+        decimals1 = 8
+        if position.raw_data and isinstance(position.raw_data, dict):
+            decimals0 = position.raw_data.get("decimals0", decimals0)
+            decimals1 = position.raw_data.get("decimals1", decimals1)
+
+        # Convert human price to raw tick space.
+        human_price = position.current_price
+        low_human = human_price * (1 - buffer_pct)
+        high_human = human_price * (1 + buffer_pct)
+
+        import math
+
+        def _price_to_tick(price: float) -> int:
+            raw = price * (10 ** (decimals1 - decimals0))
+            return int(math.floor(math.log(raw, 1.0001)))
+
+        low_tick = (_price_to_tick(low_human) // tick_spacing) * tick_spacing
+        high_tick = (_price_to_tick(high_human) // tick_spacing) * tick_spacing
+
+        # Ensure range actually brackets current tick.
+        current_tick = _price_to_tick(human_price)
+        if low_tick >= current_tick:
+            low_tick -= tick_spacing
+        if high_tick <= current_tick:
+            high_tick += tick_spacing
+
+        return low_tick, high_tick
 
 
 # ---------------------------------------------------------------------------
@@ -223,10 +294,24 @@ class LPEngine:
         self.online_mode = online_mode
         self.price_engine = price_engine or PriceEngine()
         self.strategy_engine = StrategyEngine()
+        self._writers: Dict[str, Any] = {}
 
     def _require_online(self):
         if not self.online_mode:
             raise OfflineError("Online mode is disabled. Enable Go Online to fetch LP positions.")
+
+    def get_writer(self, venue_key: str, vault_password: Optional[str] = None):
+        """Return a VenueWriter for a venue, constructing and unlocking it once."""
+        adapter = get_adapter(venue_key)
+        if not adapter or not adapter.can_write():
+            return None
+        writer = self._writers.get(venue_key)
+        if writer is None:
+            writer = adapter.get_writer()
+            self._writers[venue_key] = writer
+        if vault_password and not writer.is_available():
+            writer.unlock({"password": vault_password})
+        return writer
 
     def fetch_position(
         self,
@@ -299,6 +384,18 @@ class LPEngine:
         if not adapter:
             return {}
         return adapter.fetch_fees_earned(position_id, online_mode=True)
+
+    def should_rebalance(self, position: LPPosition) -> tuple[bool, str]:
+        """Strategy-level rebalance check."""
+        return self.strategy_engine.should_rebalance(position)
+
+    def compute_recentered_range(
+        self, position: LPPosition, buffer_pct: float = 0.2, tick_spacing: int = 60
+    ) -> tuple[Optional[int], Optional[int]]:
+        """Compute a new range centered on current price."""
+        return self.strategy_engine.compute_recentered_range(
+            position, buffer_pct=buffer_pct, tick_spacing=tick_spacing
+        )
 
     def refresh_prices(self) -> Dict[str, Dict[str, float]]:
         """Refresh the shared price cache."""
