@@ -1,10 +1,10 @@
-"""
+﻿"""
 Balance Engine - Fetches wallet balances via public RPC endpoints.
 
 Read-only. Stateless. Offline by default (caller must check online_mode).
 Only public addresses are queried - private keys and mnemonics NEVER leave the vault.
 
-Version: v4.0 (June 2026)
+Version: v4.2 (July 2026) - Customizable RPC endpoints + API key injection + fallback URLs
 """
 import json
 import urllib.request
@@ -12,7 +12,8 @@ import urllib.error
 from typing import Dict, Optional, Any, List
 from threading import Thread
 
-# Default public RPC endpoints (no API keys needed)
+# Default public RPC endpoints (no API keys needed) — legacy flat dict for backward compat.
+# v4.2 uses DEFAULT_RPC_CONFIG (below) which includes fallback URLs and auth references.
 DEFAULT_RPC_ENDPOINTS = {
     "ethereum": "https://eth.llamarpc.com",
     "arbitrum": "https://arb1.arbitrum.io/rpc",
@@ -23,7 +24,30 @@ DEFAULT_RPC_ENDPOINTS = {
     "hyperliquid": "https://rpc.hyperliquid.xyz/evm",
 }
 
-# Bitcoin / Solana / Dash / Sui endpoints
+# v4.2: Full endpoint config with url, auth, and fallback per chain.
+# This is the internal default used when no rpc_config is provided.
+DEFAULT_RPC_CONFIG: Dict[str, Dict[str, Any]] = {
+    "ethereum": {"url": "https://eth.llamarpc.com", "auth": None, "fallback": "https://rpc.ankr.com/eth"},
+    "arbitrum": {"url": "https://arb1.arbitrum.io/rpc", "auth": None, "fallback": "https://rpc.ankr.com/arbitrum"},
+    "base": {"url": "https://mainnet.base.org", "auth": None, "fallback": "https://base.llamarpc.com"},
+    "bsc": {"url": "https://bsc-dataseed.binance.org", "auth": None, "fallback": "https://bsc-dataseed1.binance.org"},
+    "polygon": {"url": "https://polygon-rpc.com", "auth": None, "fallback": "https://rpc.ankr.com/polygon"},
+    "optimism": {"url": "https://mainnet.optimism.io", "auth": None, "fallback": "https://rpc.ankr.com/optimism"},
+    "hyperliquid_evm": {"url": "https://rpc.hyperliquid.xyz/evm", "auth": None, "fallback": None},
+    "bitcoin": {"url": "https://blockstream.info/api/address/{address}", "auth": None, "fallback": "https://mempool.space/api/address/{address}"},
+    "solana": {"url": "https://api.mainnet-beta.solana.com", "auth": "helius", "fallback": "https://solana-api.projectserum.com"},
+    "dash": {"url": "https://insight.dash.org/insight-api/addr/{address}", "auth": None, "fallback": None},
+    "sui": {"url": "https://fullnode.mainnet.sui.io", "auth": None, "fallback": None},
+    "hyperliquid_l1": {"url": "https://api.hyperliquid.xyz/info", "auth": None, "fallback": None},
+    "zcash": {"url": "https://api.blockchair.com/zcash/dashboards/address/{address}", "auth": None, "fallback": None},
+    "ripple": {"url": "https://s1.ripple.com:51234", "auth": None, "fallback": "https://s2.ripple.com:51234"},
+    "cardano": {"url": "https://api.koios.rest/api/v1/address_info", "auth": None, "fallback": None},
+    "cosmos": {"url": "https://rest.lavenderfive.com:443/cosmoshub/cosmos/bank/v1beta1/balances/{address}", "auth": None, "fallback": None},
+    "secret": {"url": "https://rest.lavenderfive.com:443/secretnetwork/cosmos/bank/v1beta1/balances/{address}", "auth": None, "fallback": None},
+    "thorchain": {"url": "https://thornode.thorchain.ninja/cosmos/bank/v1beta1/balances/{address}", "auth": None, "fallback": None},
+}
+
+# Legacy module-level constants (kept for backward compatibility — not used internally by v4.2)
 BTC_API = "https://blockstream.info/api/address/{address}"
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 DASH_API = "https://insight.dash.org/insight-api/addr/{address}"
@@ -74,8 +98,6 @@ COINGECKO_IDS = {
 }
 
 
-
-
 # Common ERC-20 token contracts per chain
 # Each token has: { address, decimals }
 TOKEN_CONTRACTS = {
@@ -113,20 +135,116 @@ TOKEN_CONTRACTS = {
     },
 }
 
+
 class BalanceEngine:
-    """Stateless balance fetcher for EVM, BTC, SOL, DASH, SUI chains.
+    """Stateless balance fetcher for EVM, BTC, SOL, DASH, SUI, and other chains.
 
     All methods are read-only and make a single network request per call.
     The caller is responsible for checking online_mode before calling.
+
+    v4.2: Supports customizable RPC endpoints (from rpc_endpoints.json) and
+    API key injection from the encrypted vault. Falls back to fallback URLs
+    on primary endpoint failure.
     """
 
-    def __init__(self, rpc_endpoints: Optional[Dict[str, str]] = None):
-        """Initialize with optional custom RPC endpoints.
+    def __init__(self, rpc_config: Optional[Dict[str, Dict[str, Any]]] = None,
+                 api_keys: Optional[Dict[str, str]] = None,
+                 rpc_endpoints: Optional[Dict[str, str]] = None):
+        """Initialize with optional custom RPC configuration.
 
         Args:
-            rpc_endpoints: Override default RPC URLs. Keys: ethereum, arbitrum, base, etc.
+            rpc_config: Full endpoint config dict in {chain_id: {url, auth, fallback}} format.
+                        Takes precedence over rpc_endpoints. If None, uses DEFAULT_RPC_CONFIG.
+            api_keys: API keys from vault config. Format: {provider: "key_string"}.
+                      Used to inject keys into URLs for chains with auth configured.
+            rpc_endpoints: Legacy flat dict {chain_id: "url_string"} for backward compatibility.
+                           If rpc_config is None and rpc_endpoints is provided, a minimal
+                           rpc_config is built from these URLs.
         """
-        self.rpc_endpoints = rpc_endpoints or DEFAULT_RPC_ENDPOINTS
+        if rpc_config is not None:
+            self.rpc_config = rpc_config
+        elif rpc_endpoints is not None:
+            # Backward compat: build config from flat dict, use defaults for missing chains
+            self.rpc_config = DEFAULT_RPC_CONFIG.copy()
+            for chain_id, url in rpc_endpoints.items():
+                if chain_id in self.rpc_config:
+                    self.rpc_config[chain_id] = {
+                        "url": url,
+                        "auth": self.rpc_config[chain_id].get("auth"),
+                        "fallback": self.rpc_config[chain_id].get("fallback"),
+                    }
+                else:
+                    self.rpc_config[chain_id] = {"url": url, "auth": None, "fallback": None}
+        else:
+            self.rpc_config = DEFAULT_RPC_CONFIG.copy()
+
+        self.api_keys = api_keys or {}
+
+    def _get_url(self, chain_id: str) -> Optional[str]:
+        """Get the effective URL for a chain, with API key injected if configured.
+
+        Args:
+            chain_id: Chain identifier (e.g., "ethereum", "bitcoin", "solana").
+
+        Returns:
+            The URL string with API key applied, or None if chain not configured.
+        """
+        endpoint = self.rpc_config.get(chain_id, {})
+        url = endpoint.get("url")
+        if not url:
+            return None
+
+        auth_provider = endpoint.get("auth")
+        if auth_provider and auth_provider in self.api_keys:
+            key = self.api_keys[auth_provider]
+            if key:
+                url = self._inject_api_key(url, auth_provider, key)
+
+        return url
+
+    def _get_fallback(self, chain_id: str) -> Optional[str]:
+        """Get the fallback URL for a chain, with API key injected if configured.
+
+        Args:
+            chain_id: Chain identifier.
+
+        Returns:
+            Fallback URL string with API key applied, or None if no fallback.
+        """
+        endpoint = self.rpc_config.get(chain_id, {})
+        url = endpoint.get("fallback")
+        if not url:
+            return None
+
+        auth_provider = endpoint.get("auth")
+        if auth_provider and auth_provider in self.api_keys:
+            key = self.api_keys[auth_provider]
+            if key:
+                url = self._inject_api_key(url, auth_provider, key)
+
+        return url
+
+    @staticmethod
+    def _inject_api_key(url: str, provider: str, key: str) -> str:
+        """Inject an API key into a URL based on the provider pattern.
+
+        Args:
+            url: The base URL to modify.
+            provider: The auth provider name (e.g., "helius").
+            key: The API key string.
+
+        Returns:
+            Modified URL with the API key applied.
+        """
+        if provider == "helius":
+            # Helius: replace public Solana hostname with Helius endpoint
+            url = url.replace("api.mainnet-beta.solana.com", "mainnet.helius-rpc.com")
+            # Remove any existing query params to avoid double api-key
+            if "?" in url:
+                url = url.split("?")[0]
+            url += f"?api-key={key}"
+        # Add more provider patterns here as needed
+        return url
 
     # --- EVM chains ---
 
@@ -144,7 +262,7 @@ class BalanceEngine:
 
         req = urllib.request.Request(url, data=payload, headers={
             "Content-Type": "application/json",
-            "User-Agent": "ColdStack/4.0"
+            "User-Agent": "ColdStack/4.2"
         })
 
         try:
@@ -160,22 +278,34 @@ class BalanceEngine:
         Args:
             address: The EVM address (0x...)
             chain_key: One of 'ethereum', 'arbitrum', 'base', 'bsc', 'polygon', 'optimism'
+                       Also supports 'hyperliquid_evm' for HyperEVM.
 
         Returns:
             Balance in native currency (ETH/BNB/MATIC) as float, or None on error.
         """
-        url = self.rpc_endpoints.get(chain_key)
+        url = self._get_url(chain_key)
         if not url:
             return None
 
         result = self._rpc_call(url, "eth_getBalance", [address, "latest"])
         if result is not None:
             try:
-                # eth_getBalance returns hex string in wei
                 wei = int(result, 16)
                 return wei / 1e18
             except (ValueError, TypeError):
-                return None
+                pass
+
+        # Try fallback URL
+        fallback_url = self._get_fallback(chain_key)
+        if fallback_url and fallback_url != url:
+            result = self._rpc_call(fallback_url, "eth_getBalance", [address, "latest"])
+            if result is not None:
+                try:
+                    wei = int(result, 16)
+                    return wei / 1e18
+                except (ValueError, TypeError):
+                    return None
+
         return None
 
 
@@ -193,7 +323,7 @@ class BalanceEngine:
         Returns:
             Token balance as float, or None on error.
         """
-        url = self.rpc_endpoints.get(chain_key)
+        url = self._get_url(chain_key)
         if not url:
             return None
 
@@ -208,40 +338,61 @@ class BalanceEngine:
                 balance = int(result, 16)
                 return balance / (10 ** decimals)
             except (ValueError, TypeError):
-                return None
+                pass
+
+        # Try fallback URL
+        fallback_url = self._get_fallback(chain_key)
+        if fallback_url and fallback_url != url:
+            result = self._rpc_call(fallback_url, "eth_call", [{"to": token_address, "data": call_data}, "latest"])
+            if result is not None:
+                try:
+                    balance = int(result, 16)
+                    return balance / (10 ** decimals)
+                except (ValueError, TypeError):
+                    return None
+
         return None
 
-    def fetch_all_evm_balances(self, address: str) -> List[Dict[str, Any]]:
+    def fetch_all_evm_balances(self, address: str, progress_callback=None) -> List[Dict[str, Any]]:
         """Fetch native + ERC-20 token balances across ALL configured EVM chains.
 
         Returns a list of {chain, balance, symbol, type} dicts for chains with non-zero balance.
         """
         results = []
 
-        for chain_key in ["ethereum", "arbitrum", "base", "bsc", "polygon", "optimism", "hyperliquid"]:
-            url = self.rpc_endpoints.get(chain_key)
+        # v4.2: Use 'hyperliquid_evm' as the chain key (was 'hyperliquid' in v4.1)
+        evm_chains = ["ethereum", "arbitrum", "base", "bsc", "polygon", "optimism", "hyperliquid_evm"]
+
+        for chain_key in evm_chains:
+            # v4.2: Report progress to UI
+            if progress_callback:
+                display_name = chain_key.replace("_", " ").title()
+                progress_callback(f"Fetching {display_name}...")
+            url = self._get_url(chain_key)
             if not url:
                 continue
 
             # Native balance
             balance = self.fetch_evm_balance(address, chain_key)
+            # Use 'hyperliquid' as the display name for HYPE (backward compat with CURRENCY_SYMBOLS)
+            display_key = "hyperliquid" if chain_key == "hyperliquid_evm" else chain_key
             if balance is not None and balance > 0:
                 results.append({
-                    "chain": chain_key,
+                    "chain": display_key,
                     "balance": balance,
-                    "symbol": CURRENCY_SYMBOLS.get(chain_key, "?"),
+                    "symbol": CURRENCY_SYMBOLS.get(display_key, "?"),
                     "type": "native"
                 })
 
             # ERC-20 token balances for this chain
-            tokens = TOKEN_CONTRACTS.get(chain_key, {})
+            tokens = TOKEN_CONTRACTS.get(chain_key, TOKEN_CONTRACTS.get(display_key, {}))
             for token_symbol, token_info in tokens.items():
                 token_balance = self.fetch_erc20_balance(
                     address, token_info["address"], chain_key, token_info["decimals"]
                 )
                 if token_balance is not None and token_balance > 0:
                     results.append({
-                        "chain": chain_key,
+                        "chain": display_key,
                         "balance": token_balance,
                         "symbol": token_symbol,
                         "type": "erc20"
@@ -256,19 +407,36 @@ class BalanceEngine:
 
         Returns balance in BTC, or None on error.
         """
-        url = BTC_API.format(address=address)
+        url_template = self._get_url("bitcoin")
+        if not url_template:
+            return None
+
+        url = url_template.format(address=address)
+        result = self._fetch_btc_from_url(url)
+        if result is not None:
+            return result
+
+        # Try fallback URL
+        fallback_template = self._get_fallback("bitcoin")
+        if fallback_template:
+            fallback_url = fallback_template.format(address=address)
+            return self._fetch_btc_from_url(fallback_url)
+
+        return None
+
+    def _fetch_btc_from_url(self, url: str) -> Optional[float]:
+        """Fetch BTC balance from a specific URL. Internal helper."""
         req = urllib.request.Request(url, headers={
-            "User-Agent": "ColdStack/4.0",
+            "User-Agent": "ColdStack/4.2",
             "Accept": "application/json"
         })
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode('utf-8'))
-                # blockstream returns {chain_stats: {funded_txo_sum, spent_txo_sum}, ...}
                 funded = data.get("chain_stats", {}).get("funded_txo_sum", 0)
                 spent = data.get("chain_stats", {}).get("spent_txo_sum", 0)
                 balance_sats = funded - spent
-                return balance_sats / 1e8  # satoshis to BTC
+                return balance_sats / 1e8
         except (urllib.error.URLError, json.JSONDecodeError, KeyError, Exception):
             return None
 
@@ -279,6 +447,23 @@ class BalanceEngine:
 
         Returns balance in SOL, or None on error.
         """
+        url = self._get_url("solana")
+        if not url:
+            return None
+
+        result = self._fetch_solana_from_url(url, address)
+        if result is not None:
+            return result
+
+        # Try fallback URL (note: fallback won't have API key — it's a public endpoint)
+        fallback_url = self._get_fallback("solana")
+        if fallback_url and fallback_url != url:
+            return self._fetch_solana_from_url(fallback_url, address)
+
+        return None
+
+    def _fetch_solana_from_url(self, url: str, address: str) -> Optional[float]:
+        """Fetch SOL balance from a specific URL. Internal helper."""
         payload = json.dumps({
             "jsonrpc": "2.0",
             "id": 1,
@@ -286,15 +471,15 @@ class BalanceEngine:
             "params": [address]
         }).encode('utf-8')
 
-        req = urllib.request.Request(SOLANA_RPC, data=payload, headers={
+        req = urllib.request.Request(url, data=payload, headers={
             "Content-Type": "application/json",
-            "User-Agent": "ColdStack/4.0"
+            "User-Agent": "ColdStack/4.2"
         })
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode('utf-8'))
                 lamports = data.get("result", {}).get("value", 0)
-                return lamports / 1e9  # lamports to SOL
+                return lamports / 1e9
         except (urllib.error.URLError, json.JSONDecodeError, KeyError, Exception):
             return None
 
@@ -305,15 +490,32 @@ class BalanceEngine:
 
         Returns balance in DASH, or None on error.
         """
-        url = DASH_API.format(address=address)
+        url_template = self._get_url("dash")
+        if not url_template:
+            return None
+
+        url = url_template.format(address=address)
+        result = self._fetch_dash_from_url(url)
+        if result is not None:
+            return result
+
+        # Try fallback URL
+        fallback_template = self._get_fallback("dash")
+        if fallback_template:
+            fallback_url = fallback_template.format(address=address)
+            return self._fetch_dash_from_url(fallback_url)
+
+        return None
+
+    def _fetch_dash_from_url(self, url: str) -> Optional[float]:
+        """Fetch DASH balance from a specific URL. Internal helper."""
         req = urllib.request.Request(url, headers={
-            "User-Agent": "ColdStack/4.0",
+            "User-Agent": "ColdStack/4.2",
             "Accept": "application/json"
         })
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode('utf-8'))
-                # insight API returns {balance: ..., balanceSat: ...}
                 balance_sat = data.get("balanceSat", 0)
                 if balance_sat == 0:
                     balance = data.get("balance", 0)
@@ -329,6 +531,23 @@ class BalanceEngine:
 
         Returns balance in SUI, or None on error.
         """
+        url = self._get_url("sui")
+        if not url:
+            return None
+
+        result = self._fetch_sui_from_url(url, address)
+        if result is not None:
+            return result
+
+        # Try fallback URL
+        fallback_url = self._get_fallback("sui")
+        if fallback_url and fallback_url != url:
+            return self._fetch_sui_from_url(fallback_url, address)
+
+        return None
+
+    def _fetch_sui_from_url(self, url: str, address: str) -> Optional[float]:
+        """Fetch SUI balance from a specific URL. Internal helper."""
         payload = json.dumps({
             "jsonrpc": "2.0",
             "id": 1,
@@ -336,16 +555,15 @@ class BalanceEngine:
             "params": [address]
         }).encode('utf-8')
 
-        req = urllib.request.Request(SUI_RPC, data=payload, headers={
+        req = urllib.request.Request(url, data=payload, headers={
             "Content-Type": "application/json",
-            "User-Agent": "ColdStack/4.0"
+            "User-Agent": "ColdStack/4.2"
         })
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode('utf-8'))
-                # suix_getBalance returns {totalBalance: "..."} as string
                 total = data.get("result", {}).get("totalBalance", "0")
-                return float(total) / 1e9  # mist to SUI
+                return float(total) / 1e9
         except (urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError, Exception):
             return None
 
@@ -358,17 +576,34 @@ class BalanceEngine:
 
         Returns a list of {chain, balance, symbol, type} dicts for non-zero balances.
         """
+        url = self._get_url("hyperliquid_l1")
+        if not url:
+            return []
+
+        result = self._fetch_hl1_from_url(url, address)
+        if result:
+            return result
+
+        # Try fallback URL
+        fallback_url = self._get_fallback("hyperliquid_l1")
+        if fallback_url and fallback_url != url:
+            return self._fetch_hl1_from_url(fallback_url, address)
+
+        return []
+
+    def _fetch_hl1_from_url(self, url: str, address: str) -> List[Dict[str, Any]]:
+        """Fetch Hyperliquid L1 balances from a specific URL. Internal helper."""
         payload = json.dumps({
             "type": "spotClearinghouseState",
             "user": address
         }).encode('utf-8')
 
         req = urllib.request.Request(
-            HYPERLIQUID_L1_API,
+            url,
             data=payload,
             headers={
                 "Content-Type": "application/json",
-                "User-Agent": "ColdStack/4.1"
+                "User-Agent": "ColdStack/4.2"
             }
         )
 
@@ -403,15 +638,32 @@ class BalanceEngine:
 
     def fetch_zec_balance(self, address: str) -> Optional[float]:
         """Fetch transparent ZEC balance for a Zcash t-address."""
-        url = ZCASH_API.format(address=address)
+        url_template = self._get_url("zcash")
+        if not url_template:
+            return None
+
+        url = url_template.format(address=address)
+        result = self._fetch_zec_from_url(url, address)
+        if result is not None:
+            return result
+
+        # Try fallback URL
+        fallback_template = self._get_fallback("zcash")
+        if fallback_template:
+            fallback_url = fallback_template.format(address=address)
+            return self._fetch_zec_from_url(fallback_url, address)
+
+        return None
+
+    def _fetch_zec_from_url(self, url: str, address: str) -> Optional[float]:
+        """Fetch ZEC balance from a specific URL. Internal helper."""
         req = urllib.request.Request(url, headers={
-            "User-Agent": "ColdStack/4.1",
+            "User-Agent": "ColdStack/4.2",
             "Accept": "application/json"
         })
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode('utf-8'))
-                # Blockchair API returns: {"data": {"t1...": {"address": {"balance": 12345678}}}}
                 addr_data = data.get("data", {}).get(address, {})
                 if addr_data:
                     balance_zat = addr_data.get("address", {}).get("balance", 0)
@@ -422,13 +674,30 @@ class BalanceEngine:
 
     def fetch_xrp_balance(self, address: str) -> Optional[float]:
         """Fetch XRP balance for a Ripple address."""
+        url = self._get_url("ripple")
+        if not url:
+            return None
+
+        result = self._fetch_xrp_from_url(url, address)
+        if result is not None:
+            return result
+
+        # Try fallback URL
+        fallback_url = self._get_fallback("ripple")
+        if fallback_url and fallback_url != url:
+            return self._fetch_xrp_from_url(fallback_url, address)
+
+        return None
+
+    def _fetch_xrp_from_url(self, url: str, address: str) -> Optional[float]:
+        """Fetch XRP balance from a specific URL. Internal helper."""
         payload = json.dumps({
             "method": "account_info",
             "params": [{"account": address, "ledger_index": "validated"}]
         }).encode('utf-8')
-        req = urllib.request.Request(XRP_RPC, data=payload, headers={
+        req = urllib.request.Request(url, data=payload, headers={
             "Content-Type": "application/json",
-            "User-Agent": "ColdStack/4.1"
+            "User-Agent": "ColdStack/4.2"
         })
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
@@ -440,10 +709,27 @@ class BalanceEngine:
 
     def fetch_ada_balance(self, address: str) -> Optional[float]:
         """Fetch ADA balance for a Cardano address via Koios (no API key needed)."""
+        url = self._get_url("cardano")
+        if not url:
+            return None
+
+        result = self._fetch_ada_from_url(url, address)
+        if result is not None:
+            return result
+
+        # Try fallback URL
+        fallback_url = self._get_fallback("cardano")
+        if fallback_url and fallback_url != url:
+            return self._fetch_ada_from_url(fallback_url, address)
+
+        return None
+
+    def _fetch_ada_from_url(self, url: str, address: str) -> Optional[float]:
+        """Fetch ADA balance from a specific URL. Internal helper."""
         payload = json.dumps({"_addresses": [address]}).encode('utf-8')
-        req = urllib.request.Request(ADA_API, data=payload, headers={
+        req = urllib.request.Request(url, data=payload, headers={
             "Content-Type": "application/json",
-            "User-Agent": "ColdStack/4.1"
+            "User-Agent": "ColdStack/4.2"
         })
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
@@ -456,9 +742,27 @@ class BalanceEngine:
 
     def fetch_cosmos_balances(self, address: str) -> List[Dict[str, Any]]:
         """Fetch all token balances for a Cosmos Hub address."""
-        url = COSMOS_API.format(address=address)
+        url_template = self._get_url("cosmos")
+        if not url_template:
+            return []
+
+        url = url_template.format(address=address)
+        result = self._fetch_cosmos_from_url(url)
+        if result:
+            return result
+
+        # Try fallback URL
+        fallback_template = self._get_fallback("cosmos")
+        if fallback_template:
+            fallback_url = fallback_template.format(address=address)
+            return self._fetch_cosmos_from_url(fallback_url)
+
+        return []
+
+    def _fetch_cosmos_from_url(self, url: str) -> List[Dict[str, Any]]:
+        """Fetch Cosmos balances from a specific URL. Internal helper."""
         req = urllib.request.Request(url, headers={
-            "User-Agent": "ColdStack/4.1",
+            "User-Agent": "ColdStack/4.2",
             "Accept": "application/json"
         })
         try:
@@ -501,9 +805,27 @@ class BalanceEngine:
 
     def fetch_scrt_balances(self, address: str) -> List[Dict[str, Any]]:
         """Fetch transparent SCRT balance for a Secret Network address."""
-        url = SECRET_API.format(address=address)
+        url_template = self._get_url("secret")
+        if not url_template:
+            return []
+
+        url = url_template.format(address=address)
+        result = self._fetch_scrt_from_url(url)
+        if result:
+            return result
+
+        # Try fallback URL
+        fallback_template = self._get_fallback("secret")
+        if fallback_template:
+            fallback_url = fallback_template.format(address=address)
+            return self._fetch_scrt_from_url(fallback_url)
+
+        return []
+
+    def _fetch_scrt_from_url(self, url: str) -> List[Dict[str, Any]]:
+        """Fetch SCRT balances from a specific URL. Internal helper."""
         req = urllib.request.Request(url, headers={
-            "User-Agent": "ColdStack/4.1",
+            "User-Agent": "ColdStack/4.2",
             "Accept": "application/json"
         })
         try:
@@ -539,9 +861,27 @@ class BalanceEngine:
 
     def fetch_rune_balance(self, address: str) -> List[Dict[str, Any]]:
         """Fetch RUNE balance for a THORChain address."""
-        url = RUNE_API.format(address=address)
+        url_template = self._get_url("thorchain")
+        if not url_template:
+            return []
+
+        url = url_template.format(address=address)
+        result = self._fetch_rune_from_url(url)
+        if result:
+            return result
+
+        # Try fallback URL
+        fallback_template = self._get_fallback("thorchain")
+        if fallback_template:
+            fallback_url = fallback_template.format(address=address)
+            return self._fetch_rune_from_url(fallback_url)
+
+        return []
+
+    def _fetch_rune_from_url(self, url: str) -> List[Dict[str, Any]]:
+        """Fetch RUNE balances from a specific URL. Internal helper."""
         req = urllib.request.Request(url, headers={
-            "User-Agent": "ColdStack/4.1",
+            "User-Agent": "ColdStack/4.2",
             "Accept": "application/json"
         })
         try:
@@ -575,9 +915,38 @@ class BalanceEngine:
         except (urllib.error.URLError, json.JSONDecodeError, KeyError, Exception):
             return []
 
+    def fetch_hype_balances(self, address: str, progress_callback=None) -> List[Dict[str, Any]]:
+        """Fetch HyperEVM gas balance + Hyperliquid L1 spot balances only.
+
+        This is used for HYPE (Hyperliquid) chain type — it only queries
+        HyperEVM (for gas HYPE) and Hyperliquid L1 (for spot balances),
+        NOT all EVM chains like fetch_all_evm_balances does.
+        """
+        results = []
+
+        # 1. HyperEVM native balance (gas HYPE)
+        if progress_callback:
+            progress_callback("Fetching HyperEVM...")
+        balance = self.fetch_evm_balance(address, "hyperliquid_evm")
+        if balance is not None and balance > 0:
+            results.append({
+                "chain": "hyperliquid",
+                "balance": balance,
+                "symbol": CURRENCY_SYMBOLS.get("hyperliquid", "HYPE"),
+                "type": "native"
+            })
+
+        # 2. Hyperliquid L1 spot balances (USDC, HYPE spot, etc.)
+        if progress_callback:
+            progress_callback("Fetching Hyperliquid L1 spot...")
+        hl1_balances = self.fetch_hyperliquid_l1_balances(address)
+        results = results + hl1_balances
+
+        return results
+
     # --- Dispatcher ---
 
-    def fetch_balance(self, address: str, chain_type: str, coin: str = "") -> Dict[str, Any]:
+    def fetch_balance(self, address: str, chain_type: str, coin: str = "", progress_callback=None) -> Dict[str, Any]:
         """Fetch balance for an address based on its chain type.
 
         This is the main entry point. It determines which API to use based on
@@ -586,11 +955,12 @@ class BalanceEngine:
         Args:
             address: The wallet address string.
             chain_type: The chain label (e.g., "EVM (Ethereum / Arbitrum / Base)", "BTC Taproot (bc1p)").
+            coin: Optional coin field from the vault entry.
 
         Returns:
             Dict with keys:
                 - 'balances': List of {chain, balance, symbol} (may be multiple for EVM)
-                - - 'error': str if something went wrong (empty string if success)
+                - 'error': str if something went wrong (empty string if success)
         """
         # Check both chain_type and coin for matching
         check_str = (chain_type or "") + " " + (coin or "")
@@ -608,14 +978,18 @@ class BalanceEngine:
                     return {"balances": balances, "error": ""}
                 return {"balances": [], "error": "No balances shown on Hyperliquid L1"}
 
-            # EVM chains - query all configured EVM RPCs
-            if "evm" in chain_lower or "hype" in chain_lower or "hyperliquid" in chain_lower:
-                balances = self.fetch_all_evm_balances(address)
+            # HYPE (Hyperliquid) - only search HyperEVM + L1, not all EVM chains
+            if ("hype" in chain_lower or "hyperliquid" in chain_lower) and "evm" not in chain_lower:
+                balances = self.fetch_hype_balances(address, progress_callback=progress_callback)
                 if balances:
                     return {"balances": balances, "error": ""}
-                # Distinguish Hyperliquid (HYPE) addresses from generic EVM
-                if "hype" in chain_lower or "hyperliquid" in chain_lower:
-                    return {"balances": [], "error": "No balances shown on Hyperliquid L1. Are you looking for Hype on EVM?"}
+                return {"balances": [], "error": "No balances found on HyperEVM or Hyperliquid L1"}
+
+            # EVM chains - query all configured EVM RPCs (generic EVM only)
+            if "evm" in chain_lower:
+                balances = self.fetch_all_evm_balances(address, progress_callback=progress_callback)
+                if balances:
+                    return {"balances": balances, "error": ""}
                 return {"balances": [], "error": "No balances found on any EVM chain"}
 
             # Bitcoin (all types: Taproot, SegWit, Legacy)

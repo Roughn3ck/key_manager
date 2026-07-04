@@ -1,8 +1,8 @@
-"""
+﻿"""
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v4.0 (June 2026) - Price Feeds + Wallet Balances + Go Online Toggle — ColdStack rebrand + Check for Updates
+Version: v4.2 (July 2026) - Customizable RPC Endpoints + Standard/Advanced Mode + API Key Management — ColdStack rebrand + Check for Updates
 """
 import sys
 import os
@@ -54,6 +54,7 @@ from crypto_engine import CryptoEngine
 from derivation_engine import DerivationEngine
 from balance_engine import BalanceEngine, is_balance_supported
 from price_engine import PriceEngine, DISPLAY_CURRENCY_OPTIONS
+from rpc_config import load_rpc_config, save_rpc_config, get_default_endpoints, get_default_for_chain
 # BackupEngine import removed — backups are deprecated; users copy
 # key_vault.encrypted manually.  The BackupEngine created an unwanted
 # "backups" subfolder on every login.
@@ -275,6 +276,11 @@ class ColdStackGUI:
         self._balance_labels = {}
         self._last_balance_refresh = None
 
+        # v4.2: Standard/Advanced mode + customizable RPC + API keys
+        self.app_mode = "standard"
+        self.api_keys: Dict[str, str] = {}
+        self.rpc_config: Optional[Dict[str, Dict[str, Any]]] = None
+
         # Session management
         self.session_start_time = None
         self.session_timeout = 300  # 5 minutes in seconds
@@ -322,7 +328,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v4.1 - ColdStack | Balances + Price Feeds + Go Online",
+            text="v4.2 - ColdStack | Customizable RPC + Advanced Mode",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )
@@ -742,7 +748,7 @@ class ColdStackGUI:
                 url = "https://api.github.com/repos/Roughn3ck/key_manager/releases/latest"
                 req = urllib.request.Request(url, headers={
                     "Accept": "application/vnd.github.v3+json",
-                    "User-Agent": "ColdStack/4.1"
+                    "User-Agent": "ColdStack/4.2"
                 })
 
                 with urllib.request.urlopen(req, timeout=10) as response:
@@ -752,7 +758,7 @@ class ColdStackGUI:
                 release_url = data.get("html_url", "https://github.com/Roughn3ck/key_manager/releases")
                 release_name = data.get("name", "Latest Release")
 
-                current_version = "4.1"
+                current_version = "4.2"
                 latest_version = latest_tag.lstrip("v")
 
                 # Simple version comparison (handles major.minor[.patch])
@@ -2739,16 +2745,36 @@ class ColdStackGUI:
     # --- v4.0: Online mode, balances, prices, settings ---
 
     def _load_vault_config(self):
-        """Load online_mode and display_currency from vault config."""
+        """Load config from vault: online_mode, display_currency, app_mode, api_keys."""
         config = self.key_manager.address_db.get("config", {})
         self.online_mode = config.get("online_mode", False)
         self.display_currency = config.get("display_currency", "none")
+        # v4.2: New config fields (backward-compatible defaults)
+        self.app_mode = config.get("app_mode", "standard")
+        self.api_keys = config.get("api_keys", {})
+        if not isinstance(self.api_keys, dict):
+            self.api_keys = {}
+        # v4.2: Load RPC config from file and rebuild balance engine
+        self.rpc_config = load_rpc_config(base_dir)
+        self._rebuild_balance_engine()
 
     def _save_vault_config(self):
-        """Save online_mode and display_currency to vault config."""
-        self.key_manager.address_db.setdefault("config", {})["online_mode"] = self.online_mode
-        self.key_manager.address_db["config"]["display_currency"] = self.display_currency
+        """Save config to vault: online_mode, display_currency, app_mode, api_keys."""
+        cfg = self.key_manager.address_db.setdefault("config", {})
+        cfg["online_mode"] = self.online_mode
+        cfg["display_currency"] = self.display_currency
+        # v4.2: Save new config fields
+        cfg["schema_version"] = 2
+        cfg["app_mode"] = self.app_mode
+        cfg["api_keys"] = self.api_keys
         self.key_manager.save_encrypted_data(self.current_password)
+
+    def _rebuild_balance_engine(self):
+        """Rebuild the BalanceEngine with current RPC config and API keys."""
+        self.balance_engine = BalanceEngine(
+            rpc_config=self.rpc_config,
+            api_keys=self.api_keys
+        )
 
     def _update_online_indicator(self):
         """Update the online/offline status label in the status bar."""
@@ -2760,21 +2786,29 @@ class ColdStackGUI:
             self.online_status_label.configure(text="\u25CF Offline", text_color="gray60")
 
     def show_settings_dialog(self):
-        """Settings dialog with Go Online toggle and currency selection."""
+        """Settings dialog with Go Online toggle, currency, and Standard/Advanced mode (v4.2)."""
+        from tkinter import messagebox
+
         dialog = ctk.CTkToplevel(self.root)
         dialog.title("Settings")
-        dialog.geometry("480x400")
         dialog.transient(self.root)
         dialog.grab_set()
         self._center_dialog(dialog)
 
+        # Set dialog size based on mode
+        if self.app_mode == "advanced":
+            dialog.geometry("600x700")
+        else:
+            dialog.geometry("480x450")
+
         ctk.CTkLabel(dialog, text="Settings",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(20, 15))
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(20, 10))
 
-        form = ctk.CTkFrame(dialog, fg_color="transparent")
-        form.pack(pady=10, padx=20, fill="both", expand=True)
+        # Use a scrollable form for advanced mode
+        form = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
+        form.pack(pady=5, padx=20, fill="both", expand=True)
 
-        # Go Online toggle
+        # --- Go Online toggle (both modes) ---
         online_frame = ctk.CTkFrame(form, fg_color="transparent")
         online_frame.pack(fill="x", pady=(0, 15))
 
@@ -2794,7 +2828,7 @@ class ColdStackGUI:
             online_switch.select()
         online_switch.pack(anchor="w")
 
-        # Display currency selection
+        # --- Display currency selection (both modes) ---
         currency_frame = ctk.CTkFrame(form, fg_color="transparent")
         currency_frame.pack(fill="x", pady=(0, 15))
 
@@ -2819,14 +2853,200 @@ class ColdStackGUI:
                                   width=45, style="Dark.TCombobox")
         curr_combo.pack(anchor="w", pady=(0, 5))
 
+        # --- Advanced mode sections ---
+        # Store references for saving
+        rpc_url_vars = {}
+        api_key_vars = {}
+
+        if self.app_mode == "advanced":
+            # --- RPC Endpoints section ---
+            rpc_section = ctk.CTkFrame(form, fg_color="transparent")
+            rpc_section.pack(fill="x", pady=(10, 5))
+
+            ctk.CTkLabel(rpc_section, text="--- RPC Endpoints ---",
+                         font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
+            ctk.CTkLabel(rpc_section,
+                text="Customize public RPC URLs for each chain. These are NOT secrets.\n"
+                     "API keys are stored separately in the encrypted vault.",
+                font=ctk.CTkFont(size=10), text_color="gray60").pack(anchor="w", pady=(2, 8))
+
+            # Scrollable list of chain -> URL entries
+            rpc_list_frame = ctk.CTkFrame(rpc_section, fg_color="transparent")
+            rpc_list_frame.pack(fill="x", pady=(0, 5))
+
+            if self.rpc_config is None:
+                self.rpc_config = load_rpc_config(base_dir)
+
+            for chain_id in sorted(self.rpc_config.keys()):
+                entry = self.rpc_config[chain_id]
+                url = entry.get("url", "")
+                row = ctk.CTkFrame(rpc_list_frame, fg_color="transparent")
+                row.pack(fill="x", pady=2)
+
+                ctk.CTkLabel(row, text=chain_id, width=120, anchor="w",
+                             font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 5))
+
+                url_var = ctk.StringVar(value=url)
+                rpc_url_vars[chain_id] = url_var
+                url_entry = ctk.CTkEntry(row, textvariable=url_var, width=380,
+                                         font=ctk.CTkFont(size=10))
+                url_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+                # Per-chain reset button
+                def make_reset_fn(cid, uvar):
+                    def do_reset():
+                        default = get_default_for_chain(cid)
+                        if default:
+                            uvar.set(default.get("url", ""))
+                    return do_reset
+
+                reset_btn = ctk.CTkButton(row, text="Reset", width=50, height=22,
+                                          command=make_reset_fn(chain_id, url_var),
+                                          font=ctk.CTkFont(size=9), fg_color="gray30")
+                reset_btn.pack(side="left")
+
+            # Reset All to Defaults button
+            def reset_all_rpc():
+                for cid, uvar in rpc_url_vars.items():
+                    default = get_default_for_chain(cid)
+                    if default:
+                        uvar.set(default.get("url", ""))
+
+            ctk.CTkButton(rpc_section, text="Reset All to Defaults", command=reset_all_rpc,
+                          width=150, height=28, fg_color="gray30",
+                          font=ctk.CTkFont(size=11)).pack(pady=(5, 10))
+
+            # --- API Keys section ---
+            api_section = ctk.CTkFrame(form, fg_color="transparent")
+            api_section.pack(fill="x", pady=(10, 5))
+
+            ctk.CTkLabel(api_section, text="--- API Keys (encrypted in vault) ---",
+                         font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
+            ctk.CTkLabel(api_section,
+                text="API keys for premium RPC providers. Stored in the encrypted vault,\n"
+                     "never written to rpc_endpoints.json.",
+                font=ctk.CTkFont(size=10), text_color="gray60").pack(anchor="w", pady=(2, 8))
+
+            api_key_providers = ["helius", "infura", "alchemy", "quicknode"]
+            api_key_labels = {
+                "helius": "Helius (Solana)",
+                "infura": "Infura (EVM)",
+                "alchemy": "Alchemy (EVM)",
+                "quicknode": "Quicknode (Multi-chain)",
+            }
+
+            for provider in api_key_providers:
+                row = ctk.CTkFrame(api_section, fg_color="transparent")
+                row.pack(fill="x", pady=3)
+
+                ctk.CTkLabel(row, text=api_key_labels[provider], width=150, anchor="w",
+                             font=ctk.CTkFont(size=11)).pack(side="left", padx=(0, 5))
+
+                current_key = self.api_keys.get(provider, "")
+                key_var = ctk.StringVar(value=current_key)
+                api_key_vars[provider] = key_var
+                key_entry = ctk.CTkEntry(row, textvariable=key_var, width=300,
+                                         show="*", font=ctk.CTkFont(size=10))
+                key_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+                # Show/hide toggle
+                def make_toggle_fn(kentry, kbtn):
+                    def toggle():
+                        if kentry.cget("show") == "*":
+                            kentry.configure(show="")
+                            kbtn.configure(text="Hide")
+                        else:
+                            kentry.configure(show="*")
+                            kbtn.configure(text="Show")
+                    return toggle
+
+                show_btn = ctk.CTkButton(row, text="Show", width=50, height=22,
+                                         font=ctk.CTkFont(size=9), fg_color="gray30",
+                                         command=make_toggle_fn(key_entry, None))
+                # Fix: we need the button reference inside the toggle
+                def make_toggle_fn2(kentry, kbtn_ref):
+                    def toggle():
+                        if kentry.cget("show") == "*":
+                            kentry.configure(show="")
+                            kbtn_ref.configure(text="Hide")
+                        else:
+                            kentry.configure(show="*")
+                            kbtn_ref.configure(text="Show")
+                    return toggle
+
+                show_btn.configure(command=make_toggle_fn2(key_entry, show_btn))
+                show_btn.pack(side="left")
+
+            # Switch to Standard button
+            def switch_to_standard():
+                confirm = messagebox.askyesno(
+                    "Switch to Standard Mode",
+                    "Standard mode hides RPC endpoint editing and API key fields.\n\n"
+                    "Your custom RPC URLs in rpc_endpoints.json will be preserved.\n"
+                    "API keys remain stored in the encrypted vault.\n\n"
+                    "Continue?",
+                    parent=dialog
+                )
+                if confirm:
+                    self.app_mode = "standard"
+                    self._save_vault_config()
+                    dialog.destroy()
+                    self.show_settings_dialog()
+
+            ctk.CTkButton(form, text="Switch to Standard", command=switch_to_standard,
+                          width=160, height=30, fg_color="gray30",
+                          font=ctk.CTkFont(size=12)).pack(pady=(15, 5))
+
+        else:
+            # Standard mode: Switch to Advanced button
+            def switch_to_advanced():
+                confirm = messagebox.askyesno(
+                    "Switch to Advanced Mode",
+                    "Advanced mode unlocks custom RPC endpoints and API key configuration.\n\n"
+                    "Your existing data is safe. This only reveals additional settings.\n\n"
+                    "Continue?",
+                    parent=dialog
+                )
+                if confirm:
+                    self.app_mode = "advanced"
+                    self._save_vault_config()
+                    dialog.destroy()
+                    self.show_settings_dialog()
+
+            ctk.CTkButton(form, text="Switch to Advanced", command=switch_to_advanced,
+                          width=160, height=30, fg_color=("#007bff", "#0056b3"),
+                          font=ctk.CTkFont(size=12)).pack(pady=(15, 5))
+
+        # --- Save / Cancel buttons (both modes) ---
         status_label = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(size=11))
         status_label.pack()
 
         def do_save():
+            # Save currency
             for label, val in DISPLAY_CURRENCY_OPTIONS:
                 if curr_var.get() == label:
                     self.display_currency = val
                     break
+
+            # v4.2: If advanced mode, save RPC URLs and API keys
+            if self.app_mode == "advanced":
+                # Update rpc_config with edited URLs
+                if self.rpc_config is None:
+                    self.rpc_config = load_rpc_config(base_dir)
+                for chain_id, url_var in rpc_url_vars.items():
+                    if chain_id in self.rpc_config:
+                        self.rpc_config[chain_id]["url"] = url_var.get()
+
+                # Save RPC config to file
+                save_rpc_config(self.rpc_config, base_dir)
+
+                # Save API keys to vault
+                for provider, key_var in api_key_vars.items():
+                    self.api_keys[provider] = key_var.get()
+
+                # Rebuild balance engine with new config
+                self._rebuild_balance_engine()
+
             self._save_vault_config()
             self._update_online_indicator()
             self.show_notification("Settings saved")
@@ -2836,7 +3056,7 @@ class ColdStackGUI:
                 self.select_account(self.current_pool or "Unassigned", self.current_account)
 
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
-        btn_frame.pack(pady=15)
+        btn_frame.pack(pady=10)
         ctk.CTkButton(btn_frame, text="Save", command=do_save, width=100,
                       fg_color=("#28a745", "#1e7e34")).pack(side="left", padx=10)
         ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy, width=100,
@@ -2998,7 +3218,9 @@ class ColdStackGUI:
             pass
 
         def _do_fetch():
-            result = self.balance_engine.fetch_balance(addr, chain, coin)
+            def progress_cb(msg):
+                self.root.after(0, lambda: balance_label.configure(text=msg, text_color="gray60"))
+            result = self.balance_engine.fetch_balance(addr, chain, coin, progress_callback=progress_cb)
             self.root.after(0, lambda: self._update_single_balance(balance_label, result))
 
         threading.Thread(target=_do_fetch, daemon=True).start()

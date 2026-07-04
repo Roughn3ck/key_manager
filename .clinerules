@@ -1,11 +1,11 @@
-# ColdStack — Cline Project Rules
+﻿# ColdStack — Cline Project Rules
 
 ## Project Overview
 ColdStack is a secure cryptocurrency key storage application with a GUI interface.
 It encrypts wallet data (24-word mnemonics, addresses, private keys) using AES-256-GCM with Argon2id key derivation.
 Designed for portable USB deployment alongside a local script-mode workflow.
 
-**Current production version: v4.1** (June 2026) — Go Online toggle, wallet balance fetching (15+ chains), CoinGecko price feeds, ERC-20 token support, compact card layout, currency toggle.
+**Current production version: v4.1** (June 2026) — Go Online toggle, wallet balance fetching (15+ chains), CoinGecko price feeds, ERC-20 token support, compact card layout, currency toggle. v4.2: Customizable RPC endpoints, Standard/Advanced mode, API key management.
 
 **Next version: v5.0** — LP Engine module (Hyperliquid venue adapter, LP position dashboard, strategy suggestions).
 
@@ -33,7 +33,7 @@ If the build fails, fix the error before considering the task complete. A stale 
 
 | Version | Description | Key Files |
 |---------|-------------|-----------|
-| v4.1 | Go Online toggle + balance fetching + price feeds + ERC-20 + compact cards | `src/gui_main_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |
+| v4.1 | Go Online toggle + balance fetching + price feeds + ERC-20 + compact cards | `src/gui_main_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |` + "`n" + `| v4.2 | Customizable RPC endpoints + Standard/Advanced mode + API key management | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
 | v5.0 (in progress) | LP Engine + Hyperliquid adapter + strategy suggestions | `src/lp_engine.py`, `src/venue_adapters/hyperliquid_adapter.py`, `src/lp_gui_poc.py` |
 
 ### Versioning Rules

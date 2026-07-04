@@ -1,5 +1,51 @@
 # ColdStack - Status Report
 
+## v4.2 - Customizable RPC Endpoints + Standard/Advanced Mode (July 2026)
+
+### New Features
+- **Customizable RPC Endpoints**: User-editable `rpc_endpoints.json` config file (co-located with EXE). Contains ONLY public RPC URLs - no API keys or secrets. Falls back to hardcoded defaults if missing/malformed.
+- **Standard/Advanced Mode Toggle**: Settings dialog now has two modes. Standard (default): identical to v4.1 UX. Advanced: reveals RPC endpoint editor and API key fields. Mode persists in encrypted vault config.
+- **API Key Management**: API keys (Helius, Infura, Alchemy, Quicknode) stored in encrypted vault `config.api_keys`. Never written to `rpc_endpoints.json`. Injected into URLs at runtime (Helius: hostname swap + `?api-key=KEY`).
+- **Fallback URLs**: Each chain can have a fallback URL. Balance engine tries primary URL first, falls back on failure.
+- **RPC Config Loader** (`src/rpc_config.py`): New module that loads/validates/saves `rpc_endpoints.json`. Merges with defaults for any missing chains.
+
+### Files Changed
+- `rpc_endpoints.json` (NEW) - Default RPC endpoint config (17 chains with url, auth, fallback)
+- `src/rpc_config.py` (NEW) - RPC config loader module
+- `src/balance_engine.py` (UPDATED) - Refactored for new endpoint format + API key injection + fallback URLs
+- `src/gui_main_v4.py` (UPDATED) - Advanced Settings dialog, mode switching, config fields, version strings
+- `build_gui_v4.py` (UPDATED) - Added `rpc_endpoints.json` as data file, `rpc_config` hidden import, version strings
+- `.clinerules` (UPDATED) - v4.2 versioning table, project structure
+- `STATUS.md` (UPDATED) - v4.2 changelog
+
+### Security
+- **Security boundary maintained**: `rpc_endpoints.json` contains ONLY public URLs. API keys stored in encrypted vault.
+- **API keys cleared on lock**: `self.api_keys` cleared when session is locked
+- **Backward compatible**: Old vaults without `schema_version`, `app_mode`, or `api_keys` work perfectly - all default to v4.1 behavior
+
+### Backward Compatibility
+- Old vaults (no `schema_version`) -> treated as v1, all features work
+- New field `app_mode` defaults to "standard" if missing
+- New field `api_keys` defaults to empty dict if missing
+- `rpc_endpoints.json` missing -> fall back to hardcoded defaults (current behavior)
+- `rpc_endpoints.json` malformed -> log warning, use hardcoded defaults
+- NEVER break old vaults. Additive changes only.
+
+### Testing
+- Syntax checks pass for all files (rpc_config.py, balance_engine.py, gui_main_v4.py, build_gui_v4.py)
+- EXE build includes `rpc_endpoints.json` as bundled data file
+- Settings persistence verified: API keys and app_mode persist in encrypted vault between sessions
+- EVM chain progress display: label updates in real-time as each chain is queried
+- HYPE (Hyperliquid) optimized: only queries HyperEVM + L1 (2 calls) instead of all EVM chains (14+)
+- Standard/Advanced mode toggle works: mode persists, Advanced shows RPC editor + API key fields
+- Save button properly saves to vault and closes Settings dialog
+- Backward compatibility: old v4.1 vaults open without migration, all defaults work
+
+### Chain Routing
+- `EVM (Ethereum / Arbitrum / Base)` -> fetch_all_evm_balances (all 7 EVM chains + ERC-20)
+- `HYPE (Hyperliquid)` -> fetch_hype_balances (HyperEVM gas + L1 spot only, 2 calls)
+- `Hyperliquid L1 (Spot)` -> fetch_hyperliquid_l1_balances (L1 spot only, 1 call)
+
 ## v4.1 - Price Feeds + Wallet Balances + Go Online Toggle (June 2026)
 
 ### New Features
@@ -55,8 +101,8 @@
 - CLI commands: `derive-address`, `generate-mnemonic`, `validate-mnemonic`
 
 **Project Location:** `B:\Github\key_manager\`
-**Last Updated:** 2026-06-25
-**Current Version:** v4.1 (Price Feeds + Wallet Balances + Go Online Toggle)
+**Last Updated:** 2026-07-04
+**Current Version:** v4.2 (Price Feeds + Wallet Balances + Go Online Toggle)
 
 ## Versioning
 
@@ -67,6 +113,7 @@
 | v3 | GUI BIP39 derivation | `src/gui_main_v3.py`, `build_gui_v3.py`, `src/derivation_engine.py` |
 | v3.1 | ColdStack rebrand + Check for Updates | `src/gui_main_v3_1.py`, `build_gui_v3_1.py` |
 | v4.1 | Price Feeds + Wallet Balances + Go Online | `src/gui_main_v4.py`, `build_gui_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |
+| v4.2 | Customizable RPC + Standard/Advanced Mode | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
 
 ## Architecture
 
@@ -101,4 +148,4 @@ key_manager/
 | Headless Agent | Working | HTTP signing server on localhost:8842 |
 
 ---
-*Status report updated June 25, 2026. v4.1 released - Price Feeds + Wallet Balances + Go Online Toggle.*
+*Status report updated June 25, 2026. v4.2 released - Customizable RPC Endpoints + Standard/Advanced Mode.*

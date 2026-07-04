@@ -2,19 +2,39 @@
 
 *Secure offline crypto key vault with BIP39 derivation engine.*
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v4.1-success)]()
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v4.2-success)]()
 
 ## Download
 
-**Latest release: [ColdStack v4.1 - Price Feeds + Wallet Balances + Go Online](https://github.com/Roughn3ck/key_manager/releases/tag/v4.1)**
+**Latest release: [ColdStack v4.2 - Customizable RPC + Advanced Mode](https://github.com/Roughn3ck/key_manager/releases/tag/v4.2)**
 
 | File | Size | Description |
 |------|------|-------------|
-| `coldstack.exe` | ~45MB | Full GUI application - ColdStack branded, v4.1 with balance fetching + price feeds + Go Online toggle |
+| `coldstack.exe` | ~45MB | Full GUI application - ColdStack branded, v4.2 with customizable RPC endpoints + Standard/Advanced mode + API key management |
 
 > The CLI executable (`key_manager.exe`) has been deprecated and removed from USB_DEPLOYMENT as of v3.1. The CLI source remains available for script-mode use (`python src/main.py`).
 
 > No installation required. Just download, run, and click "Initialize New Vault". Works on any Windows 10/11 machine - no Python needed.
+
+---
+
+## v4.2 Features - Customizable RPC + Advanced Mode (July 2026)
+
+- **Customizable RPC Endpoints**: User-editable `rpc_endpoints.json` config file. Contains ONLY public RPC URLs - no API keys. Falls back to hardcoded defaults if missing or malformed. Co-located with EXE for portability.
+- **Standard/Advanced Mode Toggle**: Settings dialog has two modes. Standard (default): identical to v4.1. Advanced: reveals RPC endpoint editor + API key fields. Mode persists in encrypted vault config.
+- **RPC Endpoint Editor**: Advanced mode Settings shows scrollable list of all 17 chains with editable URL fields. Per-chain "Reset" button + "Reset All to Defaults" button.
+- **API Key Management**: API keys (Helius, Infura, Alchemy, Quicknode) stored in encrypted vault `config.api_keys`. Never written to `rpc_endpoints.json`. The JSON file only contains `"auth": "helius"` references - the actual key value is looked up from the vault at runtime.
+- **Fallback URLs**: Each chain can have a fallback URL. Balance engine tries primary first, falls back on failure. Improves reliability of balance fetching.
+- **Schema Versioning**: Vault config now has `schema_version` field. Old vaults default to v1 (v4.1 behavior). New vaults get v2. All changes are additive - never breaks old vaults.
+- **No new dependencies**: Still uses stdlib `urllib.request` only.
+
+### Security Boundary
+
+| Data | Storage | Encrypted? |
+|------|---------|------------|
+| Public RPC URLs | `rpc_endpoints.json` | No - public info |
+| API keys (Helius, etc.) | `key_vault.encrypted` -> `config.api_keys` | Yes - secrets |
+| Mnemonics, private keys | `key_vault.encrypted` | Yes - existing |
 
 ---
 

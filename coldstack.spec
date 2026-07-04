@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_all
 
-datas = []
+datas = [('rpc_endpoints.json', '.')]
 binaries = []
-hiddenimports = ['customtkinter', 'cryptography', 'argon2', 'pyperclip', 'json', 'queue', 'pathlib', 'datetime', 'openpyxl', 'hdwallet', 'mnemonic', 'coincurve', 'base58', 'cbor2', 'pynacl', 'ed25519_blake2b', 'crcmod', 'Crypto', 'Crypto.Hash', 'Crypto.Hash.keccak']
+hiddenimports = ['customtkinter', 'cryptography', 'argon2', 'pyperclip', 'json', 'queue', 'pathlib', 'datetime', 'openpyxl', 'hdwallet', 'mnemonic', 'coincurve', 'base58', 'cbor2', 'pynacl', 'ed25519_blake2b', 'crcmod', 'Crypto', 'Crypto.Hash', 'Crypto.Hash.keccak', 'rpc_config']
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('cryptography')
@@ -21,8 +21,8 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
 a = Analysis(
-    ['B:\\Github\\key_manager\\src\\gui_main_v4.py'],
-    pathex=['B:\\Github\\key_manager\\src'],
+    ['B:\\Blockchain\\coldstack\\src\\gui_main_v4.py'],
+    pathex=['B:\\Blockchain\\coldstack\\src'],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
