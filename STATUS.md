@@ -1,3 +1,27 @@
+## v5.0 - LP Engine + Hyperliquid Writer (July 2026)
+
+### Completed
+- [x] `src/venue_adapters/hyperliquid_writer.py` - Full VenueWriter for HyperEVM (wrap, unwrap, approve, open, increase, decrease, collect, close, rebalance)
+- [x] `src/gui_main_v5.py` - Copy of v4 + CTkTabview (Vault + LP Positions tabs) + LP tab with card rendering, threaded fetch, Collect Fees write operation
+- [x] `build_gui_v5.py` - PyInstaller build script for v5.0 (new hidden imports for lp_engine, venue_adapters, venue_writer, hyperliquid_writer)
+- [x] README.md updated with v5.0 changelog and features
+- [x] .clinerules updated with v5.0 version table and project structure
+- [x] py_compile passes for all new files
+
+### Known Limitations
+- Swap router address on HyperEVM not yet confirmed - `swap()` method raises `NotImplementedError`
+- Rebalance with cross-ratio swaps deferred until swap router is available
+- Writer requires key_manager_agent running with `--serve` on localhost:8842
+- Increase/decrease liquidity uses hardcoded WHYPE/UBTC token pair (generalization pending)
+
+### Next Steps
+- [ ] Research HyperEVM swap router contract address
+- [ ] Test writer end-to-end with agent on testnet
+- [ ] Build EXE with `python build_gui_v5.py`
+- [ ] Test EXE on clean Windows machine
+
+---
+
 # ColdStack - Status Report
 
 ## v4.2 - Customizable RPC Endpoints + Standard/Advanced Mode (July 2026)

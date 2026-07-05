@@ -2,19 +2,45 @@
 
 *Secure offline crypto key vault with BIP39 derivation engine.*
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v4.2-success)]()
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v5.0-success)]()
 
 ## Download
 
-**Latest release: [ColdStack v4.2 - Customizable RPC + Advanced Mode](https://github.com/Roughn3ck/key_manager/releases/tag/v4.2)**
+**Latest release: [ColdStack v5.0 - LP Engine + Hyperliquid Writer](https://github.com/Roughn3ck/key_manager/releases/tag/v5.0)**
 
 | File | Size | Description |
 |------|------|-------------|
-| `coldstack.exe` | ~45MB | Full GUI application - ColdStack branded, v4.2 with customizable RPC endpoints + Standard/Advanced mode + API key management |
+| `coldstack.exe` | ~50MB | Full GUI application - ColdStack branded, v5.0 with LP Engine, Hyperliquid Writer, LP Positions tab |
 
 > The CLI executable (`key_manager.exe`) has been deprecated and removed from USB_DEPLOYMENT as of v3.1. The CLI source remains available for script-mode use (`python src/main.py`).
 
 > No installation required. Just download, run, and click "Initialize New Vault". Works on any Windows 10/11 machine - no Python needed.
+
+---
+
+## v5.0 Features - LP Engine + Hyperliquid Writer (July 2026)
+
+- **LP Positions Tab**: New CTkTabview with "Vault" and "LP Positions" tabs. LP tab shows all LP positions for a wallet address with health emoji, pair, range, fees, value, PnL, and strategy suggestions.
+- **LP Engine** (`lp_engine.py`): Read-only LP position aggregation with adapter registry. Fetches positions from Hyperliquid L1 (perp/spot) and HyperEVM (concentrated-liquidity pools). Strategy engine analyzes positions and suggests actions (Hold/Rebalance/Withdraw).
+- **Hyperliquid Adapter** (`hyperliquid_adapter.py`): 1000+ line read adapter for HyperEVM NFT Position Manager + L1 perp/spot positions. Batch RPC with rate-limit handling. WHYPE/UBTC pool support.
+- **Hyperliquid Writer** (`hyperliquid_writer.py`): Full VenueWriter implementation for HyperEVM. Wrap/unwrap HYPE, approve tokens, open/increase/decrease/collect/close LP positions, rebalance. Signs via key_manager_agent (localhost:8842) - never holds private keys.
+- **Write Operations with Confirmation**: Advanced mode shows "Collect Fees" button on LP cards. Every write operation requires explicit user confirmation dialog. Writer is a tool, not an autonomous agent.
+- **Address Pre-fill**: LP tab address entry auto-fills from the selected account's first EVM/HYPE address.
+- **Offline-aware**: LP tab respects Go Online toggle. Refresh disabled when offline. Offline banner shown.
+- **No new dependencies**: Uses stdlib `urllib.request` only. Swap router stubbed (HyperEVM swap router address TBD).
+- **Backward compatible**: v4.2 vaults open in v5.0 without migration. LP tab is additive.
+
+### Running v5.0
+- **GUI (script mode):** `python src/gui_main_v5.py`
+- **Build EXE:** `python build_gui_v5.py` -> `USB_DEPLOYMENT/coldstack.exe`
+- **CLI (script mode only):** `python src/main.py`
+
+### Security Rules (v5.0)
+1. LP Engine is read-only by default. Writer only accessible when vault is unlocked + user confirms each operation.
+2. Writer never holds private keys. All signing goes through the headless agent.
+3. Every write operation requires GUI confirmation dialog.
+4. Offline mode blocks all LP operations (reads and writes).
+5. No auto-trading, no bots, no autonomous rebalancing. Strategy engine SUGGESTS. User DECIDES.
 
 ---
 
@@ -132,7 +158,7 @@ Key Manager v3 adds a full BIP39 mnemonic-to-address derivation engine:
 
 That's it. No installation. No Python. No dependencies. Just run the EXE.
 
-> **Important:** The EXE is completely self-contained. It runs on **any Windows computer** without Python installed. All libraries (Python runtime, crypto, GUI framework) are bundled inside the ~45MB EXE.
+> **Important:** The EXE is completely self-contained. It runs on **any Windows computer** without Python installed. All libraries (Python runtime, crypto, GUI framework) are bundled inside the ~50MB EXE.
 
 ## What is ColdStack?
 
@@ -351,6 +377,18 @@ python src/main.py validate-mnemonic <account>           # Validate stored mnemo
 - **Headless Agent:** Python 3.10+, `pycryptodomex`, `cryptography`
 
 ## Version
+
+**v5.0** - July 2026 - LP Engine + Hyperliquid Writer + LP Positions Tab
+- CTkTabview with "Vault" and "LP Positions" tabs
+- LP Engine with adapter registry (HyperliquidAdapter for HyperEVM + L1)
+- HyperliquidWriter for position management (wrap, approve, open, collect, close, rebalance)
+- Strategy engine with health emoji (safe/watch/near_edge/out_of_range/profit_take)
+- Write operations via key_manager_agent (localhost:8842) - never holds private keys
+- Every write operation requires GUI confirmation dialog
+- Address pre-fill from selected account
+- Swap router stubbed (HyperEVM swap router address TBD)
+- No new dependencies (stdlib urllib.request only)
+- Backward compatible: v4.2 vaults open without migration
 
 **v4.1** - June 2026 - Price Feeds + Wallet Balances + Go Online
 - "Go Online" toggle in Settings (offline by default, user-initiated)

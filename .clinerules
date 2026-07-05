@@ -5,7 +5,7 @@ ColdStack is a secure cryptocurrency key storage application with a GUI interfac
 It encrypts wallet data (24-word mnemonics, addresses, private keys) using AES-256-GCM with Argon2id key derivation.
 Designed for portable USB deployment alongside a local script-mode workflow.
 
-**Current production version: v4.1** (June 2026) — Go Online toggle, wallet balance fetching (15+ chains), CoinGecko price feeds, ERC-20 token support, compact card layout, currency toggle. v4.2: Customizable RPC endpoints, Standard/Advanced mode, API key management.
+**Current production version: v5.0** (June 2026) — Go Online toggle, wallet balance fetching (15+ chains), CoinGecko price feeds, ERC-20 token support, compact card layout, currency toggle. v4.2: Customizable RPC endpoints, Standard/Advanced mode, API key management.
 
 **Next version: v5.0** — LP Engine module (Hyperliquid venue adapter, LP position dashboard, strategy suggestions).
 
@@ -14,8 +14,8 @@ Designed for portable USB deployment alongside a local script-mode workflow.
 **After ANY change to Python source files in `src/`, you MUST compile a fresh `coldstack.exe`:**
 
 ```bash
-cd B:\Github\key_manager
-python build_gui_v4.py
+cd B:\Blockchain\coldstack
+python build_gui_v5.py
 ```
 
 This builds the EXE and copies it to `USB_DEPLOYMENT/coldstack.exe`. The build script:
@@ -33,6 +33,8 @@ If the build fails, fix the error before considering the task complete. A stale 
 
 | Version | Description | Key Files |
 |---------|-------------|-----------|
+| v5.0 | LP Engine + Hyperliquid Writer + LP Positions tab + CTkTabview | `src/gui_main_v5.py`, `src/venue_adapters/hyperliquid_writer.py`, `build_gui_v5.py` |
+| v4.2 | Customizable RPC endpoints + Standard/Advanced mode + API key management | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
 | v4.1 | Go Online toggle + balance fetching + price feeds + ERC-20 + compact cards | `src/gui_main_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |` + "`n" + `| v4.2 | Customizable RPC endpoints + Standard/Advanced mode + API key management | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
 | v5.0 (in progress) | LP Engine + Hyperliquid adapter + strategy suggestions | `src/lp_engine.py`, `src/venue_adapters/hyperliquid_adapter.py`, `src/lp_gui_poc.py` |
 
@@ -47,19 +49,22 @@ If the build fails, fix the error before considering the task complete. A stale 
 ```
 key_manager/
 ├── src/
+│   ├── gui_main_v5.py         # v5.0 GUI — LP Engine + Hyperliquid Writer + LP Positions tab
 │   ├── gui_main_v4.py         # v4.1 GUI — ColdStack, Go Online, balances, prices
 │   ├── balance_engine.py      # v4.1: Fetch wallet balances via public RPC (15+ chains)
 │   ├── price_engine.py        # v4.1: CoinGecko price feeds (60s in-memory cache)
 │   ├── lp_engine.py           # v5.0: LP Engine core (LPPosition, VenueAdapter, StrategyEngine)
 │   ├── venue_adapters/
 │   │   ├── __init__.py         # Auto-registers adapters on import
-│   │   └── hyperliquid_adapter.py  # v5.0: Hyperliquid L1 + HyperEVM adapter
+│   │   ├── hyperliquid_adapter.py  # v5.0: Hyperliquid L1 + HyperEVM read adapter
+│   │   └── hyperliquid_writer.py    # v5.0: HyperEVM VenueWriter (sign via agent)
 │   ├── lp_gui_poc.py          # v5.0: LP tab UI proof-of-concept (Tkinter)
 │   ├── crypto_engine.py       # AES-256-GCM encryption + Argon2id KDF (shared)
 │   ├── derivation_engine.py   # BIP39 mnemonic-to-address derivation (v3)
 │   ├── backup_engine.py       # Vault backup/restore engine (shared)
 │   └── main.py                # CLI interface (Click-based, script-mode only)
-├── build_gui_v4.py            # PyInstaller build script (builds gui_main_v4 → coldstack.exe)
+├── build_gui_v5.py            # PyInstaller build script (builds gui_main_v5 → coldstack.exe)
+├── build_gui_v4.py            # PyInstaller build script v4 (legacy)
 ├── key_manager_gui_v4.spec    # PyInstaller spec (name='coldstack')
 ├── coldstack.spec             # Duplicate spec (kept for compatibility)
 ├── USB_DEPLOYMENT/
@@ -116,8 +121,8 @@ key_manager/
 
 **Current build command (v4.1):**
 ```bash
-cd B:\Github\key_manager
-python build_gui_v4.py
+cd B:\Blockchain\coldstack
+python build_gui_v5.py
 ```
 
 - Builds `src/gui_main_v4.py` → `dist/coldstack.exe` → copies to `USB_DEPLOYMENT/coldstack.exe`
@@ -170,7 +175,7 @@ pycryptodome     # keccak256 for EVM addresses
 - Go Online is OFF by default — never change this default
 
 ## Known Issues
-- `build_gui_v4.py` backs up previous EXE as `coldstack_v3_1.exe` — should be `coldstack_v4.exe` (needs fix)
+- `build_gui_v5.py` swap router address on HyperEVM not yet confirmed — `swap()` raises `NotImplementedError`
 - G5 `lp_address` in `strategy.json` is 66 chars (not a valid 42-char EVM address) — needs clarification for HyperEVM adapter testing
 - LP Engine v5.0 is architecture-only — not yet integrated into `gui_main_v4.py` (needs `gui_main_v5.py` when ready)
 
