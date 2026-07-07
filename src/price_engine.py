@@ -143,8 +143,15 @@ class PriceEngine:
         """
         sym_upper = coin_symbol.upper()
 
-        # Stablecoins: always 1:1 USD peg
+        # Stablecoins: 1:1 USD peg, convert to target currency
         if sym_upper in STABLECOINS:
+            if currency == "usd" or currency == "none":
+                return balance * 1.0
+            # For non-USD currencies, get USD->target rate from CoinGecko
+            usd_price = self.get_price("usd-coin", currency)
+            if usd_price is not None:
+                return balance * usd_price
+            # Fallback: treat as $1 if we can't get the rate
             return balance * 1.0
 
         # Pegged tokens: use the underlying asset's price

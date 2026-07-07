@@ -92,6 +92,8 @@ class KeyManager:
             encrypted_json = crypto.encrypt_json(self.address_db, password)
             with open(self.data_file, 'w') as f:
                 f.write(encrypted_json)
+                f.flush()
+                os.fsync(f.fileno())
             return True
         except Exception as e:
             console.print(f"[red]Error saving data: {e}[/red]")
@@ -259,6 +261,8 @@ class KeyManager:
             new_encrypted = crypto.encrypt_json(self.address_db, new_password)
             with open(self.data_file, 'w') as f:
                 f.write(new_encrypted)
+                f.flush()
+                os.fsync(f.fileno())
             self.create_session(new_password)
             return True
         except Exception:

@@ -2,7 +2,7 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.0 (July 2026) - LP Engine + Hyperliquid Writer + LP Positions Tab
+Version: v5.1 (July 2026) - Vault Tracking + HyperEVM ERC-20 + Password Toggle
 """
 import sys
 import os
@@ -57,9 +57,12 @@ from price_engine import PriceEngine, DISPLAY_CURRENCY_OPTIONS
 from rpc_config import load_rpc_config, save_rpc_config, get_default_endpoints, get_default_for_chain
 # v5.0: LP Engine imports
 from lp_engine import LPEngine, OfflineError
+from saved_pools import load_saved_pools, save_pool, is_pool_saved, migrate_saved_pools_json
 from venue_adapters.venue_writer import (
-    CollectFeesParams, DecreaseLiquidityParams, RebalanceParams,
+    CollectFeesParams, CompoundFeesParams, DecreaseLiquidityParams, RebalanceParams,
 )
+# v5.1: Vault tracker imports
+from vault_tracker import HyperliquidVaultTracker, VaultPosition
 # BackupEngine import removed — backups are deprecated; users copy
 # key_vault.encrypted manually.  The BackupEngine created an unwanted
 # "backups" subfolder on every login.
@@ -87,8 +90,7 @@ CHAIN_OPTIONS = [
     "DASH (Dash)",
     "RUNE (THORChain)",
     "SUI (Sui)",
-    "HYPE (Hyperliquid)",
-    "Hyperliquid L1 (Spot)",
+    "Hyperliquid (HL1 & HyperEVM)",
     "TRON (Tron)",
     "ATOM (Cosmos)",
     "DOT (Polkadot)",
@@ -289,11 +291,17 @@ class ColdStackGUI:
         # v5.0: LP Engine instance (created after login)
         self.lp_engine: Optional[LPEngine] = None
         self._lp_widgets: Dict[str, Any] = {}
+        self._lp_auto_fetched = False  # v5.1: Auto-fetch saved pools once after login
+
+        # v5.1: Vault tracker instance (created after login)
+        self.vault_tracker: Optional[HyperliquidVaultTracker] = None
+        self._vault_widgets: Dict[str, Any] = {}
 
         # Session management
         self.session_start_time = None
         self.session_timeout = 300  # 5 minutes in seconds
         self.session_timer = None
+        self.no_autolock = False  # v5.1: Disable autolock when checked
         self.revealed_mnemonics = {}
 
         self.current_account = None
@@ -337,7 +345,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v5.0 - ColdStack | LP Engine + Hyperliquid Writer",
+            text="v5.1 - ColdStack | Vault Tracking + HyperEVM ERC-20",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )
@@ -363,6 +371,27 @@ class ColdStackGUI:
         )
         self.password_entry.grid(row=0, column=1)
         self.password_entry.bind("<Return>", lambda e: self.attempt_login())
+
+        # v5.1: Show/hide password toggle button (eye icon)
+        def toggle_login_password():
+            if self.password_entry.cget("show") == "\u2022":
+                self.password_entry.configure(show="")
+                show_pw_btn.configure(text="\U0001F441")
+            else:
+                self.password_entry.configure(show="\u2022")
+                show_pw_btn.configure(text="\U0001F576")
+
+        show_pw_btn = ctk.CTkButton(
+            password_frame,
+            text="\U0001F576",
+            command=toggle_login_password,
+            width=30,
+            height=30,
+            font=ctk.CTkFont(size=14),
+            fg_color="gray30",
+            hover_color="gray40"
+        )
+        show_pw_btn.grid(row=0, column=2, padx=(5, 0))
 
         # Login button
         login_button = ctk.CTkButton(
@@ -468,6 +497,10 @@ class ColdStackGUI:
                 # v4.0: Load vault config (online_mode, display_currency)
                 self._load_vault_config()
 
+                # v5.1: One-time migration of saved_pools.json into the encrypted vault
+                if migrate_saved_pools_json(self.key_manager.address_db, base_dir):
+                    self.key_manager.save_encrypted_data(self.current_password)
+
                 # Create main dashboard after short delay
                 self.root.after(500, self.create_main_dashboard)
             else:
@@ -523,11 +556,17 @@ class ColdStackGUI:
             price_engine=self.price_engine,
         )
 
+        # v5.1: Create Vault tracker
+        self.vault_tracker = HyperliquidVaultTracker(
+            online_mode=self.online_mode,
+        )
+
         # Top-level tabview
         self.tabview = ctk.CTkTabview(self.root, corner_radius=0)
         self.tabview.pack(fill="both", expand=True)
 
-        vault_tab = self.tabview.add("Vault")
+        vault_tab = self.tabview.add("Wallet")
+        vaults_tab = self.tabview.add("HL1 Vaults")
         lp_tab = self.tabview.add("LP Positions")
 
         # Vault tab: existing two-panel layout
@@ -540,11 +579,33 @@ class ColdStackGUI:
         # Right panel - Chain view
         self.create_right_panel(main_container)
 
+        # v5.1: Hyperliquid Vaults section (in its own tab)
+        self.create_vault_section(vaults_tab)
+
         # LP tab: LP Positions content
         self.create_lp_tab(lp_tab)
 
+        # v5.1: Tab change callback for auto-fetching saved pools
+        self.tabview.configure(command=self._on_tab_changed)
+
         # Status bar (stays at root level, below tabs)
         self.create_status_bar()
+
+    def _on_tab_changed(self):
+        """Handle tab change — auto-fetch saved pools when LP tab is first shown."""
+        if not hasattr(self, 'tabview'):
+            return
+        try:
+            current_tab = self.tabview.get()
+        except Exception:
+            return
+        if current_tab == "LP Positions":
+            if self.online_mode and not self._lp_auto_fetched:
+                entry = self._lp_widgets.get("address_entry")
+                addr = entry.get().strip() if entry else ""
+                if addr and addr.startswith("0x") and len(addr) == 42:
+                    self._lp_auto_fetched = True
+                    self.root.after(500, self._lp_do_fetch)
 
     def create_left_panel(self, parent):
         """Create left panel with scrollable account list organized by pool."""
@@ -682,6 +743,19 @@ class ColdStackGUI:
         )
         self.session_timer_label.pack(side="left", padx=20)
 
+        # v5.1: "Do not autolock" checkbox
+        self.no_autolock_var = ctk.StringVar(value="off")
+        def on_no_autolock_toggle():
+            self.no_autolock = bool(self.no_autolock_checkbox.get())
+        self.no_autolock_checkbox = ctk.CTkCheckBox(
+            status_bar,
+            text="Do not autolock",
+            command=on_no_autolock_toggle,
+            font=ctk.CTkFont(size=11),
+            height=20
+        )
+        self.no_autolock_checkbox.pack(side="left", padx=(10, 0))
+
         # Settings button (v4.0)
         settings_btn = ctk.CTkButton(
             status_bar,
@@ -787,7 +861,7 @@ class ColdStackGUI:
                 release_url = data.get("html_url", "https://github.com/Roughn3ck/key_manager/releases")
                 release_name = data.get("name", "Latest Release")
 
-                current_version = "5.0"
+                current_version = "5.1"
                 latest_version = latest_tag.lstrip("v")
 
                 # Simple version comparison (handles major.minor[.patch])
@@ -866,6 +940,9 @@ class ColdStackGUI:
 
         # v5.0: Pre-fill LP tab address entry with first EVM address
         self._lp_prefill_address(account_name)
+
+        # v5.1: Pre-fill vault section address entry
+        self._vault_prefill_address(account_name)
 
     def show_account_addresses(self, account_name):
         """Display addresses, private keys, and mnemonic for the selected account.
@@ -1226,10 +1303,14 @@ class ColdStackGUI:
 
             # Check if session expired
             if remaining <= 0:
-                self.lock_session()
-            else:
-                # Schedule next update
-                self.root.after(1000, self.update_session_timer)
+                if not self.no_autolock:
+                    self.lock_session()
+                    return
+                else:
+                    # Keep the session open - show "No timeout" instead of counting
+                    self.session_timer_label.configure(text="Session: No timeout")
+            # Schedule next update (always, even when expired with no_autolock)
+            self.root.after(1000, self.update_session_timer)
 
     def create_private_key_section(self, account_name):
         """Create a section displaying all chain-specific private keys for an account.
@@ -3132,6 +3213,11 @@ class ColdStackGUI:
             self.lp_engine.online_mode = self.online_mode
         self._lp_update_online_state()
 
+        # v5.1: Update vault tracker online state
+        if self.vault_tracker:
+            self.vault_tracker.online_mode = self.online_mode
+        self._vault_update_online_state()
+
     def refresh_balances(self):
         """Fetch balances for all addresses of the currently selected account."""
         if not self.online_mode:
@@ -3324,11 +3410,17 @@ class ColdStackGUI:
         """Lock the session and return to login screen."""
         # v4.0: Reset online mode state
         self.online_mode = False
+        self.no_autolock = False  # v5.1: Reset autolock preference
         self._balance_labels.clear()
 
         # v5.0: Clear LP engine state
         self.lp_engine = None
         self._lp_widgets = {}
+        self._lp_auto_fetched = False  # v5.1: Reset auto-fetch flag on logout
+
+        # v5.1: Clear vault tracker state
+        self.vault_tracker = None
+        self._vault_widgets = {}
 
         # Clear sensitive data
         self.current_password = None
@@ -3434,6 +3526,39 @@ class ColdStackGUI:
 
         self._lp_update_online_state()
 
+        # v5.1: Saved Pools counter label
+        self._lp_widgets["saved_pools_count_label"] = ctk.CTkLabel(
+            root, text="", font=ctk.CTkFont(size=10), text_color="#0d6efd",
+        )
+        self._lp_widgets["saved_pools_count_label"].pack(fill="x", pady=(0, 5))
+
+        # v5.1: Auto-fetch is handled by _on_tab_changed() and _lp_prefill_address()
+        # Do NOT fire auto-fetch here — the address entry may not be prefilled yet.
+
+    def _lp_update_saved_pools_count(self, address: str = ""):
+        """Update the Saved Pools counter label for the given address."""
+        label = self._lp_widgets.get("saved_pools_count_label")
+        if not label:
+            return
+        if not self.key_manager:
+            return
+        all_saved = load_saved_pools(self.key_manager.address_db)
+        if not all_saved:
+            label.configure(text="")
+            return
+        if address:
+            wallet_lower = address.lower()
+            count = sum(
+                1 for e in all_saved
+                if isinstance(e, dict) and e.get("wallet_address", "").lower() == wallet_lower
+            )
+            if count > 0:
+                label.configure(text=f"Saved Pools: {count} for this wallet")
+            else:
+                label.configure(text=f"Saved Pools: {len(all_saved)} total")
+        else:
+            label.configure(text=f"Saved Pools: {len(all_saved)} total")
+
     def _lp_update_online_state(self):
         """Enable/disable LP tab widgets based on online_mode."""
         if not self._lp_widgets:
@@ -3455,21 +3580,79 @@ class ColdStackGUI:
                 pass
 
     def _lp_prefill_address(self, account_name: str):
-        """Pre-fill the LP tab address entry with the account first EVM address."""
+        """Pre-fill the LP tab address entry with the account's EVM address.
+
+        Priority order:
+        1. If entry already has an address, keep it.
+        2. If saved pools exist whose wallet_address matches an EVM address
+           of the selected account, pre-fill that address.
+        3. If no account-specific match, use the first saved pool's wallet.
+        4. Fall back to the account's first EVM/HYPE address.
+
+        After filling, update the saved-pools counter and trigger auto-fetch
+        if online mode is on and we haven't fetched yet.
+        """
         if not self._lp_widgets or not self.key_manager:
             return
         entry = self._lp_widgets.get("address_entry")
         if not entry:
             return
+        # If entry already has an address, keep it
+        current = entry.get().strip()
+        if current:
+            self._lp_update_saved_pools_count(current)
+            return
+
+        all_saved = load_saved_pools(self.key_manager.address_db)
         accounts_data = self.key_manager.address_db.get("accounts", {})
         addresses = accounts_data.get(account_name, {}).get("addresses", [])
+
+        # Step 2: Check if any saved pool's wallet matches an account EVM address
+        account_evm_addresses = []
+        for addr in addresses:
+            coin = addr.get("coin", "").lower()
+            chain = addr.get("chain", "").lower()
+            if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
+                account_evm_addresses.append(addr.get("address", "").lower())
+
+        for saved_entry in all_saved:
+            saved_wallet = saved_entry.get("wallet_address", "").lower()
+            if saved_wallet and saved_wallet in account_evm_addresses:
+                entry.delete(0, "end")
+                entry.insert(0, saved_entry.get("wallet_address", ""))
+                self._lp_update_saved_pools_count(saved_entry.get("wallet_address", ""))
+                self._lp_maybe_auto_fetch()
+                return
+
+        # Step 3: Fall back to the first saved pool's wallet globally
+        if all_saved:
+            first_wallet = all_saved[0].get("wallet_address", "")
+            if first_wallet:
+                entry.delete(0, "end")
+                entry.insert(0, first_wallet)
+                self._lp_update_saved_pools_count(first_wallet)
+                self._lp_maybe_auto_fetch()
+                return
+
+        # Step 4: Fall back to the account's first EVM address
         for addr in addresses:
             coin = addr.get("coin", "").lower()
             chain = addr.get("chain", "").lower()
             if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
                 entry.delete(0, "end")
                 entry.insert(0, addr.get("address", ""))
+                self._lp_update_saved_pools_count(addr.get("address", ""))
+                self._lp_maybe_auto_fetch()
                 return
+
+    def _lp_maybe_auto_fetch(self):
+        """If online and not yet auto-fetched, schedule a fetch."""
+        if self.online_mode and not self._lp_auto_fetched:
+            entry = self._lp_widgets.get("address_entry")
+            addr = entry.get().strip() if entry else ""
+            if addr and addr.startswith("0x") and len(addr) == 42:
+                self._lp_auto_fetched = True
+                self.root.after(500, self._lp_do_fetch)
 
     def _lp_do_fetch(self):
         """Fetch LP positions for the entered address (threaded)."""
@@ -3499,6 +3682,26 @@ class ColdStackGUI:
         def _fetch_thread():
             try:
                 positions = self.lp_engine.fetch_all_positions(address)
+                # v5.1: Merge saved pools for this wallet (fast token-ID lookup)
+                saved = load_saved_pools(self.key_manager.address_db, wallet_address=address)
+                print(f"[saved_pools] loaded {len(saved)} saved pools for {address}")
+                if saved:
+                    from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
+                    adapter = HyperliquidAdapter()
+                    for entry in saved:
+                        tid = entry.get("token_id")
+                        venue = entry.get("venue", "HyperEVM")
+                        if tid and venue == "HyperEVM":
+                            # Skip if already in scanned positions
+                            pid = f"hyperevm:{tid}"
+                            if any(p.position_id == pid for p in positions):
+                                continue
+                            try:
+                                pos = adapter.fetch_evm_position_by_token_id(tid, self.price_engine)
+                                if pos and not pos.error:
+                                    positions.append(pos)
+                            except Exception:
+                                pass
                 self.root.after(0, lambda: self._lp_on_loaded(positions, address))
             except OfflineError:
                 self.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
@@ -3566,14 +3769,22 @@ class ColdStackGUI:
             return
         for widget in scroll.winfo_children():
             widget.destroy()
-        if not positions:
+        # v5.1: Deduplicate by venue:position_id
+        seen = set()
+        unique_positions = []
+        for pos in positions:
+            key = f"{pos.venue}:{pos.position_id}"
+            if key not in seen:
+                seen.add(key)
+                unique_positions.append(pos)
+        if not unique_positions:
             ctk.CTkLabel(scroll, text=f"No LP positions found for {address}",
                          font=ctk.CTkFont(size=13), text_color="gray60").pack(pady=20)
         else:
-            for pos in positions:
+            for pos in unique_positions:
                 self._lp_render_card(pos)
         if status:
-            status.configure(text=f"Last check: {len(positions)} position(s)")
+            status.configure(text=f"Last check: {len(unique_positions)} position(s)")
         if refresh_btn:
             refresh_btn.configure(state="normal" if self.online_mode else "disabled")
 
@@ -3610,25 +3821,60 @@ class ColdStackGUI:
 
         range_parts = []
         if position.range_low is not None and position.range_high is not None:
-            range_parts.append(f"Range: {position.range_low:g} – {position.range_high:g}")
+            range_parts.append(f"Range: {position.range_low:g} \u2013 {position.range_high:g}")
         if position.current_price is not None:
             range_parts.append(f"Current: {position.current_price:g}")
-        if position.position_in_range_pct is not None:
-            range_parts.append(f"Position: {position.position_in_range_pct:.1f}%")
         if range_parts:
-            ctk.CTkLabel(info, text="  ·  ".join(range_parts),
+            ctk.CTkLabel(info, text="  \u00b7  ".join(range_parts),
                          font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", pady=(2, 0))
 
+        # v5.2: Position range slider with marker
+        if position.range_low is not None and position.range_high is not None:
+            pct = position.position_in_range_pct
+            in_range = pct is not None and 0 <= pct <= 100
+            marker_color = "#51cf94" if in_range else "#ff6b6b"
+            marker_pos = max(0, min(100, pct)) if pct is not None else 50
+
+            # Slider container
+            slider_frame = ctk.CTkFrame(info, fg_color="transparent", height=28)
+            slider_frame.pack(fill="x", pady=(4, 2), padx=(10, 0))
+
+            # Track (background bar)
+            track = ctk.CTkFrame(slider_frame, height=6, corner_radius=3,
+                                 fg_color="gray25")
+            track.pack(fill="x", side="top", pady=(8, 0))
+
+            # Marker (small vertical bar on the track)
+            marker = ctk.CTkFrame(slider_frame, width=4, height=14, corner_radius=2,
+                                  fg_color=marker_color)
+            # Place marker at the percentage position
+            # Use place() for absolute positioning
+            marker.place(relx=marker_pos / 100.0, rely=0.15, anchor="n")
+
+            # Position % label
+            pct_text = f"{pct:.1f}%" if pct is not None else "?"
+            status_text = "In Range" if in_range else "Out of Range"
+            ctk.CTkLabel(info, text=f"{pct_text} \u00b7 {status_text}",
+                         font=ctk.CTkFont(size=10, weight="bold"),
+                         text_color=marker_color).pack(anchor="w", pady=(2, 0))
+
         fees_parts = []
-        if position.fees_earned_usd is not None and position.fees_earned_usd != 0:
-            fees_parts.append(f"Fees earned: ${position.fees_earned_usd:,.2f}")
-        if position.fees_earned:
-            for sym, amt in position.fees_earned.items():
-                if amt:
-                    fees_parts.append(f"{amt:g} {sym}")
-        if fees_parts:
-            ctk.CTkLabel(info, text="  ·  ".join(fees_parts),
-                         font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", pady=(2, 0))
+        # v5.1: If fees_note is set (HyperEVM/Project X), show the note instead
+        # of a potentially misleading fee number.
+        if getattr(position, "fees_note", None):
+            ctk.CTkLabel(info, text=f"Fees: {position.fees_note}",
+                         font=ctk.CTkFont(size=11, weight="bold"),
+                         text_color="#ffd43b").pack(anchor="w", pady=(2, 0))
+        else:
+            if position.fees_earned_usd is not None and position.fees_earned_usd != 0:
+                fees_parts.append(f"Fees earned: ${position.fees_earned_usd:,.2f}")
+            if position.fees_earned:
+                for sym, amt in position.fees_earned.items():
+                    if amt:
+                        fees_parts.append(f"{amt:g} {sym}")
+            if fees_parts:
+                ctk.CTkLabel(info, text="  ·  ".join(fees_parts),
+                             font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", pady=(2, 0))
 
         value_parts = []
         if position.current_value_usd is not None:
@@ -3663,12 +3909,109 @@ class ColdStackGUI:
                           command=lambda pid=position.position_id: self.copy_to_clipboard(pid)
                           ).pack(pady=2)
 
+        if self.app_mode == "advanced" and position.position_id and position.position_id.startswith("hyperevm:"):
+            ctk.CTkButton(button_frame, text="Compound Fees", width=110, height=26,
+                          font=ctk.CTkFont(size=10),
+                          fg_color=("#20c997", "#1aa179"),
+                          command=lambda pos=position: self._lp_compound_fees_dialog(pos)
+                          ).pack(pady=2)
+
         if self.app_mode == "advanced" and position.position_id:
             ctk.CTkButton(button_frame, text="Collect Fees", width=100, height=26,
                           font=ctk.CTkFont(size=10),
                           fg_color=("#fd7e14", "#dc6602"),
                           command=lambda pos=position: self._lp_collect_fees_dialog(pos)
                           ).pack(pady=2)
+
+        # v5.1: Save Pool button — saves public identifiers to saved_pools.json
+        if position.position_id and position.position_id.startswith("hyperevm:"):
+            ctk.CTkButton(button_frame, text="Save Pool", width=80, height=26,
+                          font=ctk.CTkFont(size=10),
+                          fg_color=("#0d6efd", "#0b5ed7"),
+                          command=lambda pos=position: self._lp_save_pool(pos)
+                          ).pack(pady=2)
+
+    def _lp_save_pool(self, position):
+        """Save the current position's public identifiers to saved_pools.json."""
+        if not position.position_id or not position.position_id.startswith("hyperevm:"):
+            self.show_notification("Only HyperEVM positions can be saved")
+            return
+        # Extract token_id from "hyperevm:<token_id>"
+        try:
+            token_id = int(position.position_id.split(":", 1)[1])
+        except (ValueError, IndexError):
+            self.show_notification("Could not parse token ID", error=True)
+            return
+        # Get wallet address from the address entry
+        entry = self._lp_widgets.get("address_entry")
+        wallet_address = entry.get().strip() if entry else ""
+        if not wallet_address:
+            self.show_notification("Enter a wallet address first", error=True)
+            return
+        pool_address = position.pool_id or ""
+        pair = position.pair or ""
+        venue = position.venue or "HyperEVM"
+        print(f"[saved_pools] saving token_id={token_id} to address_db id={id(self.key_manager.address_db)}")
+        ok = save_pool(self.key_manager.address_db, wallet_address, token_id, venue, pool_address, pair)
+        if ok:
+            # Re-encrypt the vault to persist the saved pool
+            ok = self.key_manager.save_encrypted_data(self.current_password)
+            print(f"[saved_pools] vault saved, saved_pools count={len(self.key_manager.address_db.get('saved_pools', []))}")
+        if ok:
+            self.show_notification(f"Pool saved: {pair} (#{token_id})")
+        else:
+            self.show_notification("Failed to save pool", error=True)
+
+    def _lp_compound_fees_dialog(self, position):
+        """Show confirmation dialog and compound fees for an LP position."""
+        from tkinter import messagebox
+        if not self.current_account:
+            self.show_notification("Select a vault account first", error=True)
+            return
+        confirm = messagebox.askyesno(
+            "Confirm: Compound Fees",
+            "You are about to compound fees for position:\n"
+            f"  {position.pair} ({position.position_id})\n\n"
+            "This will submit multiple transactions on HyperEVM:\n"
+            "  1. Collect accrued fees\n"
+            "  2. Swap to optimal ratio (if needed)\n"
+            "  3. Increase liquidity with collected amounts\n\n"
+            "The key_manager_agent must be running and unlocked.\n\n"
+            "Continue?",
+            parent=self.root,
+        )
+        if not confirm:
+            return
+        self.show_notification("Compounding fees... (multi-TX operation)")
+
+        def _do_compound():
+            try:
+                writer = self.lp_engine.get_writer("hyperliquid", self.current_password)
+                if writer is None:
+                    self.root.after(0, lambda: self.show_notification(
+                        "Writer not available", error=True))
+                    return
+                if not writer.is_available():
+                    self.root.after(0, lambda: self.show_notification(
+                        "Agent not running. Start key_manager_agent with --serve.", error=True))
+                    return
+                tx_hashes = writer.compound_fees(CompoundFeesParams(
+                    account=self.current_account,
+                    position_id=position.position_id,
+                ))
+                if tx_hashes:
+                    self.root.after(0, lambda: self.show_notification(
+                        f"Compound fees done. {len(tx_hashes)} TXs submitted. First: {tx_hashes[0][:20]}..."))
+                else:
+                    self.root.after(0, lambda: self.show_notification(
+                        "Compound fees: no transactions submitted", error=True))
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[compound_fees] error: {error_msg}")
+                self.root.after(0, lambda: self.show_notification(
+                    f"Compound error: {error_msg}", error=True))
+
+        threading.Thread(target=_do_compound, daemon=True).start()
 
     def _lp_collect_fees_dialog(self, position):
         """Show confirmation dialog and collect fees for an LP position."""
@@ -3704,15 +4047,312 @@ class ColdStackGUI:
                     account=self.current_account,
                     position_id=position.position_id,
                 ))
-                self.root.after(0, lambda: self.show_notification(
-                    f"Fees collected. TX: {tx_hash[:20]}..." if tx_hash else "Collect failed"))
+                if tx_hash:
+                    self.root.after(0, lambda: self.show_notification(
+                        f"Fees collected. TX: {tx_hash[:20]}..."))
+                else:
+                    self.root.after(0, lambda: self.show_notification(
+                        "Collect failed: no tx hash returned", error=True))
             except Exception as e:
+                error_msg = str(e)
+                print(f"[collect_fees] error: {error_msg}")
                 self.root.after(0, lambda: self.show_notification(
-                    f"Collect error: {e}", error=True))
+                    f"Collect error: {error_msg}", error=True))
 
         threading.Thread(target=_do_collect, daemon=True).start()
 
     # --- End v5.0 LP tab methods ---
+
+    # ------------------------------------------------------------------
+    # v5.1: Hyperliquid Vaults section
+    # ------------------------------------------------------------------
+
+    def create_vault_section(self, parent):
+        """Build the Hyperliquid Vaults section inside the Vault tab.
+
+        Placed below the existing two-panel (accounts + chain view) layout.
+        Provides a wallet address entry, a refresh button, and a scrollable
+        card container — mirroring the LP tab pattern.
+        """
+        section = ctk.CTkFrame(parent, corner_radius=0)
+        section.pack(fill="x", side="bottom", pady=(1, 0))
+
+        # Section header
+        header_frame = ctk.CTkFrame(section, fg_color="transparent")
+        header_frame.pack(fill="x", padx=10, pady=(8, 2))
+
+        ctk.CTkLabel(
+            header_frame,
+            text="\U0001F3DB Hyperliquid Vaults",
+            font=ctk.CTkFont(size=15, weight="bold"),
+        ).pack(side="left")
+
+        vault_refresh_btn = ctk.CTkButton(
+            header_frame, text="Refresh Vaults", width=110, height=28,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self._vault_do_fetch,
+        )
+        vault_refresh_btn.pack(side="right")
+        self._vault_widgets["refresh_btn"] = vault_refresh_btn
+
+        # Wallet address bar
+        wallet_bar = ctk.CTkFrame(section, fg_color="transparent")
+        wallet_bar.pack(fill="x", padx=10, pady=(2, 5))
+
+        ctk.CTkLabel(wallet_bar, text="Wallet:",
+                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 5))
+
+        vault_addr_entry = ctk.CTkEntry(wallet_bar, width=320,
+                                        font=ctk.CTkFont(size=11))
+        vault_addr_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self._vault_widgets["address_entry"] = vault_addr_entry
+
+        # Offline banner
+        self._vault_widgets["offline_banner"] = ctk.CTkLabel(
+            section,
+            text="\U0001F512 Offline -- Enable Online Mode in Settings to fetch Hyperliquid vaults",
+            font=ctk.CTkFont(size=11), text_color="gray50",
+        )
+        if not self.online_mode:
+            self._vault_widgets["offline_banner"].pack(fill="x", padx=10, pady=(0, 5))
+
+        # Scrollable card container (fixed height so it doesn't eat the whole tab)
+        vault_scroll = ctk.CTkScrollableFrame(section, height=220)
+        vault_scroll.pack(fill="x", padx=10, pady=(0, 10))
+        self._vault_widgets["scroll"] = vault_scroll
+
+        # Status label
+        vault_status = ctk.CTkLabel(
+            section, text="", font=ctk.CTkFont(size=11), text_color="gray50",
+        )
+        vault_status.pack(fill="x", padx=10, pady=(0, 8))
+        self._vault_widgets["status_label"] = vault_status
+
+        self._vault_update_online_state()
+
+    def _vault_update_online_state(self):
+        """Enable/disable vault section widgets based on online_mode."""
+        if not self._vault_widgets:
+            return
+        refresh_btn = self._vault_widgets.get("refresh_btn")
+        if refresh_btn:
+            refresh_btn.configure(
+                state="normal" if self.online_mode else "disabled"
+            )
+        offline_banner = self._vault_widgets.get("offline_banner")
+        if offline_banner:
+            try:
+                if self.online_mode:
+                    offline_banner.pack_forget()
+                else:
+                    offline_banner.pack(fill="x", padx=10, pady=(0, 5))
+            except Exception:
+                pass
+
+    def _vault_prefill_address(self, account_name: str):
+        """Pre-fill the vault section address entry with the account's EVM/HYPE address."""
+        if not self._vault_widgets or not self.key_manager:
+            return
+        entry = self._vault_widgets.get("address_entry")
+        if not entry:
+            return
+        accounts_data = self.key_manager.address_db.get("accounts", {})
+        addresses = accounts_data.get(account_name, {}).get("addresses", [])
+        for addr in addresses:
+            coin = addr.get("coin", "").lower()
+            chain = addr.get("chain", "").lower()
+            if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
+                entry.delete(0, "end")
+                entry.insert(0, addr.get("address", ""))
+                return
+
+    def _vault_do_fetch(self):
+        """Fetch Hyperliquid vault positions for the entered address (threaded)."""
+        if not self.vault_tracker or not self.online_mode:
+            self.show_notification("Offline - enable Online Mode in Settings", error=True)
+            return
+        entry = self._vault_widgets.get("address_entry")
+        if not entry:
+            return
+        address = entry.get().strip()
+        if not address:
+            status = self._vault_widgets.get("status_label")
+            if status:
+                status.configure(text="Enter a wallet address to fetch vaults.")
+            return
+
+        status = self._vault_widgets.get("status_label")
+        refresh_btn = self._vault_widgets.get("refresh_btn")
+        scroll = self._vault_widgets.get("scroll")
+        if status:
+            status.configure(text="Fetching vaults...")
+        if refresh_btn:
+            refresh_btn.configure(state="disabled")
+        if scroll:
+            for widget in scroll.winfo_children():
+                widget.destroy()
+
+        def _fetch_thread():
+            try:
+                positions = self.vault_tracker.fetch_positions(address)
+                self.root.after(0, lambda: self._vault_on_loaded(positions, address))
+            except Exception as e:
+                self.root.after(0, lambda: self._vault_on_error(str(e)))
+
+        threading.Thread(target=_fetch_thread, daemon=True).start()
+
+    def _vault_on_loaded(self, positions, address):
+        """Render fetched vault positions as cards."""
+        scroll = self._vault_widgets.get("scroll")
+        status = self._vault_widgets.get("status_label")
+        refresh_btn = self._vault_widgets.get("refresh_btn")
+        if not scroll:
+            return
+        for widget in scroll.winfo_children():
+            widget.destroy()
+
+        # Filter out the "error" sentinel position (from failed userVaultEquities)
+        real_positions = [p for p in positions if not (p.vault_address == "" and p.error)]
+
+        if not real_positions:
+            # Check if we got an error sentinel
+            error_positions = [p for p in positions if p.error and p.vault_address == ""]
+            if error_positions:
+                ctk.CTkLabel(
+                    scroll, text=f"Error: {error_positions[0].error}",
+                    font=ctk.CTkFont(size=12), text_color="#ff6b6b",
+                ).pack(pady=20)
+            else:
+                ctk.CTkLabel(
+                    scroll,
+                    text=f"No vault positions found for {address}",
+                    font=ctk.CTkFont(size=13), text_color="gray60",
+                ).pack(pady=20)
+        else:
+            for pos in real_positions:
+                self._vault_render_card(pos)
+
+        if status:
+            count = len(real_positions)
+            status.configure(text=f"Last check: {count} vault position(s)")
+        if refresh_btn:
+            refresh_btn.configure(
+                state="normal" if self.online_mode else "disabled"
+            )
+
+    def _vault_on_error(self, message: str):
+        """Show an error in the vault section."""
+        scroll = self._vault_widgets.get("scroll")
+        status = self._vault_widgets.get("status_label")
+        refresh_btn = self._vault_widgets.get("refresh_btn")
+        if scroll:
+            for widget in scroll.winfo_children():
+                widget.destroy()
+            ctk.CTkLabel(
+                scroll, text=f"Error: {message}",
+                font=ctk.CTkFont(size=12), text_color="#ff6b6b",
+            ).pack(pady=20)
+        if status:
+            status.configure(text="Fetch failed")
+        if refresh_btn:
+            refresh_btn.configure(
+                state="normal" if self.online_mode else "disabled"
+            )
+
+    def _vault_render_card(self, position: VaultPosition):
+        """Render one VaultPosition as a card matching LP card style."""
+        scroll = self._vault_widgets.get("scroll")
+        if not scroll:
+            return
+
+        card = ctk.CTkFrame(scroll, corner_radius=10)
+        card.pack(fill="x", pady=4, padx=5)
+
+        info = ctk.CTkFrame(card, fg_color="transparent")
+        info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+
+        # Header: vault name + venue
+        header = f"\U0001F3DB {position.vault_name}  \u00b7  {position.venue}"
+        ctk.CTkLabel(
+            info, text=header,
+            font=ctk.CTkFont(size=14, weight="bold"),
+        ).pack(anchor="w")
+
+        # Vault address (if different from name)
+        if position.vault_address and position.vault_address != position.vault_name:
+            ctk.CTkLabel(
+                info, text=f"Address: {position.vault_address}",
+                font=ctk.CTkFont(size=10), text_color="gray50",
+            ).pack(anchor="w", pady=(2, 0))
+
+        # Deposited + Current value
+        value_parts = []
+        if position.deposited_usd is not None:
+            value_parts.append(f"Deposited: ${position.deposited_usd:,.2f}")
+        if position.current_value_usd is not None:
+            value_parts.append(f"Current: ${position.current_value_usd:,.2f}")
+        if value_parts:
+            ctk.CTkLabel(
+                info, text="  \u00b7  ".join(value_parts),
+                font=ctk.CTkFont(size=11), text_color="gray70",
+            ).pack(anchor="w", pady=(2, 0))
+
+        # P&L + APR
+        pnl_parts = []
+        if position.unrealized_pnl_usd is not None:
+            sign = "+" if position.unrealized_pnl_usd >= 0 else ""
+            pnl_parts.append(f"P&L: {sign}${position.unrealized_pnl_usd:,.2f}")
+        if position.unrealized_pnl_pct is not None:
+            sign = "+" if position.unrealized_pnl_pct >= 0 else ""
+            pnl_parts.append(f"({sign}{position.unrealized_pnl_pct:.2f}%)")
+        if position.apr is not None:
+            pnl_parts.append(f"APR: {position.apr:.1f}%")
+        elif position.performance_history:
+            pnl_parts.append("APR: see Hyperliquid")
+        if pnl_parts:
+            ctk.CTkLabel(
+                info, text="  \u00b7  ".join(pnl_parts),
+                font=ctk.CTkFont(size=11), text_color="gray70",
+            ).pack(anchor="w", pady=(2, 0))
+
+        # Shares + Share price
+        share_parts = []
+        if position.shares is not None:
+            share_parts.append(f"Shares: {position.shares:,.2f}")
+        if position.share_price_usd is not None:
+            share_parts.append(f"Share price: ${position.share_price_usd:.4f}")
+        if share_parts:
+            ctk.CTkLabel(
+                info, text="  \u00b7  ".join(share_parts),
+                font=ctk.CTkFont(size=11), text_color="gray70",
+            ).pack(anchor="w", pady=(2, 0))
+
+        # Vault leader (if available)
+        if position.vault_leader:
+            ctk.CTkLabel(
+                info, text=f"Leader: {position.vault_leader}",
+                font=ctk.CTkFont(size=10), text_color="gray60",
+            ).pack(anchor="w", pady=(2, 0))
+
+        # Error note
+        if position.error:
+            ctk.CTkLabel(
+                info, text=f"Note: {position.error}",
+                font=ctk.CTkFont(size=10), text_color="#ff922b",
+            ).pack(anchor="w", pady=(2, 0))
+
+        # Button frame
+        button_frame = ctk.CTkFrame(card, fg_color="transparent")
+        button_frame.pack(side="right", padx=10, pady=8)
+
+        if position.vault_address:
+            ctk.CTkButton(
+                button_frame, text="Copy Address", width=100, height=26,
+                font=ctk.CTkFont(size=10),
+                command=lambda addr=position.vault_address: self.copy_to_clipboard(addr),
+            ).pack(pady=2)
+
+    # --- End v5.1 vault section methods ---
 
     def run(self):
         """Run the GUI application."""

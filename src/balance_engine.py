@@ -133,6 +133,14 @@ TOKEN_CONTRACTS = {
         "USDC": {"address": "0x0b2C639c533813f4Aa9D1893E996BA9468Aa2734", "decimals": 6},
         "USDT": {"address": "0x94b008aA00579c1307C0c60cE8aF3a1cCB3d8a47", "decimals": 6},
     },
+    # v5.1: HyperEVM (Hyperliquid EVM, chain ID 999) ERC-20 tokens
+    # USDC address confirmed via Circle developer docs:
+    # https://developers.circle.com/stablecoins/usdc-contract-addresses
+    "hyperliquid_evm": {
+        "USDC": {"address": "0xb88339CB7199b77E23DB6E890353E22632Ba630f", "decimals": 6},
+        "WHYPE": {"address": "0x5555555555555555555555555555555555555555", "decimals": 18},
+        "UBTC": {"address": "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463", "decimals": 8},
+    },
 }
 
 
@@ -936,6 +944,22 @@ class BalanceEngine:
                 "type": "native"
             })
 
+        # v5.1: HyperEVM ERC-20 token balances (USDC, WHYPE, UBTC, etc.)
+        if progress_callback:
+            progress_callback("Fetching HyperEVM tokens...")
+        tokens = TOKEN_CONTRACTS.get("hyperliquid_evm", {})
+        for token_symbol, token_info in tokens.items():
+            token_balance = self.fetch_erc20_balance(
+                address, token_info["address"], "hyperliquid_evm", token_info["decimals"]
+            )
+            if token_balance is not None and token_balance > 0:
+                results.append({
+                    "chain": "hyperliquid_evm",
+                    "balance": token_balance,
+                    "symbol": token_symbol,
+                    "type": "erc20"
+                })
+
         # 2. Hyperliquid L1 spot balances (USDC, HYPE spot, etc.)
         if progress_callback:
             progress_callback("Fetching Hyperliquid L1 spot...")
@@ -971,15 +995,9 @@ class BalanceEngine:
             if "railgun" in chain_lower:
                 return {"balances": [], "error": "Shielded addresses cannot be queried publicly"}
 
-            # Hyperliquid L1 (Spot) - must check BEFORE the HYPE/HyperEVM branch
-            if "hyperliquid l1" in chain_lower or "hyperliquid_l1" in chain_lower or "hl1" in chain_lower or "(spot)" in chain_lower:
-                balances = self.fetch_hyperliquid_l1_balances(address)
-                if balances:
-                    return {"balances": balances, "error": ""}
-                return {"balances": [], "error": "No balances shown on Hyperliquid L1"}
-
-            # HYPE (Hyperliquid) - only search HyperEVM + L1, not all EVM chains
-            if ("hype" in chain_lower or "hyperliquid" in chain_lower) and "evm" not in chain_lower:
+            # Hyperliquid (HL1 & HyperEVM) - search HyperEVM + L1, not all EVM chains
+            # Note: "hyperevm" contains "evm" but should NOT route to generic EVM
+            if "hype" in chain_lower or "hyperliquid" in chain_lower:
                 balances = self.fetch_hype_balances(address, progress_callback=progress_callback)
                 if balances:
                     return {"balances": balances, "error": ""}

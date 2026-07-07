@@ -173,3 +173,34 @@ key_manager/
 
 ---
 *Status report updated June 25, 2026. v4.2 released - Customizable RPC Endpoints + Standard/Advanced Mode.*
+
+## v5.1 LP Fee Issue (Updated July 7, 2026)
+### Known Issues (v5.1 LP Fees)
+- **LP fee calculation still shows checkpointed values** ($0.04, 6.7e-07 UBTC) instead of real uncollected fees (~$49.83)
+- The `collect()` eth_call approach (selector `0x4f1c2879`) was added but the contract may not support this function selector
+- The feeGrowthGlobal delta approach was tried but produced ~100x overcount because feeGrowthOutside at tick boundaries is non-zero
+- **Confirmed from Project X UI**: Real uncollected fees for token 496329 are 0.3443 HYPE + 0.0000397 UBTC (~$49.83)
+- The `tokens_owed` values (0 and 67 raw) are stale checkpointed values from the last position touch
+- **Root cause**: Need to determine the correct `collect()` function signature for the Project X PositionManager contract, or find another way to read uncollected fees
+- Position value calculation (V3 liquidity math) works correctly (~$4,496)
+- Range slider works correctly (green marker, in range)
+
+### Next Steps (v5.2)
+- [ ] Collection-based fee tracking — record fee income when user clicks "Collect Fees" instead of estimating from RPC
+- [ ] LP position range slider with position marker (green/red) — DONE in v5.1
+- [ ] Fees displayed in user's configured currency
+- [ ] Fee breakdown display (WHYPE amount + slider + UBTC amount)
+
+## v5.1 Update (July 7, 2026)
+
+### Changes
+- **Project X fee estimation disabled**: The manual feeGrowthInside calculation from RPC tick storage was returning either $0.04 or more than the pool value — never the correct fees earned. Fee estimation is now disabled behind `PROJECT_X_FEE_ESTIMATION_ENABLED = False`. Helper functions (`_keccak256`, `_read_tick_fee_growth_outside`, `_compute_fee_growth_inside`) are retained for potential reuse with other venues. Collection-based fee tracking is planned for a future release.
+- **`fees_note` field added to LPPosition**: HyperEVM/Project X positions now carry `fees_note="Collect fees to report on fee income"`. The GUI displays this note (in yellow, bold) instead of a misleading fee number.
+- **Saved Pools feature added**: New `src/saved_pools.py` module stores public identifiers (wallet address, token ID, venue, pool address, pair) in `saved_pools.json` next to the vault. No private keys stored. "Save Pool" button on each HyperEVM LP card. Auto-loads saved pools on wallet scan (fast token-ID lookup, avoids expensive 6-minute scan). Deduplicates by `venue:position_id`.
+
+### Files Changed
+- `src/lp_engine.py` — Added `fees_note: Optional[str] = None` field to `LPPosition`
+- `src/venue_adapters/hyperliquid_adapter.py` — Disabled fee estimation behind `PROJECT_X_FEE_ESTIMATION_ENABLED` flag, set `fees_note` on returned positions
+- `src/saved_pools.py` (NEW) — Saved pools JSON CRUD module
+- `src/gui_main_v5.py` — Added `saved_pools` import, fee note display, Save Pool button, auto-load saved pools on scan, position deduplication
+- `build_gui_v5.py` — Added `saved_pools` hidden import

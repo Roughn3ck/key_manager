@@ -35,6 +35,7 @@ class LPPosition:
     deposit_amounts: Dict[str, float] = field(default_factory=dict)
     fees_earned: Dict[str, float] = field(default_factory=dict)
     fees_earned_usd: Optional[float] = None
+    fees_note: Optional[str] = None
     deposit_value_usd: Optional[float] = None
     current_value_usd: Optional[float] = None
     pnl_usd: Optional[float] = None
@@ -373,7 +374,22 @@ class LPEngine:
         positions = adapter.fetch_all_positions(
             wallet_address, online_mode=True, price_engine=self.price_engine
         )
-        return [self.strategy_engine.analyze(p) for p in positions]
+        # v5.1: Filter out spot holdings and closed positions
+        # Spot positions have ":spot:" in their position_id (e.g., "0x...:spot:USDC")
+        # Closed EVM positions have liquidity == 0 in raw_data
+        lp_positions = []
+        for p in positions:
+            pid = p.position_id or ""
+            # Skip spot holdings
+            if ":spot:" in pid:
+                continue
+            # Skip closed EVM LP positions (liquidity == 0)
+            if pid.startswith("hyperevm:") and p.raw_data:
+                liquidity = p.raw_data.get("liquidity", 0)
+                if liquidity == 0:
+                    continue
+            lp_positions.append(p)
+        return [self.strategy_engine.analyze(p) for p in lp_positions]
 
     def fetch_fees_earned(
         self, position_id: str, venue_key: str

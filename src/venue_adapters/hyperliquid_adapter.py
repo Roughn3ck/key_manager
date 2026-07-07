@@ -38,6 +38,8 @@ SELECTOR_POSITIONS = "0x99fbab88"
 SELECTOR_BALANCE_OF = "0x70a08231"
 SELECTOR_OWNER_OF = "0x6352211e"
 SELECTOR_TOTAL_SUPPLY = "0x18160ddd"
+SELECTOR_FEE_GROWTH_GLOBAL0 = "0xf3058399"
+SELECTOR_FEE_GROWTH_GLOBAL1 = "0x46141319"
 SELECTOR_TOKEN_OF_OWNER_BY_INDEX = "0x2f745c59"
 SELECTOR_FEE = "0xddca3f43"
 SELECTOR_TOKEN0 = "0x0dfe1681"
@@ -57,6 +59,14 @@ TOKEN_SYMBOLS = {
     WHYPE.lower(): "WHYPE",
     UBTC.lower(): "UBTC",
 }
+
+# v5.1: Project X fee estimation from RPC tick storage is disabled.
+# The manual feeGrowthInside calculation was returning either $0.04 or
+# more than the pool value — never the correct fees earned. Fee tracking
+# will be collection-based in a future release. The helper functions
+# (_keccak256, _read_tick_fee_growth_outside, _compute_fee_growth_inside)
+# are retained behind this flag for potential reuse with other venues.
+PROJECT_X_FEE_ESTIMATION_ENABLED = False
 
 
 def _is_hex_string(s: str, length: Optional[int] = None) -> bool:
@@ -326,6 +336,7 @@ def _fetch_pool_state(pool_address: str) -> Tuple[Optional[float], Optional[int]
 
     current_price: Optional[float] = None
     current_tick: Optional[int] = None
+    sqrt_price_x96_raw: Optional[int] = None
     if (
         slot0_result
         and isinstance(slot0_result, str)
@@ -333,6 +344,7 @@ def _fetch_pool_state(pool_address: str) -> Tuple[Optional[float], Optional[int]
     ):
         try:
             sqrt_price_x96 = int(slot0_result[2:66], 16)
+            sqrt_price_x96_raw = sqrt_price_x96
             current_tick = int(slot0_result[66:130], 16)
             if current_tick >= 2 ** 255:
                 current_tick -= 2 ** 256
@@ -344,7 +356,111 @@ def _fetch_pool_state(pool_address: str) -> Tuple[Optional[float], Optional[int]
         except (ValueError, OverflowError):
             pass
 
-    return current_price, current_tick, fee, token0, token1
+    # v5.1: Read feeGrowthGlobal accumulators for real fee calculation
+    fee_growth_global0 = 0
+    fee_growth_global1 = 0
+    try:
+        fg0_result = _evm_rpc_call("eth_call", [{"to": pool_address, "data": SELECTOR_FEE_GROWTH_GLOBAL0}, "latest"])
+        if fg0_result and isinstance(fg0_result, str) and len(fg0_result) >= 2:
+            fee_growth_global0 = int(fg0_result[2:], 16)
+    except Exception:
+        pass
+    try:
+        fg1_result = _evm_rpc_call("eth_call", [{"to": pool_address, "data": SELECTOR_FEE_GROWTH_GLOBAL1}, "latest"])
+        if fg1_result and isinstance(fg1_result, str) and len(fg1_result) >= 2:
+            fee_growth_global1 = int(fg1_result[2:], 16)
+    except Exception:
+        pass
+
+    return current_price, current_tick, fee, token0, token1, sqrt_price_x96_raw, fee_growth_global0, fee_growth_global1
+
+
+def _keccak256(data: bytes) -> bytes:
+    """Compute EVM keccak-256 hash using pycryptodome.
+
+    Note: ``hashlib.sha3_256`` uses NIST SHA-3 padding, which differs from
+    Ethereum's keccak-256. We use ``Crypto.Hash.keccak`` for correctness.
+    """
+    try:
+        from Crypto.Hash import keccak
+    except ImportError:
+        from Cryptodome.Hash import keccak
+    h = keccak.new(digest_bits=256)
+    h.update(data)
+    return h.digest()
+
+
+def _read_tick_fee_growth_outside(pool_address: str, tick: int) -> Tuple[int, int]:
+    """Read ``feeGrowthOutside0X128`` and ``feeGrowthOutside1X128`` for a tick.
+
+    The Uniswap V3 ``ticks`` mapping lives at storage slot 5 on the Project X
+    pool fork (shifted from the canonical slot 4).  The storage key for a given
+    tick is::
+
+        slot = keccak256(abi.encode(int24(tick), uint256(5)))
+
+    The ``Tick.Info`` struct stores ``feeGrowthOutside0X128`` (uint128) and
+    ``feeGrowthOutside1X128`` (uint128) as the first two fields, packed into
+    the first 32-byte storage word.
+
+    Returns ``(0, 0)`` on any failure so the caller can fall back to
+    checkpointed ``tokens_owed`` values.
+    """
+    try:
+        # ABI-encode int24(tick) sign-extended to 32 bytes + uint256(5) as 32 bytes.
+        # Project X pool fork uses a shifted storage layout:
+        # the ticks mapping is at slot 5, not the canonical Uniswap V3 slot 4.
+        if tick < 0:
+            tick_bytes = (tick + (1 << 256)).to_bytes(32, byteorder="big")
+        else:
+            tick_bytes = tick.to_bytes(32, byteorder="big")
+        slot_key = tick_bytes + (5).to_bytes(32, byteorder="big")
+        slot_hex = "0x" + _keccak256(slot_key).hex()
+
+        result = _evm_rpc_call(
+            "eth_getStorageAt",
+            [pool_address, slot_hex, "latest"],
+        )
+        if not result or not isinstance(result, str) or len(result) < 66:
+            return (0, 0)
+
+        word = result[2:].zfill(64)
+        # Tick.Info: first 16 bytes = feeGrowthOutside0X128, next 16 bytes = feeGrowthOutside1X128
+        fee_growth_outside0 = int(word[0:32], 16)
+        fee_growth_outside1 = int(word[32:64], 16)
+        return (fee_growth_outside0, fee_growth_outside1)
+    except Exception:
+        return (0, 0)
+
+
+def _compute_fee_growth_inside(
+    tick_current: int,
+    tick_lower: int,
+    tick_upper: int,
+    fg_global0: int,
+    fg_global1: int,
+    fg_out_lower0: int,
+    fg_out_lower1: int,
+    fg_out_upper0: int,
+    fg_out_upper1: int,
+) -> Tuple[int, int]:
+    """Compute ``feeGrowthInside0X128`` and ``feeGrowthInside1X128`` (standard V3).
+
+    All inputs and outputs are uint256 modulo 2**256.
+    """
+    MASK = (1 << 256) - 1
+
+    if tick_current >= tick_upper:
+        fg_inside0 = (fg_out_upper0 - fg_out_lower0) & MASK
+        fg_inside1 = (fg_out_upper1 - fg_out_lower1) & MASK
+    elif tick_current < tick_lower:
+        fg_inside0 = (fg_out_lower0 - fg_out_upper0) & MASK
+        fg_inside1 = (fg_out_lower1 - fg_out_upper1) & MASK
+    else:
+        fg_inside0 = (fg_global0 - fg_out_lower0 - fg_out_upper0) & MASK
+        fg_inside1 = (fg_global1 - fg_out_lower1 - fg_out_upper1) & MASK
+
+    return (fg_inside0, fg_inside1)
 
 
 def _decode_positions_response(
@@ -380,7 +496,7 @@ def _decode_positions_response(
     current_price: Optional[float] = None
     current_tick: Optional[int] = None
     if pool_address:
-        current_price, current_tick, _, _, _ = _fetch_pool_state(pool_address)
+        current_price, current_tick, _, _, _, sqrtPriceX96, fee_growth_global0, fee_growth_global1 = _fetch_pool_state(pool_address)
 
     range_low = _tick_to_price(tick_lower, decimals0, decimals1)
     range_high = _tick_to_price(tick_upper, decimals0, decimals1)
@@ -393,21 +509,114 @@ def _decode_positions_response(
 
     owed0_h = tokens_owed0 / (10 ** decimals0)
     owed1_h = tokens_owed1 / (10 ** decimals1)
+
+    # v5.1: DISABLED — Manual feeGrowthInside calculation from RPC tick storage.
+    # This process wasn't functioning correctly — it was returning either $0.04
+    # or more than the pool value. Collection-based fee tracking is planned for a
+    # future release. For now, fees_earned comes only from the checkpointed
+    # tokens_owed0/1 values read directly from positions(tokenId).
+    #
+    # The helper functions (_keccak256, _read_tick_fee_growth_outside,
+    # _compute_fee_growth_inside) are retained behind PROJECT_X_FEE_ESTIMATION_ENABLED
+    # for potential reuse with other venues.
+    if PROJECT_X_FEE_ESTIMATION_ENABLED and (
+        liquidity > 0
+        and pool_address
+        and current_tick is not None
+        and fee_growth_inside0_last_x128 is not None
+        and fee_growth_inside1_last_x128 is not None
+    ):
+        try:
+            fg_out_lower0, fg_out_lower1 = _read_tick_fee_growth_outside(
+                pool_address, tick_lower
+            )
+            fg_out_upper0, fg_out_upper1 = _read_tick_fee_growth_outside(
+                pool_address, tick_upper
+            )
+
+            # Fallback: if all outside values are zero, storage reads failed
+            # or ticks are uninitialized. Keep checkpointed tokens_owed values.
+            if fg_out_lower0 or fg_out_lower1 or fg_out_upper0 or fg_out_upper1:
+                fg_inside0, fg_inside1 = _compute_fee_growth_inside(
+                    current_tick,
+                    tick_lower,
+                    tick_upper,
+                    fee_growth_global0,
+                    fee_growth_global1,
+                    fg_out_lower0,
+                    fg_out_lower1,
+                    fg_out_upper0,
+                    fg_out_upper1,
+                )
+
+                delta0 = (fg_inside0 - fee_growth_inside0_last_x128) & ((1 << 256) - 1)
+                delta1 = (fg_inside1 - fee_growth_inside1_last_x128) & ((1 << 256) - 1)
+
+                # Only add positive deltas (skip wraparound artifacts).
+                if 0 < delta0 < (1 << 255):
+                    uncollected0 = (liquidity * delta0) // (2 ** 128)
+                    owed0_h += uncollected0 / (10 ** decimals0)
+                if 0 < delta1 < (1 << 255):
+                    uncollected1 = (liquidity * delta1) // (2 ** 128)
+                    owed1_h += uncollected1 / (10 ** decimals1)
+        except Exception:
+            pass
+
     fees_earned = {symbol0: owed0_h, symbol1: owed1_h}
     fees_earned_usd = (
         _usd_value(owed0_h, symbol0, price_engine) or 0.0
     ) + (_usd_value(owed1_h, symbol1, price_engine) or 0.0)
 
-    # Deposit amounts: we don't have exact deposit history, so report current
-    # liquidity expressed as token units. For V3, we can't recover exact amounts
-    # without pool state and fee-growth snapshots, but we surface liquidity raw.
+    # v5.1: Mark HyperEVM positions with a fee note so the GUI can display
+    # "Collect fees to report on fee income" instead of a misleading number.
+    fees_note = (
+        "Collect fees to report on fee income"
+        if not PROJECT_X_FEE_ESTIMATION_ENABLED
+        else None
+    )
+
+    # v5.1: Compute real position value using V3 liquidity math
+    position_value_usd = fees_earned_usd
     deposit_amounts: Dict[str, float] = {}
-    if liquidity:
-        # Heuristic placeholder: liquidity count scaled by 1/1000 of human unit.
-        # This is intentionally conservative and will be refined once the writer
-        # module tracks mint events or re-reads via pool collect estimates.
-        deposit_amounts[symbol0] = liquidity / (10 ** (decimals0 + 3))
-        deposit_amounts[symbol1] = liquidity / (10 ** (decimals1 + 3))
+    if liquidity > 0 and current_tick is not None and tick_upper != tick_lower:
+        import math as _math
+        sqrt_lower = 1.0001 ** (tick_lower / 2.0)
+        sqrt_upper = 1.0001 ** (tick_upper / 2.0)
+        if sqrtPriceX96 and sqrtPriceX96 > 0:
+            sqrt_price = sqrtPriceX96 / (2 ** 96)
+        elif current_price and current_price > 0:
+            sqrt_price = _math.sqrt(current_price)
+        else:
+            sqrt_price = None
+
+        if sqrt_price and sqrt_price > 0:
+            if tick_lower <= current_tick <= tick_upper:
+                amount0_raw = liquidity * (sqrt_upper - sqrt_price) / (sqrt_price * sqrt_upper)
+                amount1_raw = liquidity * (sqrt_price - sqrt_lower)
+            elif current_tick < tick_lower:
+                amount0_raw = liquidity * (sqrt_upper - sqrt_lower) / (sqrt_price * sqrt_upper)
+                amount1_raw = 0.0
+            else:
+                amount0_raw = 0.0
+                amount1_raw = liquidity * (sqrt_upper - sqrt_lower)
+
+            amount0_human = amount0_raw / (10 ** decimals0)
+            amount1_human = amount1_raw / (10 ** decimals1)
+
+            val0 = _usd_value(amount0_human, symbol0, price_engine) or 0.0
+            val1 = _usd_value(amount1_human, symbol1, price_engine) or 0.0
+            position_value_usd = val0 + val1
+
+            deposit_amounts[symbol0] = amount0_human
+            deposit_amounts[symbol1] = amount1_human
+        else:
+            if liquidity:
+                deposit_amounts[symbol0] = liquidity / (10 ** (decimals0 + 3))
+                deposit_amounts[symbol1] = liquidity / (10 ** (decimals1 + 3))
+    else:
+        if liquidity:
+            deposit_amounts[symbol0] = liquidity / (10 ** (decimals0 + 3))
+            deposit_amounts[symbol1] = liquidity / (10 ** (decimals1 + 3))
 
     return LPPosition(
         position_id=f"hyperevm:{token_id}",
@@ -424,10 +633,14 @@ def _decode_positions_response(
         deposit_amounts=deposit_amounts,
         fees_earned=fees_earned,
         fees_earned_usd=fees_earned_usd,
-        current_value_usd=fees_earned_usd,
+        fees_note=fees_note,
+        current_value_usd=position_value_usd,
+        deposit_value_usd=position_value_usd,
         raw_data={
             "token_id": token_id,
             "nonce": nonce,
+            "fee_growth_global0": fee_growth_global0,
+            "fee_growth_global1": fee_growth_global1,
             "operator": operator,
             "token0": token0,
             "token1": token1,
@@ -688,7 +901,7 @@ class HyperliquidAdapter(VenueAdapter):
     def fetch_pool_state(self, pool_address: str) -> dict:
         """Return slot0, fee, token0, token1 for a HyperEVM pool."""
         pool_address = pool_address.lower()
-        current_price, current_tick, fee, token0, token1 = _fetch_pool_state(
+        current_price, current_tick, fee, token0, token1, _, _, _ = _fetch_pool_state(
             pool_address
         )
         result = {

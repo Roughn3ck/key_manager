@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PyInstaller build script for ColdStack GUI v5.0.
+PyInstaller build script for ColdStack GUI v5.1.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v5.0 (July 2026) - LP Engine + Hyperliquid Writer + LP Positions Tab
+Version: v5.1 (July 2026) - LP Engine + Hyperliquid Writer + LP Positions Tab
 Builds: src/gui_main_v5.py
 Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
 
@@ -12,7 +12,7 @@ Changes from build_gui_v4.py:
   2. New hidden imports: lp_engine, venue_adapters, venue_adapters.hyperliquid_adapter,
      venue_adapters.venue_writer, venue_adapters.hyperliquid_writer, price_engine
   3. Backup previous EXE as coldstack_v4_2.exe (fixes known backup naming issue)
-  4. Version strings updated to v5.0
+  4. Version strings updated to v5.1
 
 WARNING: After ANY source change, rebuild: python build_gui_v5.py
 """
@@ -33,8 +33,8 @@ def clean_build_dirs():
 
 
 def build_gui_exe():
-    """Run PyInstaller to build the ColdStack v5.0 EXE."""
-    print("Building ColdStack v5.0 executable...")
+    """Run PyInstaller to build the ColdStack v5.1 EXE."""
+    print("Building ColdStack v5.1 executable...")
 
     project_dir = Path(__file__).parent.resolve()
 
@@ -68,7 +68,7 @@ def build_gui_exe():
         '--hidden-import=Crypto',
         '--hidden-import=Crypto.Hash',
         '--hidden-import=Crypto.Hash.keccak',
-        # --- v5.0 LP Engine hidden imports ---
+        # --- v5.1 LP Engine hidden imports ---
         '--hidden-import=lp_engine',
         '--hidden-import=price_engine',
         '--hidden-import=balance_engine',
@@ -77,6 +77,11 @@ def build_gui_exe():
         '--hidden-import=venue_adapters.hyperliquid_adapter',
         '--hidden-import=venue_adapters.venue_writer',
         '--hidden-import=venue_adapters.hyperliquid_writer',
+        '--collect-submodules=venue_adapters',
+        # --- v5.1: Saved pools ---
+        '--hidden-import=saved_pools',
+        # --- v5.1: Vault tracker ---
+        '--hidden-import=vault_tracker',
         # --- Collect-all for packages with data files ---
         '--collect-all=customtkinter',
         '--collect-all=cryptography',
@@ -125,7 +130,7 @@ def copy_to_usb_deployment():
     backups_dir = Path('backups')
     backups_dir.mkdir(exist_ok=True)
     if target_path.exists():
-        # v5.0: Fix backup naming — use coldstack_v4_2.exe for the previous build
+        # v5.1: Fix backup naming — use coldstack_v4_2.exe for the previous build
         backup_path = backups_dir / 'coldstack_v4_2.exe'
         print(f"Backing up previous EXE to {backup_path}...")
         shutil.copy2(target_path, backup_path)
@@ -148,7 +153,7 @@ echo ========================================
 echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting ColdStack v5.0...
+echo Starting ColdStack v5.1...
 echo.
 coldstack.exe
 pause
@@ -207,7 +212,7 @@ def main():
     print(f"Working directory: {os.getcwd()}")
 
     print("=" * 60)
-    print("ColdStack v5.0 - Portable EXE Builder")
+    print("ColdStack v5.1 - Portable EXE Builder")
     print("LP Engine + Hyperliquid Writer + LP Positions Tab")
     print("=" * 60)
 

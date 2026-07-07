@@ -71,6 +71,20 @@ class CollectFeesParams:
 
 
 @dataclass
+class CompoundFeesParams:
+    """Parameters for compounding fees into an existing LP position.
+
+    Collects accrued fees, optionally swaps to the optimal ratio for the
+    position's current tick range, then increases liquidity.
+    """
+    account: str
+    position_id: str
+    slippage_pct: float = 0.5
+    deadline_seconds: int = 1200
+    min_usd_threshold: float = 5.0  # Below this, skip swap and just collect
+
+
+@dataclass
 class RebalanceParams:
     """Parameters to rebalance an existing position into a new range."""
     account: str
@@ -139,6 +153,14 @@ class VenueWriter(ABC):
     @abstractmethod
     def collect_fees(self, params: CollectFeesParams) -> str:
         """Collect accrued fees for a position. Returns TX hash."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def compound_fees(self, params: CompoundFeesParams) -> List[str]:
+        """Collect fees, swap to optimal ratio, and increase liquidity.
+
+        Returns a list of TX hashes for all transactions submitted.
+        """
         raise NotImplementedError
 
     def close_position(self, position_id: str, account: str) -> List[str]:

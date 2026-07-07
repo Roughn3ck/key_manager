@@ -2,19 +2,41 @@
 
 *Secure offline crypto key vault with BIP39 derivation engine.*
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v5.0-success)]()
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v5.1-success)]()
 
 ## Download
 
-**Latest release: [ColdStack v5.0 - LP Engine + Hyperliquid Writer](https://github.com/Roughn3ck/key_manager/releases/tag/v5.0)**
+**Latest release: [ColdStack v5.1 - Vault Tracking + HyperEVM ERC-20](https://github.com/Roughn3ck/key_manager/releases/tag/v5.1)**
 
 | File | Size | Description |
 |------|------|-------------|
-| `coldstack.exe` | ~50MB | Full GUI application - ColdStack branded, v5.0 with LP Engine, Hyperliquid Writer, LP Positions tab |
+| `coldstack.exe` | ~50MB | Full GUI application - ColdStack branded, v5.1 with Vault Tracking, HyperEVM ERC-20, LP Engine, Hyperliquid Writer |
 
 > The CLI executable (`key_manager.exe`) has been deprecated and removed from USB_DEPLOYMENT as of v3.1. The CLI source remains available for script-mode use (`python src/main.py`).
 
 > No installation required. Just download, run, and click "Initialize New Vault". Works on any Windows 10/11 machine - no Python needed.
+
+---
+
+## v5.1 Features - Vault Tracking + HyperEVM ERC-20 (July 2026)
+
+- **Hyperliquid Vault Tracking** (`src/vault_tracker.py`): New read-only module that fetches Hyperliquid vault positions via the `/info` API (`userVaultEquities` + `vaultDetails`). Displays vault name, deposited amount, current value, unrealized P&L, APR, shares, and share price in a new "HL1 Vaults" tab.
+- **HyperEVM ERC-20 Token Balances**: Balance engine now fetches ERC-20 tokens on HyperEVM (chain ID 999). Supports USDC (`0xb88339CB7199b77E23DB6E890353E22632Ba630f` - confirmed via Circle developer docs), WHYPE, and UBTC. The `fetch_hype_balances()` method now queries both HyperEVM native + ERC-20 tokens + Hyperliquid L1 spot balances.
+- **Combined Chain Option**: "HYPE (Hyperliquid)" and "Hyperliquid L1 (Spot)" replaced with single "Hyperliquid (HL1 & HyperEVM)" chain option that fetches all three balance types in one call.
+- **Password Show/Hide Toggle**: Eye icon button on the login screen to toggle password visibility while typing.
+- **"Do not autolock" Checkbox**: Checkbox in the status bar next to the session timer. When checked, the wallet stays open indefinitely - the 5-minute auto-lock is disabled. Timer shows "Session: No timeout" when active.
+- **Tab Renaming**: Tabs renamed to "Wallet" (was "Vault"), "HL1 Vaults" (new), "LP Positions" (unchanged).
+- **Spot Positions Filtered**: LP Positions tab no longer shows Hyperliquid L1 spot holdings (e.g., `0x...:spot:USDC`) - these are just token balances, not LP positions.
+- **Closed LP Positions Filtered**: LP Positions tab filters out closed EVM LP positions (liquidity == 0 in NFT position data) to avoid showing $0.00 value positions with confusing "Out of Range" suggestions.
+- **Stablecoin Currency Conversion Fix**: USDC, USDT, and other stablecoins now properly convert to the user's configured display currency (CAD, AUD, EUR, etc.) using CoinGecko USDC price in the target currency, instead of always returning 1:1 USD value.
+- **Dispatcher Fix**: Balance engine dispatcher fixed so "Hyperliquid (HL1 & HyperEVM)" chain routes to `fetch_hype_balances()` (which fetches HyperEVM + L1) instead of being intercepted by the HL1-only branch.
+- **No new dependencies**: Still uses stdlib `urllib.request` only.
+- **Backward compatible**: v5.0 vaults open in v5.1 without migration.
+
+### Running v5.1
+- **GUI (script mode):** `python src/gui_main_v5.py`
+- **Build EXE:** `python build_gui_v5.py` -> `USB_DEPLOYMENT/coldstack.exe`
+- **CLI (script mode only):** `python src/main.py`
 
 ---
 
@@ -52,7 +74,7 @@
 - **API Key Management**: API keys (Helius, Infura, Alchemy, Quicknode) stored in encrypted vault `config.api_keys`. Never written to `rpc_endpoints.json`. The JSON file only contains `"auth": "helius"` references - the actual key value is looked up from the vault at runtime.
 - **Fallback URLs**: Each chain can have a fallback URL. Balance engine tries primary first, falls back on failure. Improves reliability of balance fetching.
 - **EVM Chain Progress Display**: When checking EVM balances, the label updates in real-time showing which chain is being queried ("Fetching Ethereum...", "Fetching Arbitrum...", etc.) instead of a static "Fetching..." message.
-- **HYPE (Hyperliquid) Optimized Search**: The HYPE chain type now only searches HyperEVM (gas balance) + Hyperliquid L1 (spot balances) instead of all 7 EVM chains. Much faster - 2 API calls instead of 14+.
+- **Hyperliquid (HL1 & HyperEVM) Optimized Search**: The Hyperliquid chain type now searches HyperEVM (gas + ERC-20 tokens: USDC, WHYPE, UBTC) + Hyperliquid L1 (spot balances). Fetches all balance types in one call.
 - **Schema Versioning**: Vault config now has `schema_version` field. Old vaults default to v1 (v4.1 behavior). New vaults get v2. All changes are additive - never breaks old vaults.
 - **No new dependencies**: Still uses stdlib `urllib.request` only.
 
@@ -61,8 +83,8 @@
 | Chain Type | What It Searches | API Calls |
 |------------|-----------------|-----------|
 | `EVM (Ethereum / Arbitrum / Base)` | All 7 EVM chains + ERC-20 tokens | 14+ |
-| `HYPE (Hyperliquid)` | HyperEVM gas + L1 spot only | 2 |
-| `Hyperliquid L1 (Spot)` | L1 spot only | 1 |
+| `Hyperliquid (HL1 & HyperEVM)` | HyperEVM gas + ERC-20 (USDC, WHYPE, UBTC) + L1 spot | 5+ |
+
 
 ### Security Boundary
 
@@ -228,7 +250,7 @@ python3 src/key_manager_agent.py --vault /path/to/key_vault.encrypted --serve --
 - **Secure Login Screen** - Password-only entry with AES-256-GCM/Argon2id validation
 - **Initialize New Vault** - Create a new encrypted vault directly from the GUI (no CLI needed)
 - **Change Password** - Change your master password from within the GUI
-- **Session Auto-Lock** - 5-minute inactivity timeout automatically locks the vault
+- **Session Auto-Lock** - 5-minute inactivity timeout automatically locks the vault (with "Do not autolock" checkbox to disable)
 - **Toast Notifications** - Visual feedback for all operations
 - **Check for Updates** - User-initiated update check (offline by default, no background polling)
 
@@ -377,6 +399,20 @@ python src/main.py validate-mnemonic <account>           # Validate stored mnemo
 - **Headless Agent:** Python 3.10+, `pycryptodomex`, `cryptography`
 
 ## Version
+
+**v5.1** - July 2026 - Vault Tracking + HyperEVM ERC-20 + Password Toggle + No Autolock
+- Hyperliquid Vault Tracking (`src/vault_tracker.py`) - read-only vault positions via `/info` API
+- HyperEVM ERC-20 token support (USDC, WHYPE, UBTC) in balance engine
+- Combined "Hyperliquid (HL1 & HyperEVM)" chain option (replaces HYPE + Spot)
+- Password show/hide eye toggle on login screen
+- "Do not autolock" checkbox in status bar
+- Tab renaming: Wallet, HL1 Vaults, LP Positions
+- Spot positions filtered from LP results
+- Closed LP positions filtered (liquidity == 0)
+- Stablecoin currency conversion fix (USDC -> CAD/AUD/EUR via CoinGecko)
+- Balance dispatcher fix for Hyperliquid chain routing
+- No new dependencies (stdlib urllib.request only)
+- Backward compatible: v5.0 vaults open without migration
 
 **v5.0** - July 2026 - LP Engine + Hyperliquid Writer + LP Positions Tab
 - CTkTabview with "Vault" and "LP Positions" tabs
