@@ -25,39 +25,26 @@
 - **Combined Chain Option**: "HYPE (Hyperliquid)" and "Hyperliquid L1 (Spot)" replaced with single "Hyperliquid (HL1 & HyperEVM)" chain option that fetches all three balance types in one call.
 - **Password Show/Hide Toggle**: Eye icon button on the login screen to toggle password visibility while typing.
 - **"Do not autolock" Checkbox**: Checkbox in the status bar next to the session timer. When checked, the wallet stays open indefinitely - the 5-minute auto-lock is disabled. Timer shows "Session: No timeout" when active.
-- **Tab Renaming**: Tabs renamed to "Wallet" (was "Vault"), "HL1 Vaults" (new), "LP Positions" (unchanged).
 - **Spot Positions Filtered**: LP Positions tab no longer shows Hyperliquid L1 spot holdings (e.g., `0x...:spot:USDC`) - these are just token balances, not LP positions.
 - **Closed LP Positions Filtered**: LP Positions tab filters out closed EVM LP positions (liquidity == 0 in NFT position data) to avoid showing $0.00 value positions with confusing "Out of Range" suggestions.
 - **Stablecoin Currency Conversion Fix**: USDC, USDT, and other stablecoins now properly convert to the user's configured display currency (CAD, AUD, EUR, etc.) using CoinGecko USDC price in the target currency, instead of always returning 1:1 USD value.
 - **Dispatcher Fix**: Balance engine dispatcher fixed so "Hyperliquid (HL1 & HyperEVM)" chain routes to `fetch_hype_balances()` (which fetches HyperEVM + L1) instead of being intercepted by the HL1-only branch.
-- **No new dependencies**: Still uses stdlib `urllib.request` only.
-- **Backward compatible**: v5.0 vaults open in v5.1 without migration.
-
-### Running v5.1
-- **GUI (script mode):** `python src/gui_main_v5.py`
-- **Build EXE:** `python build_gui_v5.py` -> `USB_DEPLOYMENT/coldstack.exe`
-- **CLI (script mode only):** `python src/main.py`
-
----
-
-## v5.0 Features - LP Engine + Hyperliquid Writer (July 2026)
-
-- **LP Positions Tab**: New CTkTabview with "Vault" and "LP Positions" tabs. LP tab shows all LP positions for a wallet address with health emoji, pair, range, fees, value, PnL, and strategy suggestions.
+- **LP Positions Tab**: New CTkTabview with "Wallet" (was "Vault"), "HL1 Vaults" (new), "LP Positions" (unchanged). LP tab shows all LP positions for a wallet address with health emoji, pair, range, fees, value, PnL, and strategy suggestions.
 - **LP Engine** (`lp_engine.py`): Read-only LP position aggregation with adapter registry. Fetches positions from Hyperliquid L1 (perp/spot) and HyperEVM (concentrated-liquidity pools). Strategy engine analyzes positions and suggests actions (Hold/Rebalance/Withdraw).
 - **Hyperliquid Adapter** (`hyperliquid_adapter.py`): 1000+ line read adapter for HyperEVM NFT Position Manager + L1 perp/spot positions. Batch RPC with rate-limit handling. WHYPE/UBTC pool support.
 - **Hyperliquid Writer** (`hyperliquid_writer.py`): Full VenueWriter implementation for HyperEVM. Wrap/unwrap HYPE, approve tokens, open/increase/decrease/collect/close LP positions, rebalance. Signs via key_manager_agent (localhost:8842) - never holds private keys.
 - **Write Operations with Confirmation**: Advanced mode shows "Collect Fees" button on LP cards. Every write operation requires explicit user confirmation dialog. Writer is a tool, not an autonomous agent.
 - **Address Pre-fill**: LP tab address entry auto-fills from the selected account's first EVM/HYPE address.
 - **Offline-aware**: LP tab respects Go Online toggle. Refresh disabled when offline. Offline banner shown.
-- **No new dependencies**: Uses stdlib `urllib.request` only. Swap router stubbed (HyperEVM swap router address TBD).
-- **Backward compatible**: v4.2 vaults open in v5.0 without migration. LP tab is additive.
 
-### Running v5.0
+### Running v5.1
 - **GUI (script mode):** `python src/gui_main_v5.py`
 - **Build EXE:** `python build_gui_v5.py` -> `USB_DEPLOYMENT/coldstack.exe`
 - **CLI (script mode only):** `python src/main.py`
+- **No new dependencies**: Uses stdlib `urllib.request` only. Swap router stubbed (HyperEVM swap router address TBD).
+- **Backward compatible**: v4.2 vaults open in v5.0 without migration. LP tab is additive.
 
-### Security Rules (v5.0)
+### Security Rules (v5.1)
 1. LP Engine is read-only by default. Writer only accessible when vault is unlocked + user confirms each operation.
 2. Writer never holds private keys. All signing goes through the headless agent.
 3. Every write operation requires GUI confirmation dialog.

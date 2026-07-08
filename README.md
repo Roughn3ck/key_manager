@@ -18,46 +18,40 @@
 
 ---
 
-## v5.1 Features - Vault Tracking + HyperEVM ERC-20 (July 2026)
+## v5.1 Features - Vault Tracking + HyperEVM ERC-20 + LP Fee Fix (July 2026)
 
-- **Hyperliquid Vault Tracking** (`src/vault_tracker.py`): New read-only module that fetches Hyperliquid vault positions via the `/info` API (`userVaultEquities` + `vaultDetails`). Displays vault name, deposited amount, current value, unrealized P&L, APR, shares, and share price in a new "HL1 Vaults" tab.
+- **Hyperliquid Vault Tracking** (`src/vault_tracker.py`): New read-only module that fetches Hyperliquid vault positions via the `/info` API (`userVaultEquities` + `vaultDetails`). Displays in a new "HL1 Vaults" tab.
+  - Vault card shows **Vault Name** as a heading, **Vault Address** in smaller text, **TVL**, **APR**, **Vault Age**, **Deposit Age**, **Deposited**, **Current Value**, and **Unrealized P&L**.
+  - **Save Vault** / **Delete Saved** buttons persist vault snapshots inside the encrypted `key_vault.encrypted` database — no separate JSON files. Saved vaults render instantly on reopen using cached data.
+  - **Wallet selector** offers two modes: type a raw 0x address, or pick an account from the Wallet tab and auto-resolve its first EVM/HYPE address.
+  - **APR** sourced directly from Hyperliquid `vaultDetails.apr`.
+  - **TVL** computed from `maxDistributable` (or sum of follower equities).
+  - **Vault Age** from earliest portfolio history timestamp; **Deposit Age** from the user's personal `followerState.vaultEntryTime`.
+- **LP Fee Reading Fix**: HyperEVM uncollected fees are now read via a static `eth_call` to the Uniswap V3 `collect((uint256,address,uint128,uint128))` function (selector `0xfc6f7865`) on the Project X PositionManager. This returns real uncollected fee amounts matching the Project X UI tooltip. The previous `feeGrowthGlobal` delta approach (which overcounted) and the disabled `PROJECT_X_FEE_ESTIMATION_ENABLED` flag are replaced/removed.
 - **HyperEVM ERC-20 Token Balances**: Balance engine now fetches ERC-20 tokens on HyperEVM (chain ID 999). Supports USDC (`0xb88339CB7199b77E23DB6E890353E22632Ba630f` - confirmed via Circle developer docs), WHYPE, and UBTC. The `fetch_hype_balances()` method now queries both HyperEVM native + ERC-20 tokens + Hyperliquid L1 spot balances.
 - **Combined Chain Option**: "HYPE (Hyperliquid)" and "Hyperliquid L1 (Spot)" replaced with single "Hyperliquid (HL1 & HyperEVM)" chain option that fetches all three balance types in one call.
 - **Password Show/Hide Toggle**: Eye icon button on the login screen to toggle password visibility while typing.
 - **"Do not autolock" Checkbox**: Checkbox in the status bar next to the session timer. When checked, the wallet stays open indefinitely - the 5-minute auto-lock is disabled. Timer shows "Session: No timeout" when active.
-- **Tab Renaming**: Tabs renamed to "Wallet" (was "Vault"), "HL1 Vaults" (new), "LP Positions" (unchanged).
 - **Spot Positions Filtered**: LP Positions tab no longer shows Hyperliquid L1 spot holdings (e.g., `0x...:spot:USDC`) - these are just token balances, not LP positions.
 - **Closed LP Positions Filtered**: LP Positions tab filters out closed EVM LP positions (liquidity == 0 in NFT position data) to avoid showing $0.00 value positions with confusing "Out of Range" suggestions.
 - **Stablecoin Currency Conversion Fix**: USDC, USDT, and other stablecoins now properly convert to the user's configured display currency (CAD, AUD, EUR, etc.) using CoinGecko USDC price in the target currency, instead of always returning 1:1 USD value.
 - **Dispatcher Fix**: Balance engine dispatcher fixed so "Hyperliquid (HL1 & HyperEVM)" chain routes to `fetch_hype_balances()` (which fetches HyperEVM + L1) instead of being intercepted by the HL1-only branch.
-- **No new dependencies**: Still uses stdlib `urllib.request` only.
-- **Backward compatible**: v5.0 vaults open in v5.1 without migration.
+- **LP Positions Tab**: New CTkTabview with "Wallet" (was "Vault"), "HL1 Vaults" (new), "LP Positions" (unchanged). LP tab shows all LP positions for a wallet address with health emoji, pair, range, fees, value, PnL, and strategy suggestions.
+- **LP Engine** (`lp_engine.py`): Read-only LP position aggregation with adapter registry. Fetches positions from Hyperliquid L1 (perp/spot) and HyperEVM (concentrated-liquidity pools). Strategy engine analyzes positions and suggests actions (Hold/Rebalance/Withdraw).
+- **Hyperliquid Adapter** (`hyperliquid_adapter.py`): 1000+ line read adapter for HyperEVM NFT Position Manager + L1 perp/spot positions. Batch RPC with rate-limit handling. WHYPE/UBTC pool support. Fee estimation uses static `collect()` eth_call.
+- **Hyperliquid Writer** (`hyperliquid_writer.py`): Full VenueWriter implementation for HyperEVM. Wrap/unwrap HYPE, approve tokens, open/increase/decrease/collect/close LP positions, rebalance. Signs via key_manager_agent (localhost:8842) - never holds private keys.
+- **Write Operations with Confirmation**: Advanced mode shows "Collect Fees" button on LP cards. Every write operation requires explicit user confirmation dialog. Writer is a tool, not an autonomous agent.
+- **Address Pre-fill**: LP tab and HL1 Vaults tab address entry auto-fill from the selected account's first EVM/HYPE address.
+- **Offline-aware**: LP tab and HL1 Vaults tab respect Go Online toggle. Refresh disabled when offline. Offline banner shown.
 
 ### Running v5.1
 - **GUI (script mode):** `python src/gui_main_v5.py`
 - **Build EXE:** `python build_gui_v5.py` -> `USB_DEPLOYMENT/coldstack.exe`
 - **CLI (script mode only):** `python src/main.py`
-
----
-
-## v5.0 Features - LP Engine + Hyperliquid Writer (July 2026)
-
-- **LP Positions Tab**: New CTkTabview with "Vault" and "LP Positions" tabs. LP tab shows all LP positions for a wallet address with health emoji, pair, range, fees, value, PnL, and strategy suggestions.
-- **LP Engine** (`lp_engine.py`): Read-only LP position aggregation with adapter registry. Fetches positions from Hyperliquid L1 (perp/spot) and HyperEVM (concentrated-liquidity pools). Strategy engine analyzes positions and suggests actions (Hold/Rebalance/Withdraw).
-- **Hyperliquid Adapter** (`hyperliquid_adapter.py`): 1000+ line read adapter for HyperEVM NFT Position Manager + L1 perp/spot positions. Batch RPC with rate-limit handling. WHYPE/UBTC pool support.
-- **Hyperliquid Writer** (`hyperliquid_writer.py`): Full VenueWriter implementation for HyperEVM. Wrap/unwrap HYPE, approve tokens, open/increase/decrease/collect/close LP positions, rebalance. Signs via key_manager_agent (localhost:8842) - never holds private keys.
-- **Write Operations with Confirmation**: Advanced mode shows "Collect Fees" button on LP cards. Every write operation requires explicit user confirmation dialog. Writer is a tool, not an autonomous agent.
-- **Address Pre-fill**: LP tab address entry auto-fills from the selected account's first EVM/HYPE address.
-- **Offline-aware**: LP tab respects Go Online toggle. Refresh disabled when offline. Offline banner shown.
 - **No new dependencies**: Uses stdlib `urllib.request` only. Swap router stubbed (HyperEVM swap router address TBD).
 - **Backward compatible**: v4.2 vaults open in v5.0 without migration. LP tab is additive.
 
-### Running v5.0
-- **GUI (script mode):** `python src/gui_main_v5.py`
-- **Build EXE:** `python build_gui_v5.py` -> `USB_DEPLOYMENT/coldstack.exe`
-- **CLI (script mode only):** `python src/main.py`
-
-### Security Rules (v5.0)
+### Security Rules (v5.1)
 1. LP Engine is read-only by default. Writer only accessible when vault is unlocked + user confirms each operation.
 2. Writer never holds private keys. All signing goes through the headless agent.
 3. Every write operation requires GUI confirmation dialog.
@@ -400,8 +394,11 @@ python src/main.py validate-mnemonic <account>           # Validate stored mnemo
 
 ## Version
 
-**v5.1** - July 2026 - Vault Tracking + HyperEVM ERC-20 + Password Toggle + No Autolock
-- Hyperliquid Vault Tracking (`src/vault_tracker.py`) - read-only vault positions via `/info` API
+**v5.1** - July 2026 - Vault Tracking + HyperEVM ERC-20 + LP Fee Fix + Saved Vaults
+- Hyperliquid Vault Tracking (`src/vault_tracker.py`) with HL1 Vaults tab: Vault Name heading, Vault Address, TVL, APR, Vault Age, Deposit Age, Deposited, Current Value, Unrealized P&L
+- Save/Delete Vault buttons persist full vault snapshots inside `key_vault.encrypted`
+- Wallet selector: raw address entry or account dropdown from Wallet tab
+- LP fee reading fix: static `collect()` eth_call (selector `0xfc6f7865`) returns real uncollected fees from Project X PositionManager
 - HyperEVM ERC-20 token support (USDC, WHYPE, UBTC) in balance engine
 - Combined "Hyperliquid (HL1 & HyperEVM)" chain option (replaces HYPE + Spot)
 - Password show/hide eye toggle on login screen

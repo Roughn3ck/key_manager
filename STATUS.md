@@ -1,22 +1,31 @@
-## v5.0 - LP Engine + Hyperliquid Writer (July 2026)
+## v5.1 - Hyperliquid Vaults + LP Fee Fix (July 2026)
 
 ### Completed
-- [x] `src/venue_adapters/hyperliquid_writer.py` - Full VenueWriter for HyperEVM (wrap, unwrap, approve, open, increase, decrease, collect, close, rebalance)
-- [x] `src/gui_main_v5.py` - Copy of v4 + CTkTabview (Vault + LP Positions tabs) + LP tab with card rendering, threaded fetch, Collect Fees write operation
-- [x] `build_gui_v5.py` - PyInstaller build script for v5.0 (new hidden imports for lp_engine, venue_adapters, venue_writer, hyperliquid_writer)
-- [x] README.md updated with v5.0 changelog and features
-- [x] .clinerules updated with v5.0 version table and project structure
-- [x] py_compile passes for all new files
+- [x] `src/vault_tracker.py` — Read-only Hyperliquid vault positions via `/info` API (`userVaultEquities` + `vaultDetails`)
+- [x] `src/gui_main_v5.py` — HL1 Vaults tab with vault cards: Vault Name heading, Vault Address, TVL, APR, Vault Age, Deposit Age, Deposited, Current Value, Unrealized P&L, Copy Address
+- [x] Saved vaults stored inside encrypted `key_vault.encrypted` (`saved_vaults` top-level list), with Save/Delete buttons and cached snapshots so saved vaults render instantly on reopen
+- [x] Wallet selector in HL1 Vaults tab: raw address entry or account dropdown from Wallet tab; mode and selection persisted in encrypted vault config
+- [x] `src/venue_adapters/hyperliquid_adapter.py` — LP fee reading fixed: uses static `collect((uint256,address,uint128,uint128))` eth_call (selector `0xfc6f7865`) to return real uncollected fees from the Project X PositionManager; matches Project X UI tooltip
+- [x] `saved_pools.py` — Saved pools CRUD (public identifiers only, no private keys), stored in `saved_pools.json` next to vault
+- [x] HyperEVM ERC-20 balance support (USDC, WHYPE, UBTC), combined "Hyperliquid (HL1 & HyperEVM)" chain option, stablecoin currency conversion fix, balance dispatcher fix
+- [x] README.md, CLAUDE.md, .clinerules updated for v5.1
+- [x] py_compile passes for modified source files
+
+### Data Sources
+- **APR**: `vaultDetails.apr` (annualized decimal from Hyperliquid API, e.g. `-0.0052` → `-0.5%`)
+- **TVL**: `vaultDetails.maxDistributable`; fallback to sum of `followers[*].vaultEquity`
+- **Vault Age**: earliest timestamp in `vaultDetails.portfolio` history
+- **Deposit Age**: `vaultDetails.followerState.vaultEntryTime` for the queried user
 
 ### Known Limitations
-- Swap router address on HyperEVM not yet confirmed - `swap()` method raises `NotImplementedError`
-- Rebalance with cross-ratio swaps deferred until swap router is available
-- Writer requires key_manager_agent running with `--serve` on localhost:8842
-- Increase/decrease liquidity uses hardcoded WHYPE/UBTC token pair (generalization pending)
+- Swap router address on HyperEVM still not confirmed — `swap()` raises `NotImplementedError`; cross-ratio rebalances deferred
+- Writer requires `key_manager_agent` running with `--serve` on localhost:8842
+- Saved pools still live in a separate `saved_pools.json` (to be refactored into encrypted vault in a future release)
 
 ### Next Steps
-- [ ] Research HyperEVM swap router contract address
-- [ ] Test writer end-to-end with agent on testnet
+- [ ] Refactor saved pools storage from `saved_pools.json` into `key_vault.encrypted` (single-database goal)
+- [ ] Research/confirm HyperEVM swap router contract address
+- [ ] Test writer end-to-end with agent on mainnet
 - [ ] Build EXE with `python build_gui_v5.py`
 - [ ] Test EXE on clean Windows machine
 
@@ -164,39 +173,83 @@ key_manager/
 |-----------|--------|-------|
 | Crypto Engine | Working | AES-256-GCM + Argon2id (unchanged) |
 | Derivation Engine | Working | 7 chains (unchanged) |
-| Balance Engine | NEW v4.1 | EVM (6 chains), BTC, SOL, DASH, SUI |
-| Price Engine | NEW v4.1 | CoinGecko API, 60s cache |
-| GUI v4.1 Source | Working | Settings + inline balances + Go Online |
-| GUI EXE | Working | v4.1 build -> `coldstack.exe` (44.50 MB) |
+| Balance Engine | Working v4.1 | EVM (6+ chains), BTC, SOL, DASH, SUI, HyperEVM ERC-20, Hyperliquid L1 spot |
+| Price Engine | Working v4.1 | CoinGecko API, 60s cache |
+| Vault Tracker | Working v5.1 | Hyperliquid L1 vault positions; cached saved vaults |
+| LP Engine / Adapter | Working v5.1 | HyperEVM + L1 positions; fee reading via static `collect()` eth_call |
+| Hyperliquid Writer | Working v5.0 | Signs via agent on localhost:8842 |
+| GUI v5.1 Source | Working | Wallet / HL1 Vaults / LP Positions tabs |
+| GUI EXE | Needs rebuild | Run `python build_gui_v5.py` |
 | CLI (script mode) | Working | `python src/main.py` (CLI EXE deprecated) |
 | Headless Agent | Working | HTTP signing server on localhost:8842 |
 
 ---
-*Status report updated June 25, 2026. v4.2 released - Customizable RPC Endpoints + Standard/Advanced Mode.*
+*Status report updated July 8, 2026. v5.1 released - Hyperliquid Vaults polish + LP Fee Fix.*
 
-## v5.1 LP Fee Issue (Updated July 7, 2026)
-### Known Issues (v5.1 LP Fees)
-- **LP fee calculation still shows checkpointed values** ($0.04, 6.7e-07 UBTC) instead of real uncollected fees (~$49.83)
-- The `collect()` eth_call approach (selector `0x4f1c2879`) was added but the contract may not support this function selector
-- The feeGrowthGlobal delta approach was tried but produced ~100x overcount because feeGrowthOutside at tick boundaries is non-zero
-- **Confirmed from Project X UI**: Real uncollected fees for token 496329 are 0.3443 HYPE + 0.0000397 UBTC (~$49.83)
-- The `tokens_owed` values (0 and 67 raw) are stale checkpointed values from the last position touch
-- **Root cause**: Need to determine the correct `collect()` function signature for the Project X PositionManager contract, or find another way to read uncollected fees
-- Position value calculation (V3 liquidity math) works correctly (~$4,496)
-- Range slider works correctly (green marker, in range)
+## v5.1 LP Fee Issue (Resolved July 8, 2026)
 
-### Next Steps (v5.2)
-- [ ] Collection-based fee tracking — record fee income when user clicks "Collect Fees" instead of estimating from RPC
-- [ ] LP position range slider with position marker (green/red) — DONE in v5.1
-- [ ] Fees displayed in user's configured currency
-- [ ] Fee breakdown display (WHYPE amount + slider + UBTC amount)
+### Resolution
+- **Root cause identified**: The Project X PositionManager exposes the standard Uniswap V3 `collect((uint256,address,uint128,uint128))` function with selector `0xfc6f7865`.
+- A static `eth_call` to this function returns the exact uncollected fee amounts for a token ID, matching the Project X UI tooltip.
+- The previous `feeGrowthGlobal` delta approach overcounted ~100× because `feeGrowthOutside` at tick boundaries is non-zero.
+- The `PROJECT_X_FEE_ESTIMATION_ENABLED` flag and `fees_note` workaround are replaced by live fee values.
+
+### Verified Example
+- Token ID 496329 on the WHYPE/UBTC pool:
+  - Static `collect()` eth_call returned ~0.368 HYPE + ~0.000042 UBTC at the time of diagnosis.
+  - Project X UI tooltip showed ~0.3443 HYPE + ~0.0000397 UBTC (~$49.83).
+  - Values drift with price and accrued fees; the method is correct.
+
+### Files Changed
+- `src/venue_adapters/hyperliquid_adapter.py` — fee estimation now uses static `collect()` eth_call (selector `0xfc6f7865`)
+- `src/lp_engine.py` — `fees_note` field retained for backward compatibility but no longer populated by Hyperliquid adapter
+
+---
+
+## v5.1 Update (July 8, 2026)
+
+### Changes
+- **HL1 Vaults tab redesign**:
+  - Vault Name shown as card heading; Vault Address shown smaller.
+  - Metrics row: TVL, APR, Vault Age, Deposit Age.
+  - Removed "Leader" line.
+  - Content moved to top of tab (minimal empty space above header).
+- **Saved vaults**:
+  - Save/Delete buttons on each vault card.
+  - Full position snapshots stored in encrypted vault (`address_db["saved_vaults"]`).
+  - Saved vaults render instantly on reopen without requiring a network refresh.
+- **Wallet selector**:
+  - Two modes: "Address" (raw 0x entry) or "Account" (dropdown of Wallet-tab account names).
+  - Auto-resolves the selected account's first EVM/HYPE address.
+  - Last mode and selection persisted in encrypted vault config.
+- **APR / TVL / Age fixes**:
+  - APR from `vaultDetails.apr`.
+  - TVL from `maxDistributable` (fallback: sum of follower equities).
+  - Vault Age from earliest portfolio history timestamp.
+  - Deposit Age from user's `followerState.vaultEntryTime`.
+- **LP fee reading fixed**: static `collect()` eth_call on Project X PositionManager.
+
+### Files Changed
+- `src/vault_tracker.py` — added full-snapshot serialization, portfolio-history flattening, APR/TVL/deposit-age parsing
+- `src/gui_main_v5.py` — HL1 Vaults UI redesign, Save/Delete vault buttons, wallet selector, cached saved-vault rendering
+- `src/venue_adapters/hyperliquid_adapter.py` — fee estimation via static `collect()` eth_call
+- `README.md`, `STATUS.md`, `CLAUDE.md`, `.clinerules` — updated for v5.1
+
+### Security
+- Saved vault snapshots contain only public vault identifiers + cached read-only position data. No private keys.
+- All writes to `address_db` are followed by `KeyManager.save_encrypted_data()`.
+
+### Testing
+- Syntax checks pass for modified source files.
+- HL1 Vaults tab renders correctly with real names, TVL, APR, ages, and saved-vault buttons.
+- LP fee values from static `collect()` match Project X UI within expected drift.
+
+---
 
 ## v5.1 Update (July 7, 2026)
 
 ### Changes
 - **Project X fee estimation disabled**: The manual feeGrowthInside calculation from RPC tick storage was returning either $0.04 or more than the pool value — never the correct fees earned. Fee estimation is now disabled behind `PROJECT_X_FEE_ESTIMATION_ENABLED = False`. Helper functions (`_keccak256`, `_read_tick_fee_growth_outside`, `_compute_fee_growth_inside`) are retained for potential reuse with other venues. Collection-based fee tracking is planned for a future release.
-- **`fees_note` field added to LPPosition**: HyperEVM/Project X positions now carry `fees_note="Collect fees to report on fee income"`. The GUI displays this note (in yellow, bold) instead of a misleading fee number.
-- **Saved Pools feature added**: New `src/saved_pools.py` module stores public identifiers (wallet address, token ID, venue, pool address, pair) in `saved_pools.json` next to the vault. No private keys stored. "Save Pool" button on each HyperEVM LP card. Auto-loads saved pools on wallet scan (fast token-ID lookup, avoids expensive 6-minute scan). Deduplicates by `venue:position_id`.
 
 ### Files Changed
 - `src/lp_engine.py` — Added `fees_note: Optional[str] = None` field to `LPPosition`

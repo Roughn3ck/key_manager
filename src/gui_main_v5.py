@@ -38,7 +38,7 @@ if sys.platform == 'win32' and getattr(sys, 'frozen', False):
 
 import tkinter as tk
 import customtkinter as ctk
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import threading
 import time
 import json
@@ -2867,6 +2867,9 @@ class ColdStackGUI:
         self.api_keys = config.get("api_keys", {})
         if not isinstance(self.api_keys, dict):
             self.api_keys = {}
+        # v5.1: Vault tab selector state
+        self.vault_selector_mode = config.get("vault_selector_mode", "address")
+        self.vault_selected_account = config.get("vault_selected_account", "")
         # v4.2: Load RPC config from file and rebuild balance engine
         self.rpc_config = load_rpc_config(base_dir)
         self._rebuild_balance_engine()
@@ -2880,6 +2883,9 @@ class ColdStackGUI:
         cfg["schema_version"] = 2
         cfg["app_mode"] = self.app_mode
         cfg["api_keys"] = self.api_keys
+        # v5.1: Vault tab selector state
+        cfg["vault_selector_mode"] = self.vault_selector_mode
+        cfg["vault_selected_account"] = self.vault_selected_account
         self.key_manager.save_encrypted_data(self.current_password)
 
     def _rebuild_balance_engine(self):
@@ -4075,11 +4081,11 @@ class ColdStackGUI:
         card container — mirroring the LP tab pattern.
         """
         section = ctk.CTkFrame(parent, corner_radius=0)
-        section.pack(fill="x", side="bottom", pady=(1, 0))
+        section.pack(fill="both", expand=True, side="top", pady=(0, 0))
 
         # Section header
         header_frame = ctk.CTkFrame(section, fg_color="transparent")
-        header_frame.pack(fill="x", padx=10, pady=(8, 2))
+        header_frame.pack(fill="x", padx=10, pady=(2, 2))
 
         ctk.CTkLabel(
             header_frame,
@@ -4095,17 +4101,40 @@ class ColdStackGUI:
         vault_refresh_btn.pack(side="right")
         self._vault_widgets["refresh_btn"] = vault_refresh_btn
 
-        # Wallet address bar
+        # Wallet selector bar: Address or Account mode
         wallet_bar = ctk.CTkFrame(section, fg_color="transparent")
         wallet_bar.pack(fill="x", padx=10, pady=(2, 5))
 
-        ctk.CTkLabel(wallet_bar, text="Wallet:",
-                     font=ctk.CTkFont(size=12)).pack(side="left", padx=(0, 5))
+        # Mode selector dropdown
+        selector_menu = ctk.CTkOptionMenu(
+            wallet_bar, values=["Address", "Account"], width=90,
+            font=ctk.CTkFont(size=11),
+            command=self._vault_on_selector_change,
+        )
+        selector_menu.set(self.vault_selector_mode if hasattr(self, 'vault_selector_mode') else "Address")
+        selector_menu.pack(side="left", padx=(0, 5))
+        self._vault_widgets["selector_menu"] = selector_menu
 
+        # Address entry (shown when "Address" mode is selected)
         vault_addr_entry = ctk.CTkEntry(wallet_bar, width=320,
                                         font=ctk.CTkFont(size=11))
-        vault_addr_entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
         self._vault_widgets["address_entry"] = vault_addr_entry
+
+        # Account dropdown (shown when "Account" mode is selected)
+        account_names = []
+        if self.key_manager:
+            account_names = sorted(
+                self.key_manager.address_db.get("accounts", {}).keys()
+            )
+        account_menu = ctk.CTkOptionMenu(
+            wallet_bar, values=account_names if account_names else ["(no accounts)"],
+            width=200, font=ctk.CTkFont(size=11),
+            command=self._vault_on_account_change,
+        )
+        self._vault_widgets["account_menu"] = account_menu
+
+        # Pack the appropriate widget based on current mode
+        self._vault_apply_selector_mode()
 
         # Offline banner
         self._vault_widgets["offline_banner"] = ctk.CTkLabel(
@@ -4117,8 +4146,8 @@ class ColdStackGUI:
             self._vault_widgets["offline_banner"].pack(fill="x", padx=10, pady=(0, 5))
 
         # Scrollable card container (fixed height so it doesn't eat the whole tab)
-        vault_scroll = ctk.CTkScrollableFrame(section, height=220)
-        vault_scroll.pack(fill="x", padx=10, pady=(0, 10))
+        vault_scroll = ctk.CTkScrollableFrame(section)
+        vault_scroll.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self._vault_widgets["scroll"] = vault_scroll
 
         # Status label
@@ -4149,21 +4178,148 @@ class ColdStackGUI:
             except Exception:
                 pass
 
-    def _vault_prefill_address(self, account_name: str):
-        """Pre-fill the vault section address entry with the account's EVM/HYPE address."""
-        if not self._vault_widgets or not self.key_manager:
-            return
+    def _vault_apply_selector_mode(self):
+        """Show/hide address entry vs account menu based on selector mode."""
+        selector = self._vault_widgets.get("selector_menu")
         entry = self._vault_widgets.get("address_entry")
-        if not entry:
+        account_menu = self._vault_widgets.get("account_menu")
+        if not selector or not entry:
             return
+        mode = selector.get()
+        if mode == "Account":
+            entry.pack_forget()
+            if account_menu:
+                account_menu.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        else:
+            if account_menu:
+                account_menu.pack_forget()
+            entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+    def _vault_on_selector_change(self, choice: str):
+        """Handle Address/Account mode switch."""
+        self.vault_selector_mode = choice
+        self._vault_apply_selector_mode()
+        # Save config
+        if self.key_manager and self.current_password:
+            cfg = self.key_manager.address_db.setdefault("config", {})
+            cfg["vault_selector_mode"] = choice
+            self.key_manager.save_encrypted_data(self.current_password)
+        # If Account mode, try to resolve and render
+        if choice == "Account":
+            account_menu = self._vault_widgets.get("account_menu")
+            if account_menu:
+                acct = account_menu.get()
+                if acct and acct != "(no accounts)":
+                    self._vault_on_account_change(acct)
+        else:
+            # Address mode: render saved vaults for current address
+            entry = self._vault_widgets.get("address_entry")
+            if entry:
+                addr = entry.get().strip()
+                if addr:
+                    self._vault_render_saved_only(addr)
+
+    def _vault_on_account_change(self, choice: str):
+        """Handle account selection from dropdown."""
+        if not choice or choice == "(no accounts)":
+            return
+        self.vault_selected_account = choice
+        addr = self._vault_resolve_account_address(choice)
+        entry = self._vault_widgets.get("address_entry")
+        if entry and addr:
+            entry.delete(0, "end")
+            entry.insert(0, addr)
+            # Save config
+            if self.key_manager and self.current_password:
+                cfg = self.key_manager.address_db.setdefault("config", {})
+                cfg["vault_selected_account"] = choice
+                self.key_manager.save_encrypted_data(self.current_password)
+            # Render saved vaults
+            self._vault_render_saved_only(addr)
+
+    def _vault_resolve_account_address(self, account_name: str) -> str:
+        """Resolve an account name to its first EVM/HYPE address."""
+        if not self.key_manager:
+            return ""
         accounts_data = self.key_manager.address_db.get("accounts", {})
         addresses = accounts_data.get(account_name, {}).get("addresses", [])
         for addr in addresses:
             coin = addr.get("coin", "").lower()
             chain = addr.get("chain", "").lower()
             if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
+                return addr.get("address", "")
+        return ""
+
+    def _vault_restore_state(self):
+        """Restore vault tab state from config after login."""
+        if not self._vault_widgets:
+            return
+        selector = self._vault_widgets.get("selector_menu")
+        if not selector:
+            return
+        mode = getattr(self, 'vault_selector_mode', 'address')
+        selector.set(mode)
+        self._vault_apply_selector_mode()
+        if mode == "Account":
+            account_menu = self._vault_widgets.get("account_menu")
+            if account_menu:
+                acct = getattr(self, 'vault_selected_account', '')
+                if acct:
+                    # Refresh account list
+                    account_names = []
+                    if self.key_manager:
+                        account_names = sorted(
+                            self.key_manager.address_db.get("accounts", {}).keys()
+                        )
+                    if account_names:
+                        account_menu.configure(values=account_names)
+                    if acct in account_names:
+                        account_menu.set(acct)
+                        self._vault_on_account_change(acct)
+        else:
+            # Address mode: render saved vaults if address entry has content
+            entry = self._vault_widgets.get("address_entry")
+            if entry:
+                addr = entry.get().strip()
+                if addr:
+                    self._vault_render_saved_only(addr)
+
+    def _vault_prefill_address(self, account_name: str):
+        """Pre-fill the vault section address entry with the account's EVM/HYPE address.
+
+        Also renders any saved vaults for that address from the encrypted vault
+        so the user sees cached data immediately on tab load.
+        """
+        if not self._vault_widgets or not self.key_manager:
+            return
+        # Refresh account dropdown with current accounts
+        account_menu = self._vault_widgets.get("account_menu")
+        if account_menu:
+            account_names = sorted(
+                self.key_manager.address_db.get("accounts", {}).keys()
+            )
+            if account_names:
+                account_menu.configure(values=account_names)
+        # Restore saved selector state
+        self._vault_restore_state()
+        # If restore didn't resolve an address, try the selected account
+        entry = self._vault_widgets.get("address_entry")
+        if not entry:
+            return
+        if entry.get().strip():
+            return  # Already has an address from restore
+        accounts_data = self.key_manager.address_db.get("accounts", {})
+        addresses = accounts_data.get(account_name, {}).get("addresses", [])
+        for addr in addresses:
+            coin = addr.get("coin", "").lower()
+            chain = addr.get("chain", "").lower()
+            if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
+                wallet_addr = addr.get("address", "")
                 entry.delete(0, "end")
-                entry.insert(0, addr.get("address", ""))
+                entry.insert(0, wallet_addr)
+                # Render saved vaults from cache immediately
+                if wallet_addr:
+                    self._vault_render_saved_only(wallet_addr)
                 return
 
     def _vault_do_fetch(self):
@@ -4213,6 +4369,21 @@ class ColdStackGUI:
 
         # Filter out the "error" sentinel position (from failed userVaultEquities)
         real_positions = [p for p in positions if not (p.vault_address == "" and p.error)]
+
+        # v5.1: Merge in saved vaults that weren't returned by the API
+        if self.key_manager:
+            saved_vaults = self.key_manager.address_db.get("saved_vaults", [])
+            if isinstance(saved_vaults, list):
+                api_vault_addrs = {p.vault_address.lower() for p in real_positions}
+                for entry in saved_vaults:
+                    if not isinstance(entry, dict):
+                        continue
+                    if entry.get("wallet_address", "").lower() != address.lower():
+                        continue
+                    va = entry.get("vault_address", "")
+                    if va and va.lower() not in api_vault_addrs:
+                        saved_pos = VaultPosition.from_saved_dict(entry)
+                        real_positions.append(saved_pos)
 
         if not real_positions:
             # Check if we got an error sentinel
@@ -4271,18 +4442,48 @@ class ColdStackGUI:
         info = ctk.CTkFrame(card, fg_color="transparent")
         info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
 
-        # Header: vault name + venue
-        header = f"\U0001F3DB {position.vault_name}  \u00b7  {position.venue}"
+        # Heading: vault name (large bold font - same as old address font)
+        header = f"\U0001F3DB {position.vault_name}"
         ctk.CTkLabel(
             info, text=header,
             font=ctk.CTkFont(size=14, weight="bold"),
         ).pack(anchor="w")
 
-        # Vault address (if different from name)
-        if position.vault_address and position.vault_address != position.vault_name:
+        # Sub-heading: vault address (smaller font - same as old Deposited font)
+        if position.vault_address:
             ctk.CTkLabel(
-                info, text=f"Address: {position.vault_address}",
+                info, text=position.vault_address,
                 font=ctk.CTkFont(size=10), text_color="gray50",
+            ).pack(anchor="w", pady=(2, 0))
+
+        # Metrics line: APR · TVL · Vault age · Deposit age
+        metric_parts = []
+        if position.apr is not None:
+            metric_parts.append(f"APR: {position.apr:.1f}%")
+        else:
+            metric_parts.append("APR: see Hyperliquid")
+        if position.tvl_usd is not None:
+            metric_parts.append(f"TVL: ${position.tvl_usd:,.2f}")
+        # Vault age: from first_deposit_time (earliest portfolio timestamp)
+        if position.first_deposit_time is not None:
+            delta = datetime.now(timezone.utc) - position.first_deposit_time
+            days = delta.days
+            hours = delta.seconds // 3600
+            metric_parts.append(f"Vault age: {days}d {hours}h")
+        else:
+            metric_parts.append("Vault age: unknown")
+        # Deposit age: from user_deposit_time (user's personal vaultEntryTime)
+        if position.user_deposit_time is not None:
+            delta = datetime.now(timezone.utc) - position.user_deposit_time
+            days = delta.days
+            hours = delta.seconds // 3600
+            metric_parts.append(f"Deposit age: {days}d {hours}h")
+        else:
+            metric_parts.append("Deposit age: unknown")
+        if metric_parts:
+            ctk.CTkLabel(
+                info, text="  \u00b7  ".join(metric_parts),
+                font=ctk.CTkFont(size=11), text_color="gray70",
             ).pack(anchor="w", pady=(2, 0))
 
         # Deposited + Current value
@@ -4297,7 +4498,7 @@ class ColdStackGUI:
                 font=ctk.CTkFont(size=11), text_color="gray70",
             ).pack(anchor="w", pady=(2, 0))
 
-        # P&L + APR
+        # P&L (APR moved to metrics line above)
         pnl_parts = []
         if position.unrealized_pnl_usd is not None:
             sign = "+" if position.unrealized_pnl_usd >= 0 else ""
@@ -4305,10 +4506,6 @@ class ColdStackGUI:
         if position.unrealized_pnl_pct is not None:
             sign = "+" if position.unrealized_pnl_pct >= 0 else ""
             pnl_parts.append(f"({sign}{position.unrealized_pnl_pct:.2f}%)")
-        if position.apr is not None:
-            pnl_parts.append(f"APR: {position.apr:.1f}%")
-        elif position.performance_history:
-            pnl_parts.append("APR: see Hyperliquid")
         if pnl_parts:
             ctk.CTkLabel(
                 info, text="  \u00b7  ".join(pnl_parts),
@@ -4327,19 +4524,16 @@ class ColdStackGUI:
                 font=ctk.CTkFont(size=11), text_color="gray70",
             ).pack(anchor="w", pady=(2, 0))
 
-        # Vault leader (if available)
-        if position.vault_leader:
-            ctk.CTkLabel(
-                info, text=f"Leader: {position.vault_leader}",
-                font=ctk.CTkFont(size=10), text_color="gray60",
-            ).pack(anchor="w", pady=(2, 0))
-
         # Error note
         if position.error:
             ctk.CTkLabel(
                 info, text=f"Note: {position.error}",
                 font=ctk.CTkFont(size=10), text_color="#ff922b",
             ).pack(anchor="w", pady=(2, 0))
+
+        # Debug: log raw_data if vault name fell back to address-based placeholder
+        if position.vault_name.startswith("Vault 0x") or position.vault_name == "Unknown Vault":
+            print(f"[vault] Name fallback for {position.vault_address}: raw_data={position.raw_data}")
 
         # Button frame
         button_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -4351,6 +4545,230 @@ class ColdStackGUI:
                 font=ctk.CTkFont(size=10),
                 command=lambda addr=position.vault_address: self.copy_to_clipboard(addr),
             ).pack(pady=2)
+
+        # v5.1: Save Vault / Delete Saved button
+        wallet_addr = ""
+        entry = self._vault_widgets.get("address_entry")
+        if entry:
+            wallet_addr = entry.get().strip()
+
+        is_saved = self._vault_is_saved(wallet_addr, position.vault_address)
+
+        # Detect if this is a cached/saved-only position (no live data from API)
+        is_cached = (not position.deposited_usd and not position.current_value_usd and is_saved)
+
+        # Show "Saved (cached)" badge for saved-only vaults (no live data)
+        if is_cached:
+            ctk.CTkLabel(
+                info, text="\U0001F516 Saved (cached)",
+                font=ctk.CTkFont(size=9), text_color="#0d6efd",
+            ).pack(anchor="w", pady=(2, 0))
+
+        if is_saved:
+            ctk.CTkButton(
+                button_frame, text="Delete Saved", width=100, height=26,
+                font=ctk.CTkFont(size=10),
+                fg_color=("#dc3545", "#c82333"),
+                hover_color=("#c82333", "#a71d2a"),
+                command=lambda pos=position: self._vault_delete_saved(pos),
+            ).pack(pady=2)
+            # Show Refresh button for cached (saved-only) vaults
+            if is_cached:
+                ctk.CTkButton(
+                    button_frame, text="Refresh", width=100, height=26,
+                    font=ctk.CTkFont(size=10),
+                    fg_color=("#17a2b8", "#138496"),
+                    hover_color=("#138496", "#117a8b"),
+                    command=lambda pos=position: self._vault_refresh_saved(pos),
+                ).pack(pady=2)
+        else:
+            ctk.CTkButton(
+                button_frame, text="Save Vault", width=100, height=26,
+                font=ctk.CTkFont(size=10),
+                fg_color=("#0d6efd", "#0b5ed7"),
+                hover_color=("#0b5ed7", "#0a58ca"),
+                command=lambda pos=position: self._vault_save_vault(pos),
+            ).pack(pady=2)
+
+    def _vault_is_saved(self, wallet_address: str, vault_address: str) -> bool:
+        """Check if a vault is saved in the encrypted vault."""
+        if not self.key_manager:
+            return False
+        saved = self.key_manager.address_db.get("saved_vaults", [])
+        if not isinstance(saved, list):
+            return False
+        wl = wallet_address.lower()
+        vl = vault_address.lower()
+        return any(
+            isinstance(e, dict)
+            and e.get("wallet_address", "").lower() == wl
+            and e.get("vault_address", "").lower() == vl
+            for e in saved
+        )
+
+    def _vault_save_vault(self, position: VaultPosition):
+        """Save a vault to the encrypted vault's saved_vaults list."""
+        if not self.key_manager or not self.current_password:
+            self.show_notification("Vault not unlocked", error=True)
+            return
+        entry = self._vault_widgets.get("address_entry")
+        wallet_address = entry.get().strip() if entry else ""
+        if not wallet_address:
+            self.show_notification("Enter a wallet address first", error=True)
+            return
+        # Ensure wallet_address is set on the position
+        if not position.wallet_address:
+            position.wallet_address = wallet_address
+        # Check for duplicate
+        if self._vault_is_saved(wallet_address, position.vault_address):
+            self.show_notification("Vault already saved")
+            return
+        saved_list = self.key_manager.address_db.setdefault("saved_vaults", [])
+        if not isinstance(saved_list, list):
+            saved_list = []
+            self.key_manager.address_db["saved_vaults"] = saved_list
+        saved_list.append(position.to_saved_dict())
+        ok = self.key_manager.save_encrypted_data(self.current_password)
+        if ok:
+            self.show_notification(f"Vault saved: {position.vault_name}")
+            # Re-render to show Delete Saved button
+            self._vault_do_fetch()
+        else:
+            self.show_notification("Failed to save vault", error=True)
+
+    def _vault_delete_saved(self, position: VaultPosition):
+        """Remove a vault from the encrypted vault's saved_vaults list."""
+        if not self.key_manager or not self.current_password:
+            self.show_notification("Vault not unlocked", error=True)
+            return
+        entry = self._vault_widgets.get("address_entry")
+        wallet_address = entry.get().strip() if entry else ""
+        if not wallet_address:
+            self.show_notification("Enter a wallet address first", error=True)
+            return
+        saved_list = self.key_manager.address_db.get("saved_vaults", [])
+        if not isinstance(saved_list, list):
+            self.show_notification("No saved vaults to delete", error=True)
+            return
+        wl = wallet_address.lower()
+        vl = position.vault_address.lower()
+        original_len = len(saved_list)
+        self.key_manager.address_db["saved_vaults"] = [
+            e for e in saved_list
+            if not (
+                isinstance(e, dict)
+                and e.get("wallet_address", "").lower() == wl
+                and e.get("vault_address", "").lower() == vl
+            )
+        ]
+        if len(self.key_manager.address_db["saved_vaults"]) == original_len:
+            self.show_notification("Vault not found in saved list", error=True)
+            return
+        ok = self.key_manager.save_encrypted_data(self.current_password)
+        if ok:
+            self.show_notification(f"Deleted saved vault: {position.vault_name}")
+            self._vault_do_fetch()
+        else:
+            self.show_notification("Failed to delete saved vault", error=True)
+
+    def _vault_refresh_saved(self, position: VaultPosition):
+        """Refresh a saved vault's data by fetching live data from the API."""
+        if not self.vault_tracker or not self.online_mode:
+            self.show_notification("Offline - enable Online Mode in Settings", error=True)
+            return
+        if not self.key_manager or not self.current_password:
+            self.show_notification("Vault not unlocked", error=True)
+            return
+        entry = self._vault_widgets.get("address_entry")
+        wallet_address = entry.get().strip() if entry else ""
+        if not wallet_address:
+            self.show_notification("Enter a wallet address first", error=True)
+            return
+        vault_address = position.vault_address
+        if not vault_address:
+            self.show_notification("No vault address to refresh", error=True)
+            return
+
+        status = self._vault_widgets.get("status_label")
+        if status:
+            status.configure(text=f"Refreshing {position.vault_name}...")
+
+        def _refresh_thread():
+            try:
+                fresh_pos = self.vault_tracker.fetch_single_position(
+                    wallet_address, vault_address
+                )
+                if fresh_pos and not fresh_pos.error:
+                    # Update the saved snapshot in address_db
+                    saved_list = self.key_manager.address_db.get("saved_vaults", [])
+                    if isinstance(saved_list, list):
+                        wl = wallet_address.lower()
+                        vl = vault_address.lower()
+                        for i, e in enumerate(saved_list):
+                            if (
+                                isinstance(e, dict)
+                                and e.get("wallet_address", "").lower() == wl
+                                and e.get("vault_address", "").lower() == vl
+                            ):
+                                # Update with fresh snapshot
+                                fresh_pos.wallet_address = wallet_address
+                                saved_list[i] = fresh_pos.to_saved_dict()
+                                break
+                        self.key_manager.save_encrypted_data(self.current_password)
+                        self.root.after(0, lambda: self.show_notification(
+                            f"Refreshed: {fresh_pos.vault_name}"))
+                    # Re-render
+                    self.root.after(0, self._vault_do_fetch)
+                else:
+                    error_msg = fresh_pos.error if fresh_pos else "No data returned"
+                    self.root.after(0, lambda: self.show_notification(
+                        f"Refresh failed: {error_msg}", error=True))
+            except Exception as e:
+                self.root.after(0, lambda: self.show_notification(
+                    f"Refresh error: {e}", error=True))
+
+        threading.Thread(target=_refresh_thread, daemon=True).start()
+
+    def _vault_render_saved_only(self, wallet_address: str):
+        """Render saved vaults for a wallet from the encrypted vault (no API call).
+
+        Called on tab load / wallet selection to show cached vaults immediately.
+        """
+        scroll = self._vault_widgets.get("scroll")
+        if not scroll or not self.key_manager:
+            return
+        # Clear existing cards
+        for widget in scroll.winfo_children():
+            widget.destroy()
+
+        saved_vaults = self.key_manager.address_db.get("saved_vaults", [])
+        if not isinstance(saved_vaults, list):
+            return
+
+        wl = wallet_address.lower()
+        saved_positions = []
+        for entry in saved_vaults:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("wallet_address", "").lower() != wl:
+                continue
+            va = entry.get("vault_address", "")
+            if va:
+                saved_pos = VaultPosition.from_saved_dict(entry)
+                saved_positions.append(saved_pos)
+
+        if saved_positions:
+            for pos in saved_positions:
+                self._vault_render_card(pos)
+            status = self._vault_widgets.get("status_label")
+            if status:
+                status.configure(text=f"Showing {len(saved_positions)} saved vault(s) (cached)")
+        else:
+            ctk.CTkLabel(
+                scroll,
+                text="No saved vaults. Enter a wallet address and click Refresh Vaults to fetch.",
+                font=ctk.CTkFont(size=13), text_color="gray60",
+            ).pack(pady=20)
 
     # --- End v5.1 vault section methods ---
 

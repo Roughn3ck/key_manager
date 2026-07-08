@@ -47,6 +47,8 @@ SELECTOR_TOKEN1 = "0xd21220a7"
 SELECTOR_DECIMALS = "0x313ce567"
 SELECTOR_SYMBOL = "0x95d89b41"
 SELECTOR_GET_POOL = "0x1698ee82"
+# collect() is used as a read-only eth_call to get exact uncollected fees.
+SELECTOR_COLLECT = "0xfc6f7865"  # collect((uint256,address,uint128,uint128))
 
 TOKEN_DECIMALS = {
     WHYPE.lower(): 18,
@@ -463,8 +465,64 @@ def _compute_fee_growth_inside(
     return (fg_inside0, fg_inside1)
 
 
+def _estimate_uncollected_fees(
+    token_id: int, wallet_address: str, decimals0: int, decimals1: int
+) -> Tuple[float, float]:
+    """Estimate uncollected fees via a read-only collect() eth_call.
+
+    The Project X PositionManager's collect() function can be called via
+    eth_call (without sending a transaction) to read the exact uncollected
+    fee amounts. This returns the real fees, unlike the feeGrowthGlobal
+    delta which overcounts by ~100x on this fork.
+
+    Args:
+        token_id: NFT token ID of the position.
+        wallet_address: The position owner's wallet address (used as `from`).
+        decimals0: Decimals of token0.
+        decimals1: Decimals of token1.
+
+    Returns:
+        (amount0_human, amount1_human) or (0.0, 0.0) on failure.
+    """
+    try:
+        # ABI encode collect((uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max))
+        # uint128 max = 0xffffffffffffffffffffffffffffffff
+        uint128_max = (1 << 128) - 1
+        data = (
+            SELECTOR_COLLECT
+            + _pad_int_to_64(token_id)  # tokenId (uint256)
+            + _pad_address(wallet_address)  # recipient (address)
+            + _pad_int_to_64(uint128_max)  # amount0Max (uint128 -> padded to 32 bytes)
+            + _pad_int_to_64(uint128_max)  # amount1Max (uint128 -> padded to 32 bytes)
+        )
+        result = _evm_rpc_call(
+            "eth_call",
+            [{"to": POSITION_MANAGER, "data": data, "from": wallet_address}, "latest"],
+        )
+        if not result or not isinstance(result, str) or len(result) < 2 + 64:
+            print(f"[fees] collect() eth_call returned no data for token {token_id}")
+            return (0.0, 0.0)
+
+        body = result[2:]
+        # Return is (uint128 amount0, uint128 amount1) packed in two 32-byte words
+        amount0_raw = int(body[0:64], 16)
+        amount1_raw = int(body[64:128], 16)
+
+        amount0_human = amount0_raw / (10 ** decimals0)
+        amount1_human = amount1_raw / (10 ** decimals1)
+
+        print(f"[fees] token {token_id}: raw0={amount0_raw} raw1={amount1_raw} "
+              f"human0={amount0_human:.8f} human1={amount1_human:.8f}")
+
+        return (amount0_human, amount1_human)
+    except Exception as e:
+        print(f"[fees] collect() eth_call failed for token {token_id}: {e}")
+        return (0.0, 0.0)
+
+
 def _decode_positions_response(
-    lp_data: str, token_id: int, price_engine: Optional[PriceEngine]
+    lp_data: str, token_id: int, price_engine: Optional[PriceEngine],
+    wallet_address: str = ""
 ) -> Optional[LPPosition]:
     """Decode a positions(uint256) return into an LPPosition with pool metadata."""
     if not lp_data or not isinstance(lp_data, str) or len(lp_data) < 2 + 32 * 13:
@@ -510,70 +568,25 @@ def _decode_positions_response(
     owed0_h = tokens_owed0 / (10 ** decimals0)
     owed1_h = tokens_owed1 / (10 ** decimals1)
 
-    # v5.1: DISABLED — Manual feeGrowthInside calculation from RPC tick storage.
-    # This process wasn't functioning correctly — it was returning either $0.04
-    # or more than the pool value. Collection-based fee tracking is planned for a
-    # future release. For now, fees_earned comes only from the checkpointed
-    # tokens_owed0/1 values read directly from positions(tokenId).
-    #
-    # The helper functions (_keccak256, _read_tick_fee_growth_outside,
-    # _compute_fee_growth_inside) are retained behind PROJECT_X_FEE_ESTIMATION_ENABLED
-    # for potential reuse with other venues.
-    if PROJECT_X_FEE_ESTIMATION_ENABLED and (
-        liquidity > 0
-        and pool_address
-        and current_tick is not None
-        and fee_growth_inside0_last_x128 is not None
-        and fee_growth_inside1_last_x128 is not None
-    ):
-        try:
-            fg_out_lower0, fg_out_lower1 = _read_tick_fee_growth_outside(
-                pool_address, tick_lower
-            )
-            fg_out_upper0, fg_out_upper1 = _read_tick_fee_growth_outside(
-                pool_address, tick_upper
-            )
-
-            # Fallback: if all outside values are zero, storage reads failed
-            # or ticks are uninitialized. Keep checkpointed tokens_owed values.
-            if fg_out_lower0 or fg_out_lower1 or fg_out_upper0 or fg_out_upper1:
-                fg_inside0, fg_inside1 = _compute_fee_growth_inside(
-                    current_tick,
-                    tick_lower,
-                    tick_upper,
-                    fee_growth_global0,
-                    fee_growth_global1,
-                    fg_out_lower0,
-                    fg_out_lower1,
-                    fg_out_upper0,
-                    fg_out_upper1,
-                )
-
-                delta0 = (fg_inside0 - fee_growth_inside0_last_x128) & ((1 << 256) - 1)
-                delta1 = (fg_inside1 - fee_growth_inside1_last_x128) & ((1 << 256) - 1)
-
-                # Only add positive deltas (skip wraparound artifacts).
-                if 0 < delta0 < (1 << 255):
-                    uncollected0 = (liquidity * delta0) // (2 ** 128)
-                    owed0_h += uncollected0 / (10 ** decimals0)
-                if 0 < delta1 < (1 << 255):
-                    uncollected1 = (liquidity * delta1) // (2 ** 128)
-                    owed1_h += uncollected1 / (10 ** decimals1)
-        except Exception:
-            pass
+    # v5.1: Estimate real uncollected fees via collect() eth_call (read-only).
+    # The Project X PositionManager's collect() function returns exact uncollected
+    # fee amounts when called via eth_call with the wallet address as `from`.
+    # This replaces the broken feeGrowthGlobal delta which overcounted by ~100x.
+    fees_note = "Collect fees to report on fee income"
+    if wallet_address:
+        real_fee0, real_fee1 = _estimate_uncollected_fees(
+            token_id, wallet_address, decimals0, decimals1
+        )
+        if real_fee0 > 0 or real_fee1 > 0:
+            owed0_h = real_fee0
+            owed1_h = real_fee1
+            fees_note = None  # We have real fees, no need for the note
+        # Fallback: if collect() returns 0, keep checkpointed tokens_owed values
 
     fees_earned = {symbol0: owed0_h, symbol1: owed1_h}
     fees_earned_usd = (
         _usd_value(owed0_h, symbol0, price_engine) or 0.0
     ) + (_usd_value(owed1_h, symbol1, price_engine) or 0.0)
-
-    # v5.1: Mark HyperEVM positions with a fee note so the GUI can display
-    # "Collect fees to report on fee income" instead of a misleading number.
-    fees_note = (
-        "Collect fees to report on fee income"
-        if not PROJECT_X_FEE_ESTIMATION_ENABLED
-        else None
-    )
 
     # v5.1: Compute real position value using V3 liquidity math
     position_value_usd = fees_earned_usd
@@ -781,7 +794,7 @@ class HyperliquidAdapter(VenueAdapter):
                 except (ValueError, IndexError):
                     continue
                 if owner == wallet_address:
-                    pos = self.fetch_evm_position_by_token_id(tid, price_engine)
+                    pos = self.fetch_evm_position_by_token_id(tid, price_engine, wallet_address)
                     if pos and not pos.error:
                         positions.append(pos)
 
@@ -860,14 +873,15 @@ class HyperliquidAdapter(VenueAdapter):
                     owned_ids.append(token_id)
 
         for token_id in owned_ids:
-            pos = self.fetch_evm_position_by_token_id(token_id, price_engine)
+            pos = self.fetch_evm_position_by_token_id(token_id, price_engine, wallet_address)
             if pos and not pos.error:
                 positions.append(pos)
 
         return positions
 
     def fetch_evm_position_by_token_id(
-        self, token_id: int, price_engine: Optional[PriceEngine] = None
+        self, token_id: int, price_engine: Optional[PriceEngine] = None,
+        wallet_address: str = ""
     ) -> LPPosition:
         """Fetch and decode a specific LP position by NFT token ID."""
         data = SELECTOR_POSITIONS + _pad_int_to_64(token_id)
@@ -888,7 +902,7 @@ class HyperliquidAdapter(VenueAdapter):
                 chain="HyperEVM",
                 error=f"positions({token_id}) call returned no data.",
             )
-        pos = _decode_positions_response(result, token_id, price_engine)
+        pos = _decode_positions_response(result, token_id, price_engine, wallet_address)
         if pos is None:
             return LPPosition(
                 position_id=f"hyperevm:{token_id}",
@@ -939,7 +953,7 @@ class HyperliquidAdapter(VenueAdapter):
         # Try NFT token id first (numeric)
         try:
             numeric_id = int(address_or_id)
-            return self.fetch_evm_position_by_token_id(numeric_id, price_engine)
+            return self.fetch_evm_position_by_token_id(numeric_id, price_engine, "")
         except (ValueError, TypeError):
             pass
 

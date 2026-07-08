@@ -44,6 +44,7 @@ class VaultPosition:
     position_id: str  # e.g. "hyperliquid:<vault_address>"
     vault_address: str  # 0x... vault contract
     vault_name: str  # human-readable name
+    wallet_address: Optional[str] = None  # the wallet that holds this position
     chain: str = "Hyperliquid"
     venue: str = "Hyperliquid Vault"
 
@@ -63,6 +64,11 @@ class VaultPosition:
     apy: Optional[float] = None  # annual percentage yield, if computable
     performance_history: List[Dict] = field(default_factory=list)
 
+    # v5.1: TVL + first deposit time (for card display)
+    tvl_usd: Optional[float] = None  # total value locked in the vault
+    first_deposit_time: Optional[datetime] = None  # vault's earliest performance data point (Vault age)
+    user_deposit_time: Optional[datetime] = None  # user's personal deposit timestamp (Deposit age)
+
     # Deposit / withdrawal summary (v5.1: summary only)
     deposit_count: int = 0
     withdrawal_count: int = 0
@@ -79,6 +85,79 @@ class VaultPosition:
     def __post_init__(self) -> None:
         if not self.last_updated:
             self.last_updated = datetime.now(timezone.utc).isoformat()
+
+    def to_saved_dict(self) -> dict:
+        """Serialize full vault snapshot for persistent storage.
+
+        Stores all public data needed to render a card without a network call.
+        The caller must re-encrypt the vault via KeyManager.save_encrypted_data().
+        """
+        return {
+            "wallet_address": self.wallet_address or "",
+            "vault_address": self.vault_address,
+            "vault_name": self.vault_name,
+            "venue": self.venue,
+            "shares": self.shares,
+            "share_price_usd": self.share_price_usd,
+            "deposited_usd": self.deposited_usd,
+            "current_value_usd": self.current_value_usd,
+            "unrealized_pnl_usd": self.unrealized_pnl_usd,
+            "unrealized_pnl_pct": self.unrealized_pnl_pct,
+            "apr": self.apr,
+            "tvl_usd": self.tvl_usd,
+            "first_deposit_time": self.first_deposit_time.isoformat() if self.first_deposit_time else None,
+            "user_deposit_time": self.user_deposit_time.isoformat() if self.user_deposit_time else None,
+            "performance_history": self.performance_history,
+            "date_saved": datetime.now(timezone.utc).isoformat(),
+        }
+
+    @classmethod
+    def from_saved_dict(cls, data: dict) -> "VaultPosition":
+        """Rehydrate a full VaultPosition from a saved snapshot dict.
+
+        Restores all cached fields so the card can render without a network call.
+        """
+        # Parse first_deposit_time from ISO string
+        fdt_str = data.get("first_deposit_time")
+        fdt = None
+        if fdt_str:
+            try:
+                fdt = datetime.fromisoformat(fdt_str)
+            except (ValueError, TypeError):
+                pass
+
+        # Parse user_deposit_time from ISO string
+        udt_str = data.get("user_deposit_time")
+        udt = None
+        if udt_str:
+            try:
+                udt = datetime.fromisoformat(udt_str)
+            except (ValueError, TypeError):
+                pass
+
+        # Parse performance_history (may be absent in older saved entries)
+        perf_hist = data.get("performance_history", [])
+        if not isinstance(perf_hist, list):
+            perf_hist = []
+
+        return cls(
+            position_id=f"hyperliquid:{data.get('vault_address', '')}",
+            vault_address=data.get("vault_address", ""),
+            vault_name=data.get("vault_name", "Unknown Vault"),
+            venue=data.get("venue", "Hyperliquid Vault"),
+            wallet_address=data.get("wallet_address", ""),
+            shares=data.get("shares"),
+            share_price_usd=data.get("share_price_usd"),
+            deposited_usd=data.get("deposited_usd"),
+            current_value_usd=data.get("current_value_usd"),
+            unrealized_pnl_usd=data.get("unrealized_pnl_usd"),
+            unrealized_pnl_pct=data.get("unrealized_pnl_pct"),
+            apr=data.get("apr"),
+            tvl_usd=data.get("tvl_usd"),
+            first_deposit_time=fdt,
+            user_deposit_time=udt,
+            performance_history=perf_hist,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -268,14 +347,18 @@ class HyperliquidVaultTracker:
         if not vault_address:
             vault_address = fallback_vault_addr or wallet
 
-        source = equity if equity else details
+        # Name: prefer vaultDetails (has "name" field), then equity, then fallback
+        vault_name = self._get_str(details, ["name", "vaultName"], default=None)
+        if not vault_name:
+            vault_name = self._get_str(equity, ["name", "vaultName"], default=None)
+        if not vault_name:
+            vault_name = f"Vault {vault_address[:10]}..."
 
         pos = VaultPosition(
             position_id=f"hyperliquid:{vault_address}",
             vault_address=vault_address,
-            vault_name=self._get_str(
-                source, ["vaultName", "name"], default=vault_address
-            ),
+            vault_name=vault_name,
+            wallet_address=wallet,
             shares=self._get_float(equity, ["shares", "shareBalance"], default=None),
             deposited_usd=self._get_float(
                 equity, ["equity", "deposited", "depositedAmount"], default=None
@@ -303,18 +386,79 @@ class HyperliquidVaultTracker:
             pos.performance_history = self._get_list(
                 details, ["portfolio", "performance", "history"], default=[]
             )
-            pos.apr = self._compute_apr(pos.performance_history)
+            # APR: prefer direct "apr" field from vaultDetails, fallback to computed
+            direct_apr = self._get_float(details, ["apr", "aprPct", "annualizedRate"], default=None)
+            if direct_apr is not None:
+                # API returns APR as a fraction (e.g. 0.123 = 12.3%); convert to percentage
+                if abs(direct_apr) < 1.0:
+                    pos.apr = direct_apr * 100.0
+                else:
+                    pos.apr = direct_apr
+            else:
+                pos.apr = self._compute_apr(pos.performance_history)
 
             # Share price: prefer personal (current_value / shares),
             # fallback to vault-level (total_value / total_shares)
+            total_value = self._get_float(
+                details, ["totalValue", "equity", "vaultEquity"], default=None
+            )
             if pos.shares and pos.current_value_usd and pos.shares > 0:
                 pos.share_price_usd = pos.current_value_usd / pos.shares
             elif pos.total_vault_shares and pos.total_vault_shares > 0:
-                total_value = self._get_float(
-                    details, ["totalValue", "equity", "vaultEquity"], default=None
-                )
                 if total_value:
                     pos.share_price_usd = total_value / pos.total_vault_shares
+
+            # v5.1: TVL — 3-tier fallback:
+            #   1. maxDistributable (vault's max distributable value)
+            #   2. Sum of followers' vaultEquity
+            #   3. totalValue/equity/vaultEquity
+            #   4. Computed share_price * total_vault_shares
+            max_dist = self._get_float(details, ["maxDistributable"], default=None)
+            if max_dist is not None:
+                pos.tvl_usd = max_dist
+            else:
+                # Try summing followers' vaultEquity
+                followers = details.get("followers", [])
+                follower_tvl = None
+                if isinstance(followers, list) and followers:
+                    follower_sum = 0.0
+                    found_any = False
+                    for f in followers:
+                        if isinstance(f, dict):
+                            ve = self._get_float(f, ["vaultEquity", "equity"], default=None)
+                            if ve is not None:
+                                follower_sum += ve
+                                found_any = True
+                    if found_any:
+                        follower_tvl = follower_sum
+                if follower_tvl is not None:
+                    pos.tvl_usd = follower_tvl
+                elif total_value is not None:
+                    pos.tvl_usd = total_value
+                elif (
+                    pos.share_price_usd is not None
+                    and pos.total_vault_shares is not None
+                    and pos.total_vault_shares > 0
+                ):
+                    pos.tvl_usd = pos.share_price_usd * pos.total_vault_shares
+
+            # v5.1: Vault age — earliest timestamp from performance history
+            pos.first_deposit_time = self._extract_earliest_timestamp(
+                pos.performance_history
+            )
+
+            # v5.1: Deposit age — user's personal deposit timestamp from followerState
+            entry_ts = None
+            follower_state = details.get("followerState", {})
+            if isinstance(follower_state, dict):
+                entry_ts = self._get_float(follower_state, ["vaultEntryTime", "entryTime"], default=None)
+            if entry_ts is None:
+                entry_ts = self._get_float(equity, ["vaultEntryTime", "entryTime"], default=None)
+            if entry_ts is not None:
+                try:
+                    pos.user_deposit_time = datetime.fromtimestamp(entry_ts / 1000.0, tz=timezone.utc)
+                except (OverflowError, OSError, ValueError):
+                    pass
 
             # Fallback P&L if not provided by userVaultEquities
             if (
@@ -426,68 +570,107 @@ class HyperliquidVaultTracker:
         return None
 
     @staticmethod
-    def _compute_apr(portfolio_history: List[Dict]) -> Optional[float]:
-        """Compute a simple APR from portfolio account-value history.
+    def _flatten_portfolio_history(portfolio_history: List[Any]) -> List[Dict]:
+        """Flatten Hyperliquid portfolio tuples into (timestamp, value) points.
 
-        The ``portfolio`` array from ``vaultDetails`` contains timeframes
-        with ``accountValue`` fields.  We compute the return over the
-        available period and annualize it.
+        The vaultDetails API returns ``portfolio`` as a list of tuples:
+        ``("allTime", {"accountValueHistory": [[ts, val], ...], "pnlHistory": [[ts, val], ...]})``
 
-        If insufficient data is available (fewer than 2 data points, or
-        missing timestamps/values), return ``None`` — the UI should show
-        "APR: see Hyperliquid" rather than fabricating a number.
+        This method extracts all (timestamp, value) pairs into a flat list of
+        dicts with a ``type`` field indicating the source (accountValueHistory
+        or pnlHistory).
 
         Args:
-            portfolio_history: List of timeframe dicts, each expected to
-                contain ``accountValue`` (string or float) and optionally
-                a timestamp field.
+            portfolio_history: Raw portfolio data from vaultDetails (list of
+                tuples or dicts).
+
+        Returns:
+            Flat list of ``{"timestamp": float, "value": float, "type": str}`` dicts.
+        """
+        points = []
+        if not isinstance(portfolio_history, list):
+            return points
+        for entry in portfolio_history:
+            if not isinstance(entry, (list, tuple)) or len(entry) < 2:
+                continue
+            timeframe, payload = entry[0], entry[1]
+            if not isinstance(payload, dict):
+                continue
+            for hist_name in ("accountValueHistory", "pnlHistory"):
+                hist = payload.get(hist_name)
+                if not isinstance(hist, list):
+                    continue
+                for point in hist:
+                    if isinstance(point, (list, tuple)) and len(point) >= 2:
+                        try:
+                            ts = float(point[0])
+                            val = float(point[1])
+                            points.append({"timestamp": ts, "value": val, "type": hist_name})
+                        except (ValueError, TypeError):
+                            continue
+        return points
+
+    @staticmethod
+    def _extract_earliest_timestamp(
+        portfolio_history: List[Any],
+    ) -> Optional[datetime]:
+        """Extract the earliest timestamp from performance history.
+
+        Uses ``_flatten_portfolio_history()`` to handle the tuple format
+        returned by the Hyperliquid vaultDetails API.
+
+        Args:
+            portfolio_history: Raw portfolio data from vaultDetails.
+
+        Returns:
+            A UTC ``datetime`` for the earliest data point, or ``None`` if
+            no valid timestamp is found.
+        """
+        points = HyperliquidVaultTracker._flatten_portfolio_history(portfolio_history)
+        if not points:
+            return None
+
+        earliest_ts = min(p["timestamp"] for p in points)
+
+        # Hyperliquid timestamps are in milliseconds
+        try:
+            return datetime.fromtimestamp(earliest_ts / 1000.0, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+
+    @staticmethod
+    def _compute_apr(portfolio_history: List[Any]) -> Optional[float]:
+        """Compute a simple APR from portfolio account-value history.
+
+        Uses ``_flatten_portfolio_history()`` to extract (timestamp, value)
+        points from the tuple format returned by the Hyperliquid vaultDetails
+        API.  Prefers ``accountValueHistory`` for value-based APR.
+
+        If insufficient data is available (fewer than 2 data points, or
+        missing timestamps/values), return ``None``.
+
+        Args:
+            portfolio_history: Raw portfolio data from vaultDetails.
 
         Returns:
             Annualized percentage rate as a float (e.g. 12.4 for 12.4%),
             or ``None`` if it cannot be computed.
         """
-        if not isinstance(portfolio_history, list) or len(portfolio_history) < 2:
+        all_points = HyperliquidVaultTracker._flatten_portfolio_history(portfolio_history)
+        if len(all_points) < 2:
             return None
 
-        # Extract (timestamp, account_value) pairs
-        points: List[tuple] = []
-        for entry in portfolio_history:
-            if not isinstance(entry, dict):
-                continue
-            # Try common value keys
-            value = None
-            for key in ("accountValue", "value", "equity"):
-                if key in entry and entry[key] is not None:
-                    try:
-                        value = float(entry[key])
-                        break
-                    except (ValueError, TypeError):
-                        continue
-            if value is None:
-                continue
-
-            # Try common timestamp keys
-            ts = None
-            for key in ("time", "timestamp", "ts"):
-                if key in entry and entry[key] is not None:
-                    try:
-                        ts = float(entry[key])
-                        break
-                    except (ValueError, TypeError):
-                        continue
-            if ts is None:
-                continue
-
-            points.append((ts, value))
-
+        # Prefer accountValueHistory for value-based APR
+        av_points = [p for p in all_points if p["type"] == "accountValueHistory"]
+        points = av_points if len(av_points) >= 2 else all_points
         if len(points) < 2:
             return None
 
         # Sort by timestamp
-        points.sort(key=lambda p: p[0])
+        points.sort(key=lambda p: p["timestamp"])
 
-        start_ts, start_val = points[0]
-        end_ts, end_val = points[-1]
+        start_ts, start_val = points[0]["timestamp"], points[0]["value"]
+        end_ts, end_val = points[-1]["timestamp"], points[-1]["value"]
 
         if start_val <= 0 or end_ts <= start_ts:
             return None

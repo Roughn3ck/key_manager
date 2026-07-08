@@ -60,7 +60,7 @@ The vault schema is additive-only and versioned via a `schema_version` field. Ol
 Offline by default — zero network requests unless the user enables "Go Online" in Settings. Balance/price/LP engines raise `OfflineError` when offline and the GUI greys out their controls. Only public addresses are queried; private keys and mnemonics never leave the vault. Prices are in-memory only (never written to disk). The LP engine is read-only; the writer is a tool requiring explicit per-operation GUI confirmation, never autonomous.
 
 ### LP fee caveat (v5.1)
-Project X / HyperEVM uncollected-fee estimation from RPC tick storage does not produce correct values and is disabled behind `PROJECT_X_FEE_ESTIMATION_ENABLED = False` in `hyperliquid_adapter.py`. HyperEVM positions instead carry a `fees_note` ("Collect fees to report on fee income") shown in the GUI. Collection-based fee tracking is the planned replacement. Don't "fix" the fee math by re-enabling that flag — the helper functions are retained intentionally.
+Real uncollected fees on Project X / HyperEVM are read via a static `eth_call` to `collect((uint256,address,uint128,uint128))` (selector `0xfc6f7865`) on the Project X PositionManager. This returns the same values shown in the Project X UI tooltip. Do not re-enable the old `feeGrowthGlobal` delta or `PROJECT_X_FEE_ESTIMATION_ENABLED` approach — it overcounts. The `fees_note` field on `LPPosition` is retained for backward compatibility but should not be populated by the Hyperliquid adapter.
 
 ## Conventions
 
@@ -74,6 +74,24 @@ Project X / HyperEVM uncollected-fee estimation from RPC tick storage does not p
 ## Project state tracking
 
 `.clinerules` holds the Cline-oriented project rules and version table; `STATUS.md` tracks per-version changelogs, known issues, and next steps. Both are updated with each release — keep them in sync with code changes.
+
+## v5.1 HL1 Vaults + LP Fee Fix
+
+### HL1 Vaults tab (`src/gui_main_v5.py` + `src/vault_tracker.py`)
+- Read-only Hyperliquid vault positions via `userVaultEquities` + `vaultDetails` on `https://api.hyperliquid.xyz/info`.
+- Card layout: Vault Name heading, Vault Address (small), metrics row (TVL, APR, Vault Age, Deposit Age), then Deposited / Current / PnL.
+- **Save Vault** / **Delete Saved** buttons persist full position snapshots in `address_db["saved_vaults"]` inside the encrypted vault. Saved vaults render immediately on reopen using cached data.
+- **Wallet selector**: "Address" mode (raw 0x entry) or "Account" mode (dropdown populated from Wallet-tab accounts, auto-resolves first EVM/HYPE address). Mode + selection persisted in encrypted vault config.
+- Data sources:
+  - **APR**: `vaultDetails.apr` (annualized decimal from API; multiply by 100 for display).
+  - **TVL**: `vaultDetails.maxDistributable` (fallback: sum of `followers[*].vaultEquity`).
+  - **Vault Age**: earliest timestamp across `vaultDetails.portfolio` history.
+  - **Deposit Age**: `vaultDetails.followerState.vaultEntryTime` for the current user.
+
+### LP fee reading (`src/venue_adapters/hyperliquid_adapter.py`)
+- Real uncollected fees are read via a **static `eth_call`** to the Uniswap V3 `collect((uint256,address,uint128,uint128))` function (selector `0xfc6f7865`) on the Project X PositionManager at `0xeaD19AE861c29bBb2101E834922B2FEee69B9091`.
+- Parameters: `(tokenId, wallet_address, uint128.max, uint128.max)`. Returns `(amount0, amount1)` in raw token units.
+- This matches the Project X UI tooltip. The previous `feeGrowthGlobal` delta and the `PROJECT_X_FEE_ESTIMATION_ENABLED` / `fees_note` workaround are obsolete.
 
 ## Dependencies
 

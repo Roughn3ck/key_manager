@@ -5,9 +5,9 @@ ColdStack is a secure cryptocurrency key storage application with a GUI interfac
 It encrypts wallet data (24-word mnemonics, addresses, private keys) using AES-256-GCM with Argon2id key derivation.
 Designed for portable USB deployment alongside a local script-mode workflow.
 
-**Current production version: v5.0** (June 2026) — Go Online toggle, wallet balance fetching (15+ chains), CoinGecko price feeds, ERC-20 token support, compact card layout, currency toggle. v4.2: Customizable RPC endpoints, Standard/Advanced mode, API key management.
+**Current production version: v5.1** (July 2026) — Hyperliquid Vault Tracking (HL1 Vaults tab), saved vault snapshots in encrypted vault, wallet/account selector, LP fee reading via static `collect()` eth_call, HyperEVM ERC-20 support, Go Online toggle, wallet balances, CoinGecko prices. v4.2: Customizable RPC endpoints, Standard/Advanced mode, API key management.
 
-**Next version: v5.0** — LP Engine module (Hyperliquid venue adapter, LP position dashboard, strategy suggestions).
+**Next version: v5.2** — saved pools moved into encrypted vault; HyperEVM swap router research; writer mainnet testing.
 
 ## ⚠️ CRITICAL: Always Compile After Changes
 
@@ -33,10 +33,10 @@ If the build fails, fix the error before considering the task complete. A stale 
 
 | Version | Description | Key Files |
 |---------|-------------|-----------|
+| v5.1 | Hyperliquid Vaults + saved vault snapshots + LP fee fix + wallet selector | `src/gui_main_v5.py`, `src/vault_tracker.py`, `src/venue_adapters/hyperliquid_adapter.py`, `build_gui_v5.py` |
 | v5.0 | LP Engine + Hyperliquid Writer + LP Positions tab + CTkTabview | `src/gui_main_v5.py`, `src/venue_adapters/hyperliquid_writer.py`, `build_gui_v5.py` |
 | v4.2 | Customizable RPC endpoints + Standard/Advanced mode + API key management | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
-| v4.1 | Go Online toggle + balance fetching + price feeds + ERC-20 + compact cards | `src/gui_main_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |` + "`n" + `| v4.2 | Customizable RPC endpoints + Standard/Advanced mode + API key management | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
-| v5.0 (in progress) | LP Engine + Hyperliquid adapter + strategy suggestions | `src/lp_engine.py`, `src/venue_adapters/hyperliquid_adapter.py`, `src/lp_gui_poc.py` |
+| v4.1 | Go Online toggle + balance fetching + price feeds + ERC-20 + compact cards | `src/gui_main_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |
 
 ### Versioning Rules
 1. New versions introduce a `_v<N>` suffix on new/modified GUI files (e.g., `gui_main_v4.py`, `gui_main_v5.py`).
@@ -49,14 +49,15 @@ If the build fails, fix the error before considering the task complete. A stale 
 ```
 key_manager/
 ├── src/
-│   ├── gui_main_v5.py         # v5.0 GUI — LP Engine + Hyperliquid Writer + LP Positions tab
+│   ├── gui_main_v5.py         # v5.1 GUI — Wallet / HL1 Vaults / LP Positions tabs
+│   ├── vault_tracker.py       # v5.1: Hyperliquid L1 vault positions (read-only)
 │   ├── gui_main_v4.py         # v4.1 GUI — ColdStack, Go Online, balances, prices
 │   ├── balance_engine.py      # v4.1: Fetch wallet balances via public RPC (15+ chains)
 │   ├── price_engine.py        # v4.1: CoinGecko price feeds (60s in-memory cache)
 │   ├── lp_engine.py           # v5.0: LP Engine core (LPPosition, VenueAdapter, StrategyEngine)
 │   ├── venue_adapters/
 │   │   ├── __init__.py         # Auto-registers adapters on import
-│   │   ├── hyperliquid_adapter.py  # v5.0: Hyperliquid L1 + HyperEVM read adapter
+│   │   ├── hyperliquid_adapter.py  # v5.1: Hyperliquid L1 + HyperEVM read adapter; fee reading via static collect() eth_call
 │   │   └── hyperliquid_writer.py    # v5.0: HyperEVM VenueWriter (sign via agent)
 │   ├── lp_gui_poc.py          # v5.0: LP tab UI proof-of-concept (Tkinter)
 │   ├── crypto_engine.py       # AES-256-GCM encryption + Argon2id KDF (shared)
@@ -68,7 +69,7 @@ key_manager/
 ├── key_manager_gui_v4.spec    # PyInstaller spec (name='coldstack')
 ├── coldstack.spec             # Duplicate spec (kept for compatibility)
 ├── USB_DEPLOYMENT/
-│   ├── coldstack.exe          # Current production EXE (v4.1 build)
+│   ├── coldstack.exe          # Current production EXE (v5.1 build — rebuild after source changes)
 │   ├── launch.bat             # Launcher script
 │   └── README.md              # USB deployment readme
 ├── backups/                   # Previous version backups
@@ -119,19 +120,17 @@ key_manager/
 
 ## Build & Deploy
 
-**Current build command (v4.1):**
+**Current build command (v5.1):**
 ```bash
 cd B:\Blockchain\coldstack
 python build_gui_v5.py
 ```
 
-- Builds `src/gui_main_v4.py` → `dist/coldstack.exe` → copies to `USB_DEPLOYMENT/coldstack.exe`
-- Output: ~45MB self-contained EXE (Python runtime + all deps bundled)
+- Builds `src/gui_main_v5.py` → `dist/coldstack.exe` → copies to `USB_DEPLOYMENT/coldstack.exe`
+- Output: ~50MB self-contained EXE (Python runtime + all deps bundled)
 - `--onefile --console` mode (FreeConsole hides console at runtime on Windows)
-- Previous EXE backed up to `backups/coldstack_v4.exe` before overwrite
-- All hidden imports for customtkinter, cryptography, argon2, hdwallet, mnemonic, etc. are in the build script
-
-**When v5.0 is ready:** Create `build_gui_v5.py` that adds `lp_engine.py` and `venue_adapters/` to the PyInstaller data/hidden imports. The LP Engine modules must be included in the build.
+- Previous EXE backed up to `backups/coldstack_v5.exe` before overwrite
+- Hidden imports include customtkinter, cryptography, argon2, hdwallet, mnemonic, lp_engine, venue_adapters, vault_tracker, etc.
 
 ## Dependencies
 ```
@@ -175,9 +174,10 @@ pycryptodome     # keccak256 for EVM addresses
 - Go Online is OFF by default — never change this default
 
 ## Known Issues
-- `build_gui_v5.py` swap router address on HyperEVM not yet confirmed — `swap()` raises `NotImplementedError`
+- HyperEVM swap router address not yet confirmed — `swap()` raises `NotImplementedError`; cross-ratio rebalances deferred
+- Saved pools still stored in a separate `saved_pools.json` next to the vault; goal is to move them inside `key_vault.encrypted`
 - G5 `lp_address` in `strategy.json` is 66 chars (not a valid 42-char EVM address) — needs clarification for HyperEVM adapter testing
-- LP Engine v5.0 is architecture-only — not yet integrated into `gui_main_v4.py` (needs `gui_main_v5.py` when ready)
+- GUI EXE needs a fresh rebuild after the v5.1 source changes
 
 ## Testing
 - `test_derivation.py` — BIP39 derivation parity + multi-chain tests
