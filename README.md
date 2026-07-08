@@ -48,16 +48,8 @@
 - **GUI (script mode):** `python src/gui_main_v5.py`
 - **Build EXE:** `python build_gui_v5.py` -> `USB_DEPLOYMENT/coldstack.exe`
 - **CLI (script mode only):** `python src/main.py`
-- **LP Positions Tab**: New CTkTabview with "Vault" and "LP Positions" tabs. LP tab shows all LP positions for a wallet address with health emoji, pair, range, fees, value, PnL, and strategy suggestions.
-- **LP Engine** (`lp_engine.py`): Read-only LP position aggregation with adapter registry. Fetches positions from Hyperliquid L1 (perp/spot) and HyperEVM (concentrated-liquidity pools). Strategy engine analyzes positions and suggests actions (Hold/Rebalance/Withdraw).
-- **Hyperliquid Adapter** (`hyperliquid_adapter.py`): 1000+ line read adapter for HyperEVM NFT Position Manager + L1 perp/spot positions. Batch RPC with rate-limit handling. WHYPE/UBTC pool support.
-- **Hyperliquid Writer** (`hyperliquid_writer.py`): Full VenueWriter implementation for HyperEVM. Wrap/unwrap HYPE, approve tokens, open/increase/decrease/collect/close LP positions, rebalance. Signs via key_manager_agent (localhost:8842) - never holds private keys.
-- **Write Operations with Confirmation**: Advanced mode shows "Collect Fees" button on LP cards. Every write operation requires explicit user confirmation dialog. Writer is a tool, not an autonomous agent.
-- **Address Pre-fill**: LP tab address entry auto-fills from the selected account's first EVM/HYPE address.
-- **Offline-aware**: LP tab respects Go Online toggle. Refresh disabled when offline. Offline banner shown.
-
 - **No new dependencies**: Uses stdlib `urllib.request` only. Swap router stubbed (HyperEVM swap router address TBD).
-- **Backward compatible**: v4.2 vaults open in v5.1 without migration. LP tab is additive.
+- **Backward compatible**: v4.2 vaults open in v5.0 without migration. LP tab is additive.
 
 ### Security Rules (v5.1)
 1. LP Engine is read-only by default. Writer only accessible when vault is unlocked + user confirms each operation.
