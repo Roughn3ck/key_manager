@@ -6,10 +6,17 @@
 - [x] Saved vaults stored inside encrypted `key_vault.encrypted` (`saved_vaults` top-level list), with Save/Delete buttons and cached snapshots so saved vaults render instantly on reopen
 - [x] Wallet selector in HL1 Vaults tab: raw address entry or account dropdown from Wallet tab; mode and selection persisted in encrypted vault config
 - [x] `src/venue_adapters/hyperliquid_adapter.py` — LP fee reading fixed: uses static `collect((uint256,address,uint128,uint128))` eth_call (selector `0xfc6f7865`) to return real uncollected fees from the Project X PositionManager; matches Project X UI tooltip
-- [x] `saved_pools.py` — Saved pools CRUD (public identifiers only, no private keys), stored in `saved_pools.json` next to vault
+- [x] `src/venue_adapters/hyperliquid_adapter.py` — Wallet scan fixed: removed stale hardcoded `known_hints`, widened scan window to 2000 NFTs, removed duplicate `total_supply` call, added fresh ownership re-verification, and probes 100 newly minted tokens that appear during the scan
+- [x] `src/gui_main_v5.py` — LP scan progress messages: status label now shows "Fetching saved positions... Full wallet scan will follow." and "Scanning wallet for new positions — this may take up to 6 minutes." before starting the background scan
+- [x] `src/gui_main_v5.py` — Remove Pool UX fixed: removing a saved pool now destroys only that position's card, updates the saved-pools counter, and does not trigger a full wallet rescan; the "Fetch Position" button is re-enabled after every fetch (success or error)
+- [x] `src/venue_adapters/hyperliquid_adapter.py` — Fetch Position input parsing fixed: 66-character transaction hashes resolve to the LP position via `eth_getTransactionReceipt` + PositionManager `Transfer` event; known contract addresses (PositionManager, Pool Factory, WHYPE, UBTC) return helpful errors instead of being misidentified as pools
+- [x] `src/gui_main_v5.py` — LP Address/Account selector + Save Pool flow fixed: new `_lp_get_current_wallet_address()` helper resolves wallet from either Address entry or Account dropdown; `_lp_do_fetch()` and `_lp_do_fetch_single()` show mode-aware error messages; single-position fetch captures and preserves wallet address for Save Pool so the flow works end-to-end in Account mode
+- [x] `saved_pools.py` — Saved pools CRUD (public identifiers only, no private keys), stored inside encrypted `key_vault.encrypted` (`address_db["saved_pools"]`); no separate JSON file
 - [x] HyperEVM ERC-20 balance support (USDC, WHYPE, UBTC), combined "Hyperliquid (HL1 & HyperEVM)" chain option, stablecoin currency conversion fix, balance dispatcher fix
+- [x] `build_gui_v5.py` — PyInstaller hidden imports fixed: added `click`, `rich` (+ submodules), `urllib` (+ `--collect-submodules=urllib`), and full stdlib HTTPS/SSL stack (`ssl`, `_ssl`, `http.client`, `socket`, `_socket`) so the bundled EXE can resolve `https://` URLs for LP, balances, prices, vault tracker, and update checker
 - [x] README.md, CLAUDE.md, .clinerules updated for v5.1
 - [x] py_compile passes for modified source files
+- [x] EXE rebuilt with `python build_gui_v5.py` (46 MB, 09/07/2026) — all network features confirmed working (LP positions, perp state, spot balances, price feeds, vault tracker, update checker)
 
 ### Data Sources
 - **APR**: `vaultDetails.apr` (annualized decimal from Hyperliquid API, e.g. `-0.0052` → `-0.5%`)
@@ -20,13 +27,11 @@
 ### Known Limitations
 - Swap router address on HyperEVM still not confirmed — `swap()` raises `NotImplementedError`; cross-ratio rebalances deferred
 - Writer requires `key_manager_agent` running with `--serve` on localhost:8842
-- Saved pools still live in a separate `saved_pools.json` (to be refactored into encrypted vault in a future release)
 
 ### Next Steps
-- [ ] Refactor saved pools storage from `saved_pools.json` into `key_vault.encrypted` (single-database goal)
 - [ ] Research/confirm HyperEVM swap router contract address
 - [ ] Test writer end-to-end with agent on mainnet
-- [ ] Build EXE with `python build_gui_v5.py`
+- [x] Build EXE with `python build_gui_v5.py` (46 MB, 09/07/2026 — all network features working)
 - [ ] Test EXE on clean Windows machine
 
 ---
@@ -179,12 +184,12 @@ key_manager/
 | LP Engine / Adapter | Working v5.1 | HyperEVM + L1 positions; fee reading via static `collect()` eth_call |
 | Hyperliquid Writer | Working v5.0 | Signs via agent on localhost:8842 |
 | GUI v5.1 Source | Working | Wallet / HL1 Vaults / LP Positions tabs |
-| GUI EXE | Needs rebuild | Run `python build_gui_v5.py` |
+| GUI EXE | Working v5.1 | 46 MB, 09/07/2026 — all network features confirmed |
 | CLI (script mode) | Working | `python src/main.py` (CLI EXE deprecated) |
 | Headless Agent | Working | HTTP signing server on localhost:8842 |
 
 ---
-*Status report updated July 8, 2026. v5.1 released - Hyperliquid Vaults polish + LP Fee Fix.*
+*Status report updated July 9, 2026. v5.1 build fixed — full HTTPS/SSL stack bundled, all network features working.*
 
 ## v5.1 LP Fee Issue (Resolved July 8, 2026)
 
