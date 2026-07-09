@@ -764,44 +764,6 @@ class HyperliquidAdapter(VenueAdapter):
         wallet_address = wallet_address.lower()
         positions: List[LPPosition] = []
 
-        # 1. Known token-id hints. For wallets we have already seen on-chain we
-        # can short-circuit the expensive global scan by probing the known IDs
-        # first. This list is populated from prior successful reads / TX logs.
-        known_hints = {
-            "0xbf0e7d5868479b3b2602fa929dec6661408edc71".lower(): [496329, 453338],
-        }
-        fast_ids = [tid for tid in known_hints.get(wallet_address, [])]
-        if fast_ids:
-            calls = [
-                (
-                    "eth_call",
-                    [
-                        {
-                            "to": POSITION_MANAGER,
-                            "data": SELECTOR_OWNER_OF + _pad_int_to_64(tid),
-                        },
-                        "latest",
-                    ],
-                )
-                for tid in fast_ids
-            ]
-            results = _evm_rpc_batch(calls)
-            for tid, owner_result in zip(fast_ids, results):
-                if not owner_result or not isinstance(owner_result, str):
-                    continue
-                try:
-                    owner = _decode_address(owner_result[2:66]).lower()
-                except (ValueError, IndexError):
-                    continue
-                if owner == wallet_address:
-                    pos = self.fetch_evm_position_by_token_id(tid, price_engine, wallet_address)
-                    if pos and not pos.error:
-                        positions.append(pos)
-
-        total_result = _evm_rpc_call(
-            "eth_call",
-            [{"to": POSITION_MANAGER, "data": SELECTOR_TOTAL_SUPPLY}, "latest"],
-        )
         total_result = _evm_rpc_call(
             "eth_call",
             [{"to": POSITION_MANAGER, "data": SELECTOR_TOTAL_SUPPLY}, "latest"],
@@ -831,19 +793,16 @@ class HyperliquidAdapter(VenueAdapter):
             except (ValueError, IndexError):
                 balance = 0
 
-        # If the hint pass already found enough tokens, skip the scan.
-        if balance and len(positions) >= balance:
-            return positions
-
         # HyperEVM public RPC rate-limits at ~2 calls per batch and each batch
-        # takes ~1.4s. Scanning the whole token space is infeasible. Instead we
-        # scan the most recently minted 500 NFTs, which is ~6 minutes and covers
-        # positions opened within the last day or two.
+        # takes ~1.4 s. Scanning the whole token space is infeasible, so we walk
+        # backward from the most recently minted NFTs.  The window is 2000 NFTs,
+        # which covers several days of activity while remaining reasonable for a
+        # background scan.  We stop early once we have found balance-many tokens.
         owned_ids: List[int] = []
         batch_size = 2
-        scan_start = max(0, total_supply - 500)
+        scan_start = max(0, total_supply - 2000)
         for batch_start in range(scan_start, total_supply, batch_size):
-            if balance and len(owned_ids) + len(positions) >= balance:
+            if balance and len(owned_ids) >= balance:
                 break
             batch_end = min(batch_start + batch_size, total_supply)
             calls = [
@@ -861,7 +820,7 @@ class HyperliquidAdapter(VenueAdapter):
             ]
             results = _evm_rpc_batch(calls)
             for token_id, owner_result in zip(range(batch_start, batch_end), results):
-                if balance and len(owned_ids) + len(positions) >= balance:
+                if balance and len(owned_ids) >= balance:
                     break
                 if not owner_result or not isinstance(owner_result, str):
                     continue
@@ -871,6 +830,79 @@ class HyperliquidAdapter(VenueAdapter):
                     continue
                 if owner == wallet_address:
                     owned_ids.append(token_id)
+
+        # Positions may have been minted while the scan above was running.
+        # Re-check total_supply and probe up to 100 new tokens beyond the
+        # original total so a user does not have to wait for a second scan.
+        fresh_total_result = _evm_rpc_call(
+            "eth_call",
+            [{"to": POSITION_MANAGER, "data": SELECTOR_TOTAL_SUPPLY}, "latest"],
+        )
+        try:
+            fresh_total_supply = int(fresh_total_result[2:66], 16) if fresh_total_result and isinstance(fresh_total_result, str) else total_supply
+        except (ValueError, IndexError):
+            fresh_total_supply = total_supply
+        if fresh_total_supply > total_supply:
+            extra_end = min(fresh_total_supply, total_supply + 100)
+            for batch_start in range(total_supply, extra_end, batch_size):
+                if balance and len(owned_ids) >= balance:
+                    break
+                batch_end = min(batch_start + batch_size, extra_end)
+                calls = [
+                    (
+                        "eth_call",
+                        [
+                            {
+                                "to": POSITION_MANAGER,
+                                "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id),
+                            },
+                            "latest",
+                        ],
+                    )
+                    for token_id in range(batch_start, batch_end)
+                ]
+                results = _evm_rpc_batch(calls)
+                for token_id, owner_result in zip(range(batch_start, batch_end), results):
+                    if balance and len(owned_ids) >= balance:
+                        break
+                    if not owner_result or not isinstance(owner_result, str):
+                        continue
+                    try:
+                        owner = _decode_address(owner_result[2:66]).lower()
+                    except (ValueError, IndexError):
+                        continue
+                    if owner == wallet_address:
+                        owned_ids.append(token_id)
+
+        # Defensive ownership re-verification: a position may have been
+        # transferred or burned while the scan was in progress.  Drop any token
+        # IDs whose current owner is no longer the wallet.
+        if owned_ids:
+            verify_calls = [
+                (
+                    "eth_call",
+                    [
+                        {
+                            "to": POSITION_MANAGER,
+                            "data": SELECTOR_OWNER_OF + _pad_int_to_64(tid),
+                        },
+                        "latest",
+                    ],
+                )
+                for tid in owned_ids
+            ]
+            verified_ids: List[int] = []
+            verify_results = _evm_rpc_batch(verify_calls)
+            for tid, owner_result in zip(owned_ids, verify_results):
+                if not owner_result or not isinstance(owner_result, str):
+                    continue
+                try:
+                    owner = _decode_address(owner_result[2:66]).lower()
+                except (ValueError, IndexError):
+                    continue
+                if owner == wallet_address:
+                    verified_ids.append(tid)
+            owned_ids = verified_ids
 
         for token_id in owned_ids:
             pos = self.fetch_evm_position_by_token_id(token_id, price_engine, wallet_address)
@@ -940,6 +972,54 @@ class HyperliquidAdapter(VenueAdapter):
 
     # --- Public interface ----------------------------------------------------
 
+    def _resolve_tx_hash_to_position(
+        self,
+        tx_hash: str,
+        price_engine: Optional[PriceEngine],
+    ) -> LPPosition:
+        """Resolve a 32-byte HyperEVM transaction hash to an LP position.
+
+        Looks at the transaction receipt logs for a Project X PositionManager
+        ERC-721 Transfer event and extracts the token ID.  If the transaction
+        minted or transferred a position NFT, returns the decoded position.
+        """
+        tx_hash = tx_hash.lower()
+        receipt = _evm_rpc_single(
+            "eth_getTransactionReceipt",
+            [tx_hash],
+        )
+        if not receipt or not isinstance(receipt, dict):
+            return LPPosition(
+                position_id=tx_hash,
+                venue="HyperEVM",
+                chain="HyperEVM",
+                error="Could not fetch transaction receipt.",
+            )
+        logs = receipt.get("logs", [])
+        pm_address = POSITION_MANAGER.lower()
+        transfer_topic = (
+            "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        )
+        for log in logs:
+            if log.get("address", "").lower() != pm_address:
+                continue
+            topics = log.get("topics", [])
+            if len(topics) < 4:
+                continue
+            if topics[0].lower() != transfer_topic:
+                continue
+            try:
+                token_id = int(topics[3], 16)
+            except (ValueError, TypeError):
+                continue
+            return self.fetch_evm_position_by_token_id(token_id, price_engine, "")
+        return LPPosition(
+            position_id=tx_hash,
+            venue="HyperEVM",
+            chain="HyperEVM",
+            error="Transaction does not appear to be an LP position mint/transfer.",
+        )
+
     def fetch_position(
         self,
         address_or_id: str,
@@ -950,7 +1030,56 @@ class HyperliquidAdapter(VenueAdapter):
         if not online_mode:
             raise OfflineError("Hyperliquid adapter requires online mode.")
 
-        # Try NFT token id first (numeric)
+        address_or_id = address_or_id.strip()
+
+        # 1. Transaction hash (32 bytes / 66 chars)
+        if _is_hex_string(address_or_id, length=66):
+            return self._resolve_tx_hash_to_position(address_or_id, price_engine)
+
+        # 2. Known contracts that are commonly pasted by mistake.
+        lowered = address_or_id.lower()
+        if lowered == POSITION_MANAGER.lower():
+            return LPPosition(
+                position_id=address_or_id,
+                venue="HyperEVM",
+                chain="HyperEVM",
+                error=(
+                    "This is the Project X PositionManager contract, not a pool. "
+                    "Enter a numeric position ID (e.g. 512359) or a pool address."
+                ),
+            )
+        if lowered == POOL_FACTORY.lower():
+            return LPPosition(
+                position_id=address_or_id,
+                venue="HyperEVM",
+                chain="HyperEVM",
+                error=(
+                    "This is the Project X Pool Factory, not a pool. "
+                    "Enter a numeric position ID (e.g. 512359) or a pool address."
+                ),
+            )
+        if lowered == WHYPE.lower():
+            return LPPosition(
+                position_id=address_or_id,
+                venue="HyperEVM",
+                chain="HyperEVM",
+                error=(
+                    "This is the wrapped HYPE (WHYPE) token contract, not a pool. "
+                    "Enter a numeric position ID (e.g. 512359) or a pool address."
+                ),
+            )
+        if lowered == UBTC.lower():
+            return LPPosition(
+                position_id=address_or_id,
+                venue="HyperEVM",
+                chain="HyperEVM",
+                error=(
+                    "This is the UBTC token contract, not a pool. "
+                    "Enter a numeric position ID (e.g. 512359) or a pool address."
+                ),
+            )
+
+        # 3. NFT token id (numeric)
         try:
             numeric_id = int(address_or_id)
             return self.fetch_evm_position_by_token_id(numeric_id, price_engine, "")
@@ -959,7 +1088,13 @@ class HyperliquidAdapter(VenueAdapter):
 
         mode = self._chain_mode(address_or_id, chain_hint)
         if mode == "evm":
-            return self._fetch_evm_pool_position(address_or_id, price_engine)
+            pos = self._fetch_evm_pool_position(address_or_id, price_engine)
+            if pos and not pos.error:
+                pos.error = (
+                    "Pool address shows price only. "
+                    "If this is a position ID, enter the numeric token ID instead."
+                )
+            return pos
         return self._fetch_l1_position(address_or_id, price_engine)
 
     def fetch_all_positions(

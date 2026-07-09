@@ -68,6 +68,24 @@ def build_gui_exe():
         '--hidden-import=Crypto',
         '--hidden-import=Crypto.Hash',
         '--hidden-import=Crypto.Hash.keccak',
+        # --- v5.1 CLI deps pulled in by main.py (via gui_main_v5 import) ---
+        '--hidden-import=click',
+        '--hidden-import=rich',
+        '--hidden-import=rich.console',
+        '--hidden-import=rich.table',
+        '--hidden-import=rich.panel',
+        '--hidden-import=rich.progress',
+        # --- v5.1 stdlib urllib used by network engines ---
+        '--hidden-import=urllib',
+        '--hidden-import=urllib.request',
+        '--hidden-import=urllib.error',
+        '--collect-submodules=urllib',
+        # --- v5.1 stdlib HTTPS/SSL stack required by urllib.request at runtime ---
+        '--hidden-import=ssl',
+        '--hidden-import=_ssl',
+        '--hidden-import=http.client',
+        '--hidden-import=socket',
+        '--hidden-import=_socket',
         # --- v5.1 LP Engine hidden imports ---
         '--hidden-import=lp_engine',
         '--hidden-import=price_engine',
@@ -90,6 +108,7 @@ def build_gui_exe():
         '--collect-all=PIL',
         '--collect-all=hdwallet',
         '--collect-all=mnemonic',
+        '--collect-all=rich',
         # --- Data files ---
         '--add-data=rpc_endpoints.json;.',
         # --- Build options ---

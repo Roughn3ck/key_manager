@@ -1,4 +1,4 @@
-﻿"""
+"""
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
@@ -57,7 +57,7 @@ from price_engine import PriceEngine, DISPLAY_CURRENCY_OPTIONS
 from rpc_config import load_rpc_config, save_rpc_config, get_default_endpoints, get_default_for_chain
 # v5.0: LP Engine imports
 from lp_engine import LPEngine, OfflineError
-from saved_pools import load_saved_pools, save_pool, is_pool_saved, migrate_saved_pools_json
+from saved_pools import load_saved_pools, save_pool, remove_saved_pool, is_pool_saved, migrate_saved_pools_json
 from venue_adapters.venue_writer import (
     CollectFeesParams, CompoundFeesParams, DecreaseLiquidityParams, RebalanceParams,
 )
@@ -263,6 +263,14 @@ ctk.set_default_color_theme("dark-blue")
 
 class ColdStackGUI:
     """Main GUI application for ColdStack — secure offline crypto key vault."""
+
+    # v5.1: Map user-friendly platform names to raw adapter keys.
+    # Future adapters: add entries here (friendly_name -> adapter_key).
+    LP_PLATFORM_MAP = {
+        "HyperEVM (Project X)": "hyperliquid",
+    }
+    # Reverse map for converting adapter keys to friendly display names.
+    LP_PLATFORM_MAP_reverse = {v: k for k, v in LP_PLATFORM_MAP.items()}
 
     def __init__(self):
         self.root = ctk.CTk()
@@ -584,6 +592,9 @@ class ColdStackGUI:
 
         # LP tab: LP Positions content
         self.create_lp_tab(lp_tab)
+
+        # v5.1: Restore LP tab selector state after tab creation
+        self._lp_restore_state()
 
         # v5.1: Tab change callback for auto-fetching saved pools
         self.tabview.configure(command=self._on_tab_changed)
@@ -2870,6 +2881,9 @@ class ColdStackGUI:
         # v5.1: Vault tab selector state
         self.vault_selector_mode = config.get("vault_selector_mode", "address")
         self.vault_selected_account = config.get("vault_selected_account", "")
+        # v5.1: LP tab selector state
+        self.lp_selector_mode = config.get("lp_selector_mode", "Address")
+        self.lp_selected_account = config.get("lp_selected_account", "")
         # v4.2: Load RPC config from file and rebuild balance engine
         self.rpc_config = load_rpc_config(base_dir)
         self._rebuild_balance_engine()
@@ -2886,6 +2900,9 @@ class ColdStackGUI:
         # v5.1: Vault tab selector state
         cfg["vault_selector_mode"] = self.vault_selector_mode
         cfg["vault_selected_account"] = self.vault_selected_account
+        # v5.1: LP tab selector state
+        cfg["lp_selector_mode"] = self.lp_selector_mode
+        cfg["lp_selected_account"] = self.lp_selected_account
         self.key_manager.save_encrypted_data(self.current_password)
 
     def _rebuild_balance_engine(self):
@@ -3452,16 +3469,40 @@ class ColdStackGUI:
         root = ctk.CTkFrame(parent, fg_color="transparent")
         root.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # -- Row 1: Wallet address scan (existing) --
+        # -- Row 1: Wallet selector bar (Address or Account mode) --
         wallet_bar = ctk.CTkFrame(root, fg_color="transparent")
         wallet_bar.pack(fill="x", pady=(0, 5))
 
-        ctk.CTkLabel(wallet_bar, text="Wallet Address:",
-                     font=ctk.CTkFont(size=13)).pack(side="left", padx=(0, 8))
+        # Mode selector dropdown
+        selector_menu = ctk.CTkOptionMenu(
+            wallet_bar, values=["Address", "Account"], width=90,
+            font=ctk.CTkFont(size=11),
+            command=self._lp_on_selector_change,
+        )
+        selector_menu.set(self.lp_selector_mode if hasattr(self, 'lp_selector_mode') else "Address")
+        selector_menu.pack(side="left", padx=(0, 5))
+        self._lp_widgets["selector_menu"] = selector_menu
 
-        address_entry = ctk.CTkEntry(wallet_bar, width=380, font=ctk.CTkFont(size=12))
-        address_entry.pack(side="left", fill="x", expand=True, padx=(0, 8))
+        # Address entry (shown when "Address" mode is selected)
+        address_entry = ctk.CTkEntry(wallet_bar, width=320,
+                                     font=ctk.CTkFont(size=11))
         self._lp_widgets["address_entry"] = address_entry
+
+        # Account dropdown (shown when "Account" mode is selected)
+        account_names = []
+        if self.key_manager:
+            account_names = sorted(
+                self.key_manager.address_db.get("accounts", {}).keys()
+            )
+        account_menu = ctk.CTkOptionMenu(
+            wallet_bar, values=account_names if account_names else ["(no accounts)"],
+            width=200, font=ctk.CTkFont(size=11),
+            command=self._lp_on_account_change,
+        )
+        self._lp_widgets["account_menu"] = account_menu
+
+        # Pack the appropriate widget based on current mode
+        self._lp_apply_selector_mode()
 
         refresh_btn = ctk.CTkButton(
             wallet_bar, text="Scan Wallet", width=110, height=30,
@@ -3479,15 +3520,21 @@ class ColdStackGUI:
                      font=ctk.CTkFont(size=13)).pack(side="left", padx=(0, 5))
 
         # Build venue list from adapter registry + auto-detect
+        # v5.1: User-friendly platform names instead of raw adapter keys
         venue_options = ["Auto-detect"]
         try:
             if self.lp_engine:
-                venue_options.extend(self.lp_engine.list_venues())
+                raw_venues = self.lp_engine.list_venues()
+                # Map raw venue keys to friendly display names
+                for v in raw_venues:
+                    friendly = self.LP_PLATFORM_MAP_reverse.get(v, v)
+                    if friendly not in venue_options:
+                        venue_options.append(friendly)
         except Exception:
-            venue_options.append("hyperliquid")
+            venue_options.append("HyperEVM (Project X)")
 
         platform_menu = ctk.CTkOptionMenu(
-            pos_bar, variable=None, values=venue_options, width=140,
+            pos_bar, variable=None, values=venue_options, width=160,
             font=ctk.CTkFont(size=12),
         )
         platform_menu.set("Auto-detect")
@@ -3508,6 +3555,16 @@ class ColdStackGUI:
         )
         fetch_pos_btn.pack(side="right")
         self._lp_widgets["fetch_pos_btn"] = fetch_pos_btn
+
+        # v5.1: Clear button — clears position entry, cards, and status
+        clear_btn = ctk.CTkButton(
+            pos_bar, text="Clear", width=80, height=30,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color="gray30",
+            command=self._lp_clear_single,
+        )
+        clear_btn.pack(side="right", padx=(0, 5))
+        self._lp_widgets["clear_btn"] = clear_btn
 
         # Offline banner
         self._lp_widgets["offline_banner"] = ctk.CTkLabel(
@@ -3585,10 +3642,138 @@ class ColdStackGUI:
             except Exception:
                 pass
 
+    def _lp_apply_selector_mode(self):
+        """Show/hide address entry vs account menu based on selector mode."""
+        selector = self._lp_widgets.get("selector_menu")
+        entry = self._lp_widgets.get("address_entry")
+        account_menu = self._lp_widgets.get("account_menu")
+        if not selector or not entry:
+            return
+        mode = selector.get()
+        if mode == "Account":
+            entry.pack_forget()
+            if account_menu:
+                account_menu.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        else:
+            if account_menu:
+                account_menu.pack_forget()
+            entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+    def _lp_on_selector_change(self, choice: str):
+        """Handle Address/Account mode switch."""
+        self.lp_selector_mode = choice
+        self._lp_apply_selector_mode()
+        # Save config
+        if self.key_manager and self.current_password:
+            cfg = self.key_manager.address_db.setdefault("config", {})
+            cfg["lp_selector_mode"] = choice
+            self.key_manager.save_encrypted_data(self.current_password)
+        # If Account mode, try to resolve and fetch
+        if choice == "Account":
+            account_menu = self._lp_widgets.get("account_menu")
+            if account_menu:
+                acct = account_menu.get()
+                if acct and acct != "(no accounts)":
+                    self._lp_on_account_change(acct)
+        else:
+            # Address mode: update saved-pools counter for current address
+            entry = self._lp_widgets.get("address_entry")
+            if entry:
+                addr = entry.get().strip()
+                if addr:
+                    self._lp_update_saved_pools_count(addr)
+
+    def _lp_on_account_change(self, choice: str):
+        """Handle account selection from dropdown."""
+        if not choice or choice == "(no accounts)":
+            return
+        self.lp_selected_account = choice
+        addr = self._lp_resolve_account_address(choice)
+        entry = self._lp_widgets.get("address_entry")
+        if entry and addr:
+            entry.delete(0, "end")
+            entry.insert(0, addr)
+            # Save config
+            if self.key_manager and self.current_password:
+                cfg = self.key_manager.address_db.setdefault("config", {})
+                cfg["lp_selected_account"] = choice
+                self.key_manager.save_encrypted_data(self.current_password)
+            # Update saved-pools counter and auto-fetch
+            self._lp_update_saved_pools_count(addr)
+            self._lp_maybe_auto_fetch()
+
+    def _lp_resolve_account_address(self, account_name: str) -> str:
+        """Resolve an account name to its first EVM/HYPE address."""
+        if not self.key_manager:
+            return ""
+        accounts_data = self.key_manager.address_db.get("accounts", {})
+        addresses = accounts_data.get(account_name, {}).get("addresses", [])
+        for addr in addresses:
+            coin = addr.get("coin", "").lower()
+            chain = addr.get("chain", "").lower()
+            if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
+                return addr.get("address", "")
+        return ""
+
+    def _lp_get_current_wallet_address(self) -> str:
+        """Return the wallet address currently selected in the LP tab.
+
+        Respects the Address/Account selector: in Account mode, resolves the
+        selected account's first EVM/HYPE address; in Address mode, returns the
+        raw address entry contents.
+        """
+        selector = self._lp_widgets.get("selector_menu")
+        mode = selector.get() if selector else "Address"
+        if mode == "Account":
+            account_menu = self._lp_widgets.get("account_menu")
+            account_name = account_menu.get() if account_menu else ""
+            if account_name and account_name != "(no accounts)":
+                return self._lp_resolve_account_address(account_name)
+            return ""
+        entry = self._lp_widgets.get("address_entry")
+        return entry.get().strip() if entry else ""
+
+    def _lp_restore_state(self):
+        """Restore LP tab selector state from config after login."""
+        if not self._lp_widgets:
+            return
+        selector = self._lp_widgets.get("selector_menu")
+        if not selector:
+            return
+        mode = getattr(self, 'lp_selector_mode', 'Address')
+        selector.set(mode)
+        self._lp_apply_selector_mode()
+        if mode == "Account":
+            account_menu = self._lp_widgets.get("account_menu")
+            if account_menu:
+                acct = getattr(self, 'lp_selected_account', '')
+                if acct:
+                    # Refresh account list in case accounts were added
+                    account_names = []
+                    if self.key_manager:
+                        account_names = sorted(
+                            self.key_manager.address_db.get("accounts", {}).keys()
+                        )
+                    if account_names:
+                        account_menu.configure(values=account_names)
+                    if acct in account_names:
+                        account_menu.set(acct)
+                        self._lp_on_account_change(acct)
+        else:
+            # Address mode: update saved-pools counter if address entry has content
+            entry = self._lp_widgets.get("address_entry")
+            if entry:
+                addr = entry.get().strip()
+                if addr:
+                    self._lp_update_saved_pools_count(addr)
+
     def _lp_prefill_address(self, account_name: str):
         """Pre-fill the LP tab address entry with the account's EVM address.
 
-        Priority order:
+        If the LP selector is in "Account" mode, set the account dropdown to
+        the selected account instead of filling the address entry directly.
+
+        Priority order (Address mode only):
         1. If entry already has an address, keep it.
         2. If saved pools exist whose wallet_address matches an EVM address
            of the selected account, pre-fill that address.
@@ -3603,6 +3788,23 @@ class ColdStackGUI:
         entry = self._lp_widgets.get("address_entry")
         if not entry:
             return
+
+        # If in Account mode, set the account dropdown and let
+        # _lp_on_account_change resolve the address.
+        selector = self._lp_widgets.get("selector_menu")
+        if selector and selector.get() == "Account":
+            account_menu = self._lp_widgets.get("account_menu")
+            if account_menu:
+                account_names = sorted(
+                    self.key_manager.address_db.get("accounts", {}).keys()
+                )
+                if account_names:
+                    account_menu.configure(values=account_names)
+                if account_name in account_names:
+                    account_menu.set(account_name)
+                    self._lp_on_account_change(account_name)
+            return
+
         # If entry already has an address, keep it
         current = entry.get().strip()
         if current:
@@ -3661,29 +3863,98 @@ class ColdStackGUI:
                 self.root.after(500, self._lp_do_fetch)
 
     def _lp_do_fetch(self):
-        """Fetch LP positions for the entered address (threaded)."""
+        """Fetch LP positions for the entered address (threaded).
+
+        v5.1: Fast-path — if saved pools exist for this wallet, fetch them
+        first (1-4 seconds) so the user sees live cards quickly, then run
+        the full wallet scan in the background to discover new positions.
+        If no saved pools exist, the full scan runs immediately (existing
+        behavior).
+        """
         if not self.lp_engine or not self.online_mode:
             self.show_notification("Offline - enable Online Mode in Settings", error=True)
             return
-        entry = self._lp_widgets.get("address_entry")
-        if not entry:
-            return
-        address = entry.get().strip()
+        selector = self._lp_widgets.get("selector_menu")
+        mode = selector.get() if selector else "Address"
+        address = self._lp_get_current_wallet_address()
         if not address:
             status = self._lp_widgets.get("status_label")
             if status:
-                status.configure(text="Enter a wallet or pool address.")
+                if mode == "Account":
+                    status.configure(text="Select an account first")
+                else:
+                    status.configure(text="Enter a wallet address first")
             return
         status = self._lp_widgets.get("status_label")
         refresh_btn = self._lp_widgets.get("refresh_btn")
         scroll = self._lp_widgets.get("scroll")
-        if status:
-            status.configure(text="Fetching...")
         if refresh_btn:
             refresh_btn.configure(state="disabled")
         if scroll:
             for widget in scroll.winfo_children():
                 widget.destroy()
+
+        # v5.1: Fast-path check — if saved pools exist, fetch them first.
+        saved = load_saved_pools(self.key_manager.address_db, wallet_address=address)
+        if saved:
+            if status:
+                status.configure(text="Fetching saved positions... Full wallet scan will follow.")
+            # Render placeholders immediately, then fast-fetch saved pools,
+            # then schedule the full scan in the background.
+            self._lp_render_saved_placeholders(address)
+            self._lp_fetch_saved_only(address)
+            self.root.after(2000, lambda: self._lp_do_full_scan(address))
+        else:
+            if status:
+                status.configure(text="Scanning wallet for new positions — this may take up to 6 minutes.")
+            # No saved pools — do full scan immediately (existing behavior).
+            self._lp_do_full_scan(address)
+
+    def _lp_fetch_saved_only(self, address: str):
+        """Fast-path: fetch only saved-pool positions by token ID (threaded).
+
+        Queries each saved pool's token ID via HyperliquidAdapter — no full
+        wallet scan.  For 1-3 saved pools this takes 1.4-4.2 seconds vs ~6
+        minutes for the full NFT scan.
+        """
+        from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
+
+        saved = load_saved_pools(self.key_manager.address_db, wallet_address=address)
+        if not saved:
+            return
+
+        adapter = HyperliquidAdapter()
+
+        def _fast_thread():
+            positions = []
+            for entry in saved:
+                tid = entry.get("token_id")
+                venue = entry.get("venue", "HyperEVM")
+                if not tid or venue != "HyperEVM":
+                    continue
+                try:
+                    pos = adapter.fetch_evm_position_by_token_id(
+                        tid, self.price_engine, wallet_address=address
+                    )
+                    if pos and not pos.error:
+                        positions.append(pos)
+                except Exception:
+                    pass
+            self.root.after(0, lambda: self._lp_on_loaded(positions, address))
+
+        threading.Thread(target=_fast_thread, daemon=True).start()
+
+    def _lp_do_full_scan(self, address: str):
+        """Full wallet scan: fetch all positions + merge saved pools (threaded).
+
+        Extracted from _lp_do_fetch() in v5.1 so the fast-path can run it in
+        the background after saved-pool cards have been rendered.
+        """
+        status = self._lp_widgets.get("status_label")
+        if status:
+            status.configure(
+                text="Fetching positions — scanning HyperEVM. This may take up to 6 minutes. Please be patient."
+            )
 
         def _fetch_thread():
             try:
@@ -3717,10 +3988,33 @@ class ColdStackGUI:
         threading.Thread(target=_fetch_thread, daemon=True).start()
 
     def _lp_do_fetch_single(self):
-        """Fetch a single LP position by NFT ID / position ID / pool address (threaded)."""
+        """Fetch a single LP position by NFT ID / position ID / pool address (threaded).
+
+        v5.1: Smart fetch — if the entered value is a numeric token ID or
+        hyperevm: prefix that matches a saved pool for the current wallet,
+        use the saved pool's venue to skip auto-detect.  Also maps friendly
+        platform dropdown names back to adapter keys.
+
+        v5.1: Address/Account selector aware — captures the current wallet
+        address before spawning the thread so Save Pool can resolve it even
+        when the widget state changes during the fetch.
+        """
         if not self.lp_engine or not self.online_mode:
             self.show_notification("Offline - enable Online Mode in Settings", error=True)
             return
+
+        selector = self._lp_widgets.get("selector_menu")
+        mode = selector.get() if selector else "Address"
+        wallet_address = self._lp_get_current_wallet_address()
+        if not wallet_address:
+            status = self._lp_widgets.get("status_label")
+            if status:
+                if mode == "Account":
+                    status.configure(text="Select an account first")
+                else:
+                    status.configure(text="Enter a wallet address first")
+            return
+
         pos_entry = self._lp_widgets.get("position_entry")
         if not pos_entry:
             return
@@ -3731,13 +4025,38 @@ class ColdStackGUI:
                 status.configure(text="Enter a position ID, NFT token ID, or pool address.")
             return
 
-        # Get selected platform
+        # v5.1: Map friendly platform name back to adapter key
         platform_menu = self._lp_widgets.get("platform_menu")
         selected_venue = None
         if platform_menu:
             val = platform_menu.get()
             if val and val != "Auto-detect":
-                selected_venue = val
+                # Map friendly name -> adapter key, or pass through as-is
+                selected_venue = self.LP_PLATFORM_MAP.get(val, val)
+
+        # v5.1: Smart saved-pool lookup — if the entered value is a numeric
+        # token ID or hyperevm: prefix, check saved pools for the current
+        # wallet to auto-select the venue.
+        raw_id = position_id
+        if raw_id.startswith("hyperevm:"):
+            raw_id = raw_id.split(":", 1)[1]
+        try:
+            numeric_tid = int(raw_id)
+        except (ValueError, TypeError):
+            numeric_tid = None
+
+        if numeric_tid is not None and wallet_address:
+            saved = load_saved_pools(self.key_manager.address_db, wallet_address=wallet_address)
+            for entry in saved:
+                if entry.get("token_id") == numeric_tid:
+                    # Found a matching saved pool — use its venue
+                    saved_venue = entry.get("venue", "HyperEVM")
+                    # Map saved venue back to adapter key
+                    if saved_venue == "HyperEVM":
+                        selected_venue = "hyperliquid"
+                    else:
+                        selected_venue = saved_venue.lower()
+                    break
 
         status = self._lp_widgets.get("status_label")
         refresh_btn = self._lp_widgets.get("refresh_btn")
@@ -3753,12 +4072,16 @@ class ColdStackGUI:
             for widget in scroll.winfo_children():
                 widget.destroy()
 
+        # Preserve the wallet address through the fetch so Save Pool can use
+        # it even if the selector state changes while the thread runs.
+        self._lp_last_fetched_address = wallet_address
+
         def _fetch_single_thread():
             try:
                 position = self.lp_engine.fetch_position(
                     position_id, venue_key=selected_venue
                 )
-                self.root.after(0, lambda: self._lp_on_loaded([position], position_id))
+                self.root.after(0, lambda: self._lp_on_loaded([position], wallet_address))
             except OfflineError:
                 self.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
             except Exception as e:
@@ -3793,6 +4116,11 @@ class ColdStackGUI:
             status.configure(text=f"Last check: {len(unique_positions)} position(s)")
         if refresh_btn:
             refresh_btn.configure(state="normal" if self.online_mode else "disabled")
+        fetch_pos_btn = self._lp_widgets.get("fetch_pos_btn")
+        if fetch_pos_btn:
+            fetch_pos_btn.configure(state="normal" if self.online_mode else "disabled")
+        # v5.1: Update saved-pools counter after rendering live cards
+        self._lp_update_saved_pools_count(address)
 
     def _lp_on_error(self, message: str):
         """Show an error in the LP tab."""
@@ -3808,6 +4136,9 @@ class ColdStackGUI:
             status.configure(text="Fetch failed")
         if refresh_btn:
             refresh_btn.configure(state="normal" if self.online_mode else "disabled")
+        fetch_pos_btn = self._lp_widgets.get("fetch_pos_btn")
+        if fetch_pos_btn:
+            fetch_pos_btn.configure(state="normal" if self.online_mode else "disabled")
 
     def _lp_render_card(self, position):
         """Render one LPPosition as a card matching v4.1 address card style."""
@@ -3816,6 +4147,11 @@ class ColdStackGUI:
             return
         card = ctk.CTkFrame(scroll, corner_radius=10)
         card.pack(fill="x", pady=5, padx=5)
+        # v5.1: Track rendered cards by position_id so individual cards can be
+        # removed without triggering a full wallet rescan.
+        cards = self._lp_widgets.setdefault("position_cards", {})
+        key = f"{position.venue}:{position.position_id}"
+        cards[key] = card
         info = ctk.CTkFrame(card, fg_color="transparent")
         info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
 
@@ -3834,7 +4170,7 @@ class ColdStackGUI:
             ctk.CTkLabel(info, text="  \u00b7  ".join(range_parts),
                          font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", pady=(2, 0))
 
-        # v5.2: Position range slider with marker
+        # v5.1: Position range slider with marker
         if position.range_low is not None and position.range_high is not None:
             pct = position.position_in_range_pct
             in_range = pct is not None and 0 <= pct <= 100
@@ -3929,13 +4265,26 @@ class ColdStackGUI:
                           command=lambda pos=position: self._lp_collect_fees_dialog(pos)
                           ).pack(pady=2)
 
-        # v5.1: Save Pool button — saves public identifiers to saved_pools.json
+        # v5.1: Save Pool / Remove Pool button — checks if pool is already saved
         if position.position_id and position.position_id.startswith("hyperevm:"):
-            ctk.CTkButton(button_frame, text="Save Pool", width=80, height=26,
-                          font=ctk.CTkFont(size=10),
-                          fg_color=("#0d6efd", "#0b5ed7"),
-                          command=lambda pos=position: self._lp_save_pool(pos)
-                          ).pack(pady=2)
+            try:
+                _token_id = int(position.position_id.split(":", 1)[1])
+            except (ValueError, IndexError):
+                _token_id = 0
+            _venue = position.venue or "HyperEVM"
+            if _token_id and is_pool_saved(self.key_manager.address_db, _token_id, _venue):
+                ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
+                              font=ctk.CTkFont(size=10),
+                              fg_color=("#dc3545", "#c82333"),
+                              hover_color=("#c82333", "#a71d2a"),
+                              command=lambda pos=position: self._lp_remove_pool(pos)
+                              ).pack(pady=2)
+            else:
+                ctk.CTkButton(button_frame, text="Save Pool", width=80, height=26,
+                              font=ctk.CTkFont(size=10),
+                              fg_color=("#0d6efd", "#0b5ed7"),
+                              command=lambda pos=position: self._lp_save_pool(pos)
+                              ).pack(pady=2)
 
     def _lp_save_pool(self, position):
         """Save the current position's public identifiers to saved_pools.json."""
@@ -3948,11 +4297,18 @@ class ColdStackGUI:
         except (ValueError, IndexError):
             self.show_notification("Could not parse token ID", error=True)
             return
-        # Get wallet address from the address entry
-        entry = self._lp_widgets.get("address_entry")
-        wallet_address = entry.get().strip() if entry else ""
+        # Resolve wallet address from the current selector mode, falling back
+        # to the address captured at fetch time if the widget state changed.
+        selector = self._lp_widgets.get("selector_menu")
+        mode = selector.get() if selector else "Address"
+        wallet_address = self._lp_get_current_wallet_address()
         if not wallet_address:
-            self.show_notification("Enter a wallet address first", error=True)
+            wallet_address = getattr(self, "_lp_last_fetched_address", "")
+        if not wallet_address:
+            if mode == "Account":
+                self.show_notification("Select an account first", error=True)
+            else:
+                self.show_notification("Enter a wallet address first", error=True)
             return
         pool_address = position.pool_id or ""
         pair = position.pair or ""
@@ -3967,6 +4323,119 @@ class ColdStackGUI:
             self.show_notification(f"Pool saved: {pair} (#{token_id})")
         else:
             self.show_notification("Failed to save pool", error=True)
+
+    def _lp_render_saved_placeholders(self, address: str):
+        """Render placeholder cards for saved pools immediately from cache.
+
+        Called at the start of _lp_do_fetch() so the user sees cached pool
+        data (pair, venue, token_id) while the full wallet scan runs in the
+        background.  When the scan completes, _lp_on_loaded() clears the
+        scroll frame and re-renders with live data — replacing these
+        placeholders automatically.
+        """
+        if not self.key_manager:
+            return
+        scroll = self._lp_widgets.get("scroll")
+        if not scroll:
+            return
+        saved = load_saved_pools(self.key_manager.address_db, wallet_address=address)
+        if not saved:
+            return
+        for entry in saved:
+            tid = entry.get("token_id")
+            venue = entry.get("venue", "HyperEVM")
+            pair = entry.get("pair", "Unknown Pair")
+            if not tid:
+                continue
+            # Placeholder card
+            card = ctk.CTkFrame(scroll, corner_radius=10)
+            card.pack(fill="x", pady=5, padx=5)
+            info = ctk.CTkFrame(card, fg_color="transparent")
+            info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+
+            header_text = f"\u23F3 {pair}  \u00b7  {venue}"
+            ctk.CTkLabel(info, text=header_text,
+                         font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
+            ctk.CTkLabel(info, text=f"ID: hyperevm:{tid}",
+                         font=ctk.CTkFont(size=10), text_color="gray50").pack(anchor="w", pady=(2, 0))
+            ctk.CTkLabel(info, text="Platform: HyperEVM (Project X)",
+                         font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", pady=(2, 0))
+            ctk.CTkLabel(info, text="Fetching live data...",
+                         font=ctk.CTkFont(size=11), text_color="gray50").pack(anchor="w", pady=(2, 0))
+
+            button_frame = ctk.CTkFrame(card, fg_color="transparent")
+            button_frame.pack(side="right", padx=10, pady=8)
+
+            # Remove Pool button on placeholder (same logic as live cards)
+            class _PlaceholderPos:
+                def __init__(self, position_id, pair, venue):
+                    self.position_id = position_id
+                    self.pair = pair
+                    self.venue = venue
+                    self.pool_id = ""
+
+            ph_pos = _PlaceholderPos(f"hyperevm:{tid}", pair, venue)
+            ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
+                          font=ctk.CTkFont(size=10),
+                          fg_color=("#dc3545", "#c82333"),
+                          hover_color=("#c82333", "#a71d2a"),
+                          command=lambda pos=ph_pos: self._lp_remove_pool(pos)
+                          ).pack(pady=2)
+
+    def _lp_remove_pool(self, position):
+        """Remove a saved pool from the encrypted vault."""
+        if not position.position_id or not position.position_id.startswith("hyperevm:"):
+            self.show_notification("Only HyperEVM positions can be removed")
+            return
+        try:
+            token_id = int(position.position_id.split(":", 1)[1])
+        except (ValueError, IndexError):
+            self.show_notification("Could not parse token ID", error=True)
+            return
+        venue = position.venue or "HyperEVM"
+        pair = position.pair or "Unknown"
+        ok = remove_saved_pool(self.key_manager.address_db, token_id, venue)
+        if ok:
+            ok = self.key_manager.save_encrypted_data(self.current_password)
+        if ok:
+            self.show_notification(f"Pool removed: {pair} (#{token_id})")
+            # Remove only this pool's card from the scroll frame — do not trigger
+            # a full wallet rescan.
+            entry = self._lp_widgets.get("address_entry")
+            addr = entry.get().strip() if entry else ""
+            card_key = f"{venue}:hyperevm:{token_id}"
+            cards = self._lp_widgets.get("position_cards", {})
+            card_frame = cards.pop(card_key, None)
+            if card_frame:
+                card_frame.destroy()
+            self._lp_update_saved_pools_count(addr)
+            scroll = self._lp_widgets.get("scroll")
+            status = self._lp_widgets.get("status_label")
+            remaining = len(cards)
+            if not cards and scroll:
+                ctk.CTkLabel(scroll, text="No LP positions found",
+                             font=ctk.CTkFont(size=13), text_color="gray60").pack(pady=20)
+            if status:
+                status.configure(text=f"Last check: {remaining} position(s)")
+        else:
+            self.show_notification("Failed to remove pool", error=True)
+
+    def _lp_clear_single(self):
+        """Clear the position entry, rendered cards, and status label (v5.1)."""
+        pos_entry = self._lp_widgets.get("position_entry")
+        if pos_entry:
+            pos_entry.delete(0, "end")
+        scroll = self._lp_widgets.get("scroll")
+        if scroll:
+            for widget in scroll.winfo_children():
+                widget.destroy()
+        status = self._lp_widgets.get("status_label")
+        if status:
+            status.configure(text="")
+        # Update saved-pools counter for current address
+        entry = self._lp_widgets.get("address_entry")
+        addr = entry.get().strip() if entry else ""
+        self._lp_update_saved_pools_count(addr)
 
     def _lp_compound_fees_dialog(self, position):
         """Show confirmation dialog and compound fees for an LP position."""
