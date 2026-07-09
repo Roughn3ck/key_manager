@@ -16,7 +16,14 @@
 - [x] `build_gui_v5.py` — PyInstaller hidden imports fixed: added `click`, `rich` (+ submodules), `urllib` (+ `--collect-submodules=urllib`), and full stdlib HTTPS/SSL stack (`ssl`, `_ssl`, `http.client`, `socket`, `_socket`) so the bundled EXE can resolve `https://` URLs for LP, balances, prices, vault tracker, and update checker
 - [x] README.md, CLAUDE.md, .clinerules updated for v5.1
 - [x] py_compile passes for modified source files
-- [x] EXE rebuilt with `python build_gui_v5.py` (46 MB, 09/07/2026) — all network features confirmed working (LP positions, perp state, spot balances, price feeds, vault tracker, update checker)
+- [x] `src/gui_main_v5.py` — LP position card now shows token holdings (e.g. "Holdings: 13.58 HYPE · 0.00734 UBTC") read from `position.deposit_amounts`
+- [x] `src/gui_main_v5.py` — Compound/Collect Fees buttons fixed: no longer incorrectly require `self.current_account` (Wallet tab selection); they now validate the LP tab wallet address and resolve the correct vault account name for the writer
+- [x] `requirements.txt` + `build_gui_v5.py` + `src/gui_main_v5.py` — bundled `certifi` CA certificates and set `SSL_CERT_FILE` at startup so the frozen EXE can verify GitHub/RPC HTTPS TLS certificates (fixes "Check for Updates" and all online features in the portable build)
+- [x] `src/venue_adapters/hyperliquid_writer.py` — Compound Fees fix per spec: snapshot balances before collect, wait for TX receipts, track nonces for multi-TX flows, use fee deltas (not total wallet balance), and use `MAX_UINT128` for uint128 `amount0Max`/`amount1Max` fields in `collect()`
+- [x] `src/gui_main_v5.py` + `build_gui_v5.py` — Embedded key_manager_agent HTTP server: GUI now starts an internal agent thread on `127.0.0.1:8842` after vault unlock so Collect/Compound Fees work without a separate process; server stops on vault lock
+- [x] `src/key_manager_agent.py` — `get_address()` chain matching changed from exact match to substring match so descriptive vault entries like "EVM (Ethereum / Arbitrum / Base)" resolve correctly for the writer
+- [x] Collect Fees from a Project X HyperEVM LP position tested and confirmed working end-to-end via the embedded agent
+- [x] EXE rebuilt with `python build_gui_v5.py` (26 MB, 10/07/2026) — all network features confirmed working (LP positions, perp state, spot balances, price feeds, vault tracker, update checker)
 
 ### Data Sources
 - **APR**: `vaultDetails.apr` (annualized decimal from Hyperliquid API, e.g. `-0.0052` → `-0.5%`)
@@ -26,12 +33,13 @@
 
 ### Known Limitations
 - Swap router address on HyperEVM still not confirmed — `swap()` raises `NotImplementedError`; cross-ratio rebalances deferred
-- Writer requires `key_manager_agent` running with `--serve` on localhost:8842
+- Compound Fees not yet tested live (waiting for fees to accrue)
 
 ### Next Steps
 - [ ] Research/confirm HyperEVM swap router contract address
-- [ ] Test writer end-to-end with agent on mainnet
-- [x] Build EXE with `python build_gui_v5.py` (46 MB, 09/07/2026 — all network features working)
+- [x] Collect Fees tested and confirmed working on Project X mainnet
+- [ ] Test Compound Fees end-to-end with embedded agent on mainnet once fees have accrued
+- [x] Build EXE with `python build_gui_v5.py` (26 MB, 10/07/2026 — all network features working)
 - [ ] Test EXE on clean Windows machine
 
 ---

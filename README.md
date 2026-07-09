@@ -40,8 +40,9 @@
 - **LP Positions Tab**: New CTkTabview with "Wallet" (was "Vault"), "HL1 Vaults" (new), "LP Positions" (unchanged). LP tab shows all LP positions for a wallet address with health emoji, pair, range, fees, value, PnL, and strategy suggestions.
 - **LP Engine** (`lp_engine.py`): Read-only LP position aggregation with adapter registry. Fetches positions from Hyperliquid L1 (perp/spot) and HyperEVM (concentrated-liquidity pools). Strategy engine analyzes positions and suggests actions (Hold/Rebalance/Withdraw).
 - **Hyperliquid Adapter** (`hyperliquid_adapter.py`): 1000+ line read adapter for HyperEVM NFT Position Manager + L1 perp/spot positions. Batch RPC with rate-limit handling. WHYPE/UBTC pool support. Fee estimation uses static `collect()` eth_call.
-- **Hyperliquid Writer** (`hyperliquid_writer.py`): Full VenueWriter implementation for HyperEVM. Wrap/unwrap HYPE, approve tokens, open/increase/decrease/collect/close LP positions, rebalance. Signs via key_manager_agent (localhost:8842) - never holds private keys.
+- **Hyperliquid Writer** (`hyperliquid_writer.py`): Full VenueWriter implementation for HyperEVM. Wrap/unwrap HYPE, approve tokens, open/increase/decrease/collect/close LP positions, rebalance. Signs via the embedded key_manager_agent on `localhost:8842` - never holds private keys. An external agent can still be launched manually if desired.
 - **Write Operations with Confirmation**: Advanced mode shows "Collect Fees" button on LP cards. Every write operation requires explicit user confirmation dialog. Writer is a tool, not an autonomous agent.
+- **Collect Fees Tested**: Collecting uncollected fees from a Project X HyperEVM LP position has been tested and confirmed working end-to-end via the embedded agent.
 - **Address Pre-fill**: LP tab and HL1 Vaults tab address entry auto-fill from the selected account's first EVM/HYPE address.
 - **Offline-aware**: LP tab and HL1 Vaults tab respect Go Online toggle. Refresh disabled when offline. Offline banner shown.
 

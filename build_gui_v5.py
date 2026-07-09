@@ -100,6 +100,13 @@ def build_gui_exe():
         '--hidden-import=saved_pools',
         # --- v5.1: Vault tracker ---
         '--hidden-import=vault_tracker',
+        # --- v5.1: certifi CA bundle for HTTPS TLS verification in frozen EXE ---
+        '--hidden-import=certifi',
+        '--collect-data=certifi',
+        # --- v5.1: Embedded key_manager_agent HTTP server ---
+        '--hidden-import=key_manager_agent',
+        '--hidden-import=http.server',
+        '--hidden-import=socketserver',
         # --- Collect-all for packages with data files ---
         '--collect-all=customtkinter',
         '--collect-all=cryptography',
@@ -149,8 +156,11 @@ def copy_to_usb_deployment():
     backups_dir = Path('backups')
     backups_dir.mkdir(exist_ok=True)
     if target_path.exists():
-        # v5.1: Fix backup naming — use coldstack_v4_2.exe for the previous build
-        backup_path = backups_dir / 'coldstack_v4_2.exe'
+        # Backup the previous production EXE using the version it was built from.
+        # Bump this string whenever the shipped version changes so the backup name
+        # matches the last stable build.
+        PREVIOUS_VERSION_TAG = "v5_1"
+        backup_path = backups_dir / f'coldstack_{PREVIOUS_VERSION_TAG}.exe'
         print(f"Backing up previous EXE to {backup_path}...")
         shutil.copy2(target_path, backup_path)
 

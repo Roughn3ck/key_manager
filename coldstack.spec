@@ -1,10 +1,12 @@
 # -*- mode: python ; coding: utf-8 -*-
+from PyInstaller.utils.hooks import collect_data_files
 from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('rpc_endpoints.json', '.')]
 binaries = []
-hiddenimports = ['customtkinter', 'cryptography', 'argon2', 'pyperclip', 'json', 'queue', 'pathlib', 'datetime', 'openpyxl', 'hdwallet', 'mnemonic', 'coincurve', 'base58', 'cbor2', 'pynacl', 'ed25519_blake2b', 'crcmod', 'Crypto', 'Crypto.Hash', 'Crypto.Hash.keccak', 'click', 'rich', 'rich.console', 'rich.table', 'rich.panel', 'rich.progress', 'urllib', 'urllib.request', 'urllib.error', 'ssl', '_ssl', 'http.client', 'socket', '_socket', 'lp_engine', 'price_engine', 'balance_engine', 'rpc_config', 'venue_adapters', 'venue_adapters.hyperliquid_adapter', 'venue_adapters.venue_writer', 'venue_adapters.hyperliquid_writer', 'saved_pools', 'vault_tracker']
+hiddenimports = ['customtkinter', 'cryptography', 'argon2', 'pyperclip', 'json', 'queue', 'pathlib', 'datetime', 'openpyxl', 'hdwallet', 'mnemonic', 'coincurve', 'base58', 'cbor2', 'pynacl', 'ed25519_blake2b', 'crcmod', 'Crypto', 'Crypto.Hash', 'Crypto.Hash.keccak', 'click', 'rich', 'rich.console', 'rich.table', 'rich.panel', 'rich.progress', 'urllib', 'urllib.request', 'urllib.error', 'ssl', '_ssl', 'http.client', 'socket', '_socket', 'lp_engine', 'price_engine', 'balance_engine', 'rpc_config', 'venue_adapters', 'venue_adapters.hyperliquid_adapter', 'venue_adapters.venue_writer', 'venue_adapters.hyperliquid_writer', 'saved_pools', 'vault_tracker', 'certifi', 'key_manager_agent', 'http.server', 'socketserver']
+datas += collect_data_files('certifi')
 hiddenimports += collect_submodules('urllib')
 hiddenimports += collect_submodules('venue_adapters')
 tmp_ret = collect_all('customtkinter')

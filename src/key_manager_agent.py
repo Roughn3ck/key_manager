@@ -529,9 +529,13 @@ class KeyManagerAgent:
             return {"status": "error", "error": f"Account '{account}' not found"}
         addresses = accounts[account].get("addresses", [])
         if chain:
-            # Filter by chain match (case-insensitive)
-            filtered = [a for a in addresses if a.get("chain", "").lower() == chain.lower()
-                        or a.get("coin", "").lower() == chain.lower()]
+            # Filter by chain match (case-insensitive substring). Vault entries
+            # use descriptive coin/chain labels like "EVM (Ethereum / Arbitrum
+            # / Base)" so an exact match fails; substring match is consistent
+            # with _get_private_key() and _lp_resolve_account_address().
+            chain_lower = chain.lower()
+            filtered = [a for a in addresses if chain_lower in a.get("chain", "").lower()
+                        or chain_lower in a.get("coin", "").lower()]
             if not filtered:
                 return {"status": "error", "error": f"No {chain} address found for account '{account}'"}
             return {"status": "ok", "result": filtered}

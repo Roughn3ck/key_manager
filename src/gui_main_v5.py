@@ -13,6 +13,33 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w', encoding='utf-8', errors='replace')
 
+# In the PyInstaller-frozen EXE, Python cannot locate the CA bundle that the
+# stdlib ssl module uses by default. certifi ships a current CA bundle as a
+# data file. We set SSL_CERT_FILE for any code that checks it, and we also
+# monkey-patch ssl.create_default_context so every urllib.request HTTPS call
+# (update check, balances, prices, vault tracker, LP) loads the certifi
+# bundle explicitly. This must run before any network module is imported.
+try:
+    import certifi
+    import ssl as _ssl_module
+    _certifi_bundle = certifi.where()
+    os.environ.setdefault("SSL_CERT_FILE", _certifi_bundle)
+    os.environ.setdefault("SSL_CERT_DIR", os.path.dirname(_certifi_bundle))
+
+    _original_create_default_context = _ssl_module.create_default_context
+
+    def _create_default_context_with_certifi(*args, **kwargs):
+        context = _original_create_default_context(*args, **kwargs)
+        try:
+            context.load_verify_locations(_certifi_bundle)
+        except Exception:
+            pass
+        return context
+
+    _ssl_module.create_default_context = _create_default_context_with_certifi
+except Exception:
+    pass
+
 # Hide console window on Windows only when running as a frozen EXE.
 # Calling FreeConsole() in script mode detaches stdout/stderr from the
 # terminal, causing fatal "I/O operation on closed file" errors that crash
@@ -305,6 +332,10 @@ class ColdStackGUI:
         self.vault_tracker: Optional[HyperliquidVaultTracker] = None
         self._vault_widgets: Dict[str, Any] = {}
 
+        # v5.1: Embedded key_manager_agent HTTP server
+        self._agent_server: Optional[Any] = None
+        self._agent_thread: Optional[threading.Thread] = None
+
         # Session management
         self.session_start_time = None
         self.session_timeout = 300  # 5 minutes in seconds
@@ -509,6 +540,10 @@ class ColdStackGUI:
                 if migrate_saved_pools_json(self.key_manager.address_db, base_dir):
                     self.key_manager.save_encrypted_data(self.current_password)
 
+                # v5.1: Start embedded key_manager_agent HTTP server so Collect/Compound
+                # Fees work without a separate agent process.
+                self._start_embedded_agent()
+
                 # Create main dashboard after short delay
                 self.root.after(500, self.create_main_dashboard)
             else:
@@ -534,6 +569,10 @@ class ColdStackGUI:
                 widget.destroy()
             self._notification_label = None
             self._notification_timer = None
+
+            # v5.1: Ensure embedded agent is running (restarts if dashboard is
+            # recreated, e.g., after returning from lock screen path).
+            self._start_embedded_agent()
 
             # Create main layout first (creates status bar with session_timer_label)
             self.create_main_layout()
@@ -3445,6 +3484,9 @@ class ColdStackGUI:
         self.vault_tracker = None
         self._vault_widgets = {}
 
+        # v5.1: Stop embedded key_manager_agent HTTP server
+        self._stop_embedded_agent()
+
         # Clear sensitive data
         self.current_password = None
         self.session_start_time = None
@@ -3459,6 +3501,103 @@ class ColdStackGUI:
 
         # Return to login screen
         self.create_login_screen()
+
+    def _stop_embedded_agent(self):
+        """Shut down the embedded key_manager_agent HTTP server, if running."""
+        if hasattr(self, "_agent_server") and self._agent_server:
+            try:
+                self._agent_server.shutdown()
+                self._agent_server = None
+                print("[embedded_agent] HTTP server stopped")
+            except Exception as e:
+                print(f"[embedded_agent] Error stopping server: {e}")
+
+    def _start_embedded_agent(self):
+        """Start the key_manager_agent HTTP server in a background thread.
+
+        This allows Collect/Compound Fees to work without a separate agent
+        process. The server runs on localhost:8842 and uses the already-
+        unlocked vault data. If an external agent is already listening on
+        port 8842, the embedded agent is skipped.
+        """
+        try:
+            from key_manager_agent import KeyManagerAgent
+            from http.server import BaseHTTPRequestHandler, HTTPServer
+            import socketserver
+
+            # If an external agent is already running, don't start our own.
+            try:
+                from venue_adapters.hyperliquid_writer import HyperliquidWriter
+                test_writer = HyperliquidWriter()
+                if test_writer.is_available():
+                    print("[embedded_agent] External agent already available on port 8842")
+                    return
+            except Exception:
+                pass
+
+            if not self.key_manager or not self.current_password:
+                print("[embedded_agent] Vault not unlocked, cannot start embedded agent")
+                return
+
+            vault_path = str(self.key_manager.data_file)
+            password = self.current_password
+
+            agent = KeyManagerAgent(
+                vault_path=vault_path,
+                password=password,
+                session_timeout=99999,  # GUI manages session lifecycle
+            )
+            if not agent.unlocked:
+                print("[embedded_agent] Failed to unlock vault for embedded agent")
+                return
+
+            class AgentHandler(BaseHTTPRequestHandler):
+                def _send_json(self, code, data):
+                    body = json.dumps(data).encode("utf-8")
+                    self.send_response(code)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+
+                def do_POST(self):
+                    content_length = int(self.headers.get("Content-Length", 0))
+                    body = self.rfile.read(content_length)
+                    try:
+                        cmd = json.loads(body.decode("utf-8"))
+                        result = agent.handle_command(cmd)
+                        self._send_json(200, result)
+                    except Exception as e:
+                        self._send_json(200, {"status": "error", "error": str(e)})
+
+                def do_GET(self):
+                    self._send_json(200, agent.status())
+
+                def log_message(self, format, *args):
+                    pass  # Suppress access logs
+
+            def _serve():
+                try:
+                    server = HTTPServer(("127.0.0.1", 8842), AgentHandler)
+                    server.daemon_threads = True
+                    self._agent_server = server
+                    print("[embedded_agent] HTTP server started on http://127.0.0.1:8842")
+                    server.serve_forever()
+                except OSError as e:
+                    if "Address already in use" in str(e):
+                        print("[embedded_agent] Port 8842 already in use — external agent may be running")
+                    else:
+                        print(f"[embedded_agent] Failed to start HTTP server: {e}")
+                except Exception as e:
+                    print(f"[embedded_agent] Server error: {e}")
+
+            self._agent_thread = threading.Thread(target=_serve, daemon=True)
+            self._agent_thread.start()
+            print("[embedded_agent] Agent thread started")
+        except ImportError:
+            print("[embedded_agent] key_manager_agent module not available")
+        except Exception as e:
+            print(f"[embedded_agent] Error starting agent: {e}")
 
     # ------------------------------------------------------------------
     # v5.0: LP Positions tab
@@ -3732,6 +3871,28 @@ class ColdStackGUI:
             return ""
         entry = self._lp_widgets.get("address_entry")
         return entry.get().strip() if entry else ""
+
+    def _lp_get_current_account_name(self) -> str:
+        """Return the vault account name for the LP tab's current selection.
+
+        In Account mode this is the dropdown value. In Address mode it
+        reverse-resolves the address to an account name from the vault.
+        """
+        selector = self._lp_widgets.get("selector_menu")
+        mode = selector.get() if selector else "Address"
+        if mode == "Account":
+            account_menu = self._lp_widgets.get("account_menu")
+            name = account_menu.get() if account_menu else ""
+            return name if name != "(no accounts)" else ""
+        wallet_address = self._lp_get_current_wallet_address()
+        if not wallet_address or not self.key_manager:
+            return ""
+        accounts_data = self.key_manager.address_db.get("accounts", {})
+        for acct, data in accounts_data.items():
+            for addr in data.get("addresses", []):
+                if addr.get("address", "").lower() == wallet_address.lower():
+                    return acct
+        return ""
 
     def _lp_restore_state(self):
         """Restore LP tab selector state from config after login."""
@@ -4231,6 +4392,12 @@ class ColdStackGUI:
             ctk.CTkLabel(info, text="  ·  ".join(value_parts),
                          font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", pady=(2, 0))
 
+        if position.deposit_amounts:
+            holdings_parts = [f"{amt:g} {sym}" for sym, amt in position.deposit_amounts.items() if amt]
+            if holdings_parts:
+                ctk.CTkLabel(info, text=f"Holdings: {' · '.join(holdings_parts)}",
+                             font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", pady=(2, 0))
+
         ctk.CTkLabel(info, text=f"Suggestion: {position.suggested_action}",
                      font=ctk.CTkFont(size=11, weight="bold"),
                      text_color={"safe": "#51cf94", "watch": "#ffd43b",
@@ -4440,8 +4607,13 @@ class ColdStackGUI:
     def _lp_compound_fees_dialog(self, position):
         """Show confirmation dialog and compound fees for an LP position."""
         from tkinter import messagebox
-        if not self.current_account:
-            self.show_notification("Select a vault account first", error=True)
+        wallet_address = self._lp_get_current_wallet_address() or getattr(self, "_lp_last_fetched_address", "")
+        if not wallet_address:
+            self.show_notification("Enter or select a wallet address first", error=True)
+            return
+        account_name = self._lp_get_current_account_name()
+        if not account_name:
+            self.show_notification("Could not resolve vault account for this address", error=True)
             return
         confirm = messagebox.askyesno(
             "Confirm: Compound Fees",
@@ -4471,7 +4643,7 @@ class ColdStackGUI:
                         "Agent not running. Start key_manager_agent with --serve.", error=True))
                     return
                 tx_hashes = writer.compound_fees(CompoundFeesParams(
-                    account=self.current_account,
+                    account=account_name,
                     position_id=position.position_id,
                 ))
                 if tx_hashes:
@@ -4491,8 +4663,13 @@ class ColdStackGUI:
     def _lp_collect_fees_dialog(self, position):
         """Show confirmation dialog and collect fees for an LP position."""
         from tkinter import messagebox
-        if not self.current_account:
-            self.show_notification("Select a vault account first", error=True)
+        wallet_address = self._lp_get_current_wallet_address() or getattr(self, "_lp_last_fetched_address", "")
+        if not wallet_address:
+            self.show_notification("Enter or select a wallet address first", error=True)
+            return
+        account_name = self._lp_get_current_account_name()
+        if not account_name:
+            self.show_notification("Could not resolve vault account for this address", error=True)
             return
         confirm = messagebox.askyesno(
             "Confirm: Collect Fees",
@@ -4519,7 +4696,7 @@ class ColdStackGUI:
                         "Agent not running. Start key_manager_agent with --serve.", error=True))
                     return
                 tx_hash = writer.collect_fees(CollectFeesParams(
-                    account=self.current_account,
+                    account=account_name,
                     position_id=position.position_id,
                 ))
                 if tx_hash:
