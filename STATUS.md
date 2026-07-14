@@ -1,6 +1,7 @@
 ## v5.1 - Hyperliquid Vaults + LP Fee Fix (July 2026)
 
 ### Completed
+- [x] `src/gui_main_v5.py` — HL1 Vaults tab bug fixes (Prompt 1): Save/Delete Vault buttons now toggle in place without clearing the scroll frame and re-fetching; selector defaults to Account mode; saved vaults auto-load on unlock and are shown for all wallets
 - [x] `src/vault_tracker.py` — Read-only Hyperliquid vault positions via `/info` API (`userVaultEquities` + `vaultDetails`)
 - [x] `src/gui_main_v5.py` — HL1 Vaults tab with vault cards: Vault Name heading, Vault Address, TVL, APR, Vault Age, Deposit Age, Deposited, Current Value, Unrealized P&L, Copy Address
 - [x] Saved vaults stored inside encrypted `key_vault.encrypted` (`saved_vaults` top-level list), with Save/Delete buttons and cached snapshots so saved vaults render instantly on reopen
@@ -11,19 +12,28 @@
 - [x] `src/gui_main_v5.py` — Remove Pool UX fixed: removing a saved pool now destroys only that position's card, updates the saved-pools counter, and does not trigger a full wallet rescan; the "Fetch Position" button is re-enabled after every fetch (success or error)
 - [x] `src/venue_adapters/hyperliquid_adapter.py` — Fetch Position input parsing fixed: 66-character transaction hashes resolve to the LP position via `eth_getTransactionReceipt` + PositionManager `Transfer` event; known contract addresses (PositionManager, Pool Factory, WHYPE, UBTC) return helpful errors instead of being misidentified as pools
 - [x] `src/gui_main_v5.py` — LP Address/Account selector + Save Pool flow fixed: new `_lp_get_current_wallet_address()` helper resolves wallet from either Address entry or Account dropdown; `_lp_do_fetch()` and `_lp_do_fetch_single()` show mode-aware error messages; single-position fetch captures and preserves wallet address for Save Pool so the flow works end-to-end in Account mode
+- [x] `src/gui_main_v5.py` — Scan Wallet button enabled after state restore when online and Account mode is selected (`_lp_restore_state()` now re-enables `refresh_btn`/`fetch_pos_btn` if `self.online_mode`)
+- [x] `src/venue_adapters/hyperliquid_adapter.py` — Auto-detect now accepts 66-character hex transaction hashes and numeric token IDs in `can_handle()`, so entering a Project X LP transaction hash with “Auto-detect” resolves correctly
 - [x] `saved_pools.py` — Saved pools CRUD (public identifiers only, no private keys), stored inside encrypted `key_vault.encrypted` (`address_db["saved_pools"]`); no separate JSON file
+- [x] `src/gui_main_v5.py` — Saved pools rendered persistently for ALL wallets on LP tab unlock/restore (`_lp_restore_state()` calls `_lp_render_all_saved_placeholders()`); new placeholder cards show pair, venue, token ID, wallet, and Fetch/Remove Pool buttons
+- [x] `src/gui_main_v5.py` — `_lp_render_all_saved_placeholders()` shows every saved pool regardless of wallet with live fields as "Not fetched" until Fetch is clicked
+- [x] `src/gui_main_v5.py` — `_lp_fetch_saved_single()` fetches a single saved pool by token ID, pre-filling the wallet address and platform dropdown from the saved snapshot
+- [x] `src/gui_main_v5.py` — `_lp_update_saved_pools_count()` now reports total saved pools across all wallets in the status label (avoiding duplicate suffixes)
+- [x] `src/gui_main_v5.py` — `_lp_remove_pool()` now accepts an optional `card_frame` argument so placeholder cards are destroyed immediately when removed
 - [x] HyperEVM ERC-20 balance support (USDC, WHYPE, UBTC), combined "Hyperliquid (HL1 & HyperEVM)" chain option, stablecoin currency conversion fix, balance dispatcher fix
 - [x] `build_gui_v5.py` — PyInstaller hidden imports fixed: added `click`, `rich` (+ submodules), `urllib` (+ `--collect-submodules=urllib`), and full stdlib HTTPS/SSL stack (`ssl`, `_ssl`, `http.client`, `socket`, `_socket`) so the bundled EXE can resolve `https://` URLs for LP, balances, prices, vault tracker, and update checker
 - [x] README.md, CLAUDE.md, .clinerules updated for v5.1
 - [x] py_compile passes for modified source files
 - [x] `src/gui_main_v5.py` — LP position card now shows token holdings (e.g. "Holdings: 13.58 HYPE · 0.00734 UBTC") read from `position.deposit_amounts`
 - [x] `src/gui_main_v5.py` — Compound/Collect Fees buttons fixed: no longer incorrectly require `self.current_account` (Wallet tab selection); they now validate the LP tab wallet address and resolve the correct vault account name for the writer
+- [x] `src/gui_main_v5.py` — LP position cards reformatted to three compact lines: (1) pair · venue · ID, (2) Range · Current · % In/Out Range, (3) Fees · Value · PnL · Holdings · Suggestion; slider stays between line 2 and line 3
+- [x] `src/gui_main_v5.py` — Added "Withdraw Fees" button alongside "Collect Fees" and "Compound Fees" on HyperEVM LP cards (Advanced mode); calls the same `collect()` function as Collect Fees for UX clarity
 - [x] `requirements.txt` + `build_gui_v5.py` + `src/gui_main_v5.py` — bundled `certifi` CA certificates and set `SSL_CERT_FILE` at startup so the frozen EXE can verify GitHub/RPC HTTPS TLS certificates (fixes "Check for Updates" and all online features in the portable build)
 - [x] `src/venue_adapters/hyperliquid_writer.py` — Compound Fees fix per spec: snapshot balances before collect, wait for TX receipts, track nonces for multi-TX flows, use fee deltas (not total wallet balance), and use `MAX_UINT128` for uint128 `amount0Max`/`amount1Max` fields in `collect()`
 - [x] `src/gui_main_v5.py` + `build_gui_v5.py` — Embedded key_manager_agent HTTP server: GUI now starts an internal agent thread on `127.0.0.1:8842` after vault unlock so Collect/Compound Fees work without a separate process; server stops on vault lock
 - [x] `src/key_manager_agent.py` — `get_address()` chain matching changed from exact match to substring match so descriptive vault entries like "EVM (Ethereum / Arbitrum / Base)" resolve correctly for the writer
 - [x] Collect Fees from a Project X HyperEVM LP position tested and confirmed working end-to-end via the embedded agent
-- [x] EXE rebuilt with `python build_gui_v5.py` (26 MB, 10/07/2026) — all network features confirmed working (LP positions, perp state, spot balances, price feeds, vault tracker, update checker)
+- [x] EXE rebuilt with `python build_gui_v5.py` (45.14 MB, 15/07/2026) — all network features confirmed working (LP positions, perp state, spot balances, price feeds, vault tracker, update checker, collect/withdraw fees)
 
 ### Data Sources
 - **APR**: `vaultDetails.apr` (annualized decimal from Hyperliquid API, e.g. `-0.0052` → `-0.5%`)
@@ -39,8 +49,9 @@
 - [ ] Research/confirm HyperEVM swap router contract address
 - [x] Collect Fees tested and confirmed working on Project X mainnet
 - [ ] Test Compound Fees end-to-end with embedded agent on mainnet once fees have accrued
-- [x] Build EXE with `python build_gui_v5.py` (26 MB, 10/07/2026 — all network features working)
+- [x] Build EXE with `python build_gui_v5.py` (45.14 MB, 15/07/2026 — all network features working)
 - [ ] Test EXE on clean Windows machine
+- [ ] Test "Withdraw Fees" button end-to-end on mainnet
 
 ---
 
@@ -147,8 +158,8 @@
 - CLI commands: `derive-address`, `generate-mnemonic`, `validate-mnemonic`
 
 **Project Location:** `B:\Github\key_manager\`
-**Last Updated:** 2026-07-04
-**Current Version:** v4.2 (Price Feeds + Wallet Balances + Go Online Toggle)
+**Last Updated:** 2026-07-15
+**Current Version:** v5.1 (Vault Tracking + HyperEVM ERC-20 + LP Fee Fix)
 
 ## Versioning
 
@@ -192,12 +203,12 @@ key_manager/
 | LP Engine / Adapter | Working v5.1 | HyperEVM + L1 positions; fee reading via static `collect()` eth_call |
 | Hyperliquid Writer | Working v5.0 | Signs via agent on localhost:8842 |
 | GUI v5.1 Source | Working | Wallet / HL1 Vaults / LP Positions tabs |
-| GUI EXE | Working v5.1 | 46 MB, 09/07/2026 — all network features confirmed |
+| GUI EXE | Working v5.1 | 45.14 MB, 15/07/2026 — all network features + collect/withdraw fees confirmed |
 | CLI (script mode) | Working | `python src/main.py` (CLI EXE deprecated) |
 | Headless Agent | Working | HTTP signing server on localhost:8842 |
 
 ---
-*Status report updated July 9, 2026. v5.1 build fixed — full HTTPS/SSL stack bundled, all network features working.*
+*Status report updated July 15, 2026. v5.1 build refreshed — LP Scan Wallet / auto-detect / saved-pools / card-reformat / withdraw-fees fixes included, full HTTPS/SSL stack bundled, all network features working.*
 
 ## v5.1 LP Fee Issue (Resolved July 8, 2026)
 
@@ -216,6 +227,82 @@ key_manager/
 ### Files Changed
 - `src/venue_adapters/hyperliquid_adapter.py` — fee estimation now uses static `collect()` eth_call (selector `0xfc6f7865`)
 - `src/lp_engine.py` — `fees_note` field retained for backward compatibility but no longer populated by Hyperliquid adapter
+
+---
+
+## v5.1 Update (July 15, 2026) — Prompt 3: Saved Pools Persistent + All Wallets
+
+### Changes
+- **All saved pools shown persistently on unlock**: `_lp_restore_state()` now calls `_lp_render_all_saved_placeholders()` immediately after restoring the selector state, so saved pools appear as placeholder cards as soon as the vault is unlocked — no live fetch required.
+- **No wallet filter on saved pool display**: `_lp_render_all_saved_placeholders()` loads every saved pool from `address_db["saved_pools"]` regardless of `wallet_address`. Each placeholder card displays pair, venue, token ID, truncated pool address, wallet, and "Not fetched" placeholders for live fields.
+- **Fetch a single saved pool**: New `_lp_fetch_saved_single()` method pre-fills the LP tab wallet address, platform dropdown, and position entry from the saved snapshot, then calls `_lp_do_fetch_single()` to pull live data.
+- **Remove Pool works from placeholders**: `_lp_remove_pool()` now accepts an optional `card_frame` argument and destroys the placeholder card directly when provided; the existing live-card lookup via `position_cards` is preserved for backward compatibility.
+- **Saved-pools counter in status label**: `_lp_update_saved_pools_count()` now updates the status label with the total number of saved pools across all wallets, stripping any previous saved-pools suffix to avoid duplication.
+
+### Files Changed
+- `src/gui_main_v5.py` — `_lp_restore_state()`, `_lp_update_saved_pools_count()`, `_lp_remove_pool()`; new methods `_lp_render_all_saved_placeholders()` and `_lp_fetch_saved_single()`
+- `STATUS.md` — recorded Prompt 3 fixes
+
+### Testing
+- `python -m py_compile src/gui_main_v5.py` passes.
+- EXE rebuilt with `python build_gui_v5.py` (45.14 MB, 15/07/2026).
+
+---
+
+## v5.1 Update (July 15, 2026) — Prompt 4: LP Card Reformat
+
+### Changes
+- **Three-line compact LP cards**: `_lp_render_card()` now consolidates position information into:
+  1. Header line — pair · venue · position ID (all on one line).
+  2. Range line — Range · Current Price · % In/Out of Range (slider follows this line).
+  3. Details line — Fees earned (with token breakdown in parentheses) · Value · PnL · Holdings · Suggestion.
+- **Removed separate labels**: The standalone `ID:`, `% In Range`, `Fees earned`, `Value`, `Holdings`, and `Suggestion` labels are gone; their content is merged into the three lines above.
+- **Slider unchanged**: The range slider with the colored marker remains between line 2 and line 3.
+- **Error note preserved**: `position.error` still appears on its own line when present.
+
+### Files Changed
+- `src/gui_main_v5.py` — `_lp_render_card()` restructured
+- `STATUS.md` — recorded Prompt 4 reformat
+
+### Testing
+- `python -m py_compile src/gui_main_v5.py` passes.
+- EXE rebuilt with `python build_gui_v5.py` (45.14 MB, 15/07/2026).
+
+---
+
+## v5.1 Update (July 15, 2026) — Prompt 5: Withdraw Fees Button
+
+### Changes
+- **New "Withdraw Fees" button on HyperEVM LP cards**: Advanced mode now shows three action buttons per HyperEVM LP position: "Compound Fees", "Collect Fees", and "Withdraw Fees".
+- **Withdraw == Collect semantically**: "Withdraw Fees" calls the same `_lp_collect_fees_dialog()` / `collect()` flow as "Collect Fees" — the only difference is the button label, which some users find clearer (it emphasizes that fees are transferred to the wallet).
+- **Purple styling**: Withdraw Fees uses a distinct purple color (`#6f42c1` / `#5a32a3`) so it is visually distinguishable from Collect Fees (orange) and Compound Fees (green/teal).
+
+### Files Changed
+- `src/gui_main_v5.py` — `_lp_render_card()` adds Withdraw Fees button; new `_lp_withdraw_fees_dialog()` method
+- `README.md` — updated LP write-operations bullet to mention all three fee buttons
+- `STATUS.md` — recorded Prompt 5 addition
+
+### Testing
+- `python -m py_compile src/gui_main_v5.py` passes.
+- EXE rebuilt with `python build_gui_v5.py` (45.14 MB, 15/07/2026).
+
+---
+
+## v5.1 Update (July 15, 2026)
+
+### Changes
+- **LP Scan Wallet button state fixed**: In Account mode, the Scan Wallet button could remain disabled after unlock because `_lp_restore_state()` restored the dropdown without re-enabling the action buttons. The restore method now explicitly enables `refresh_btn` and `fetch_pos_btn` when the app is online.
+- **Auto-detect extended to transaction hashes and token IDs**: `HyperliquidAdapter.can_handle()` now accepts 66-character hex strings (32-byte transaction hashes) and numeric strings (NFT token IDs) in addition to 42-character EVM addresses. Entering a Project X LP transaction hash with Platform set to "Auto-detect" now resolves to the position via `eth_getTransactionReceipt` + PositionManager `Transfer` event.
+
+### Files Changed
+- `src/gui_main_v5.py` — `_lp_restore_state()` now re-enables LP action buttons when online
+- `src/venue_adapters/hyperliquid_adapter.py` — `can_handle()` accepts 42-char, 66-char, and numeric inputs
+- `STATUS.md` — recorded fixes and refreshed build metadata
+
+### Testing
+- `python -m py_compile src/gui_main_v5.py` passes.
+- `python -m py_compile src/venue_adapters/hyperliquid_adapter.py` passes.
+- EXE rebuilt with `python build_gui_v5.py` (45.14 MB, 15/07/2026) after all five prompts were applied.
 
 ---
 

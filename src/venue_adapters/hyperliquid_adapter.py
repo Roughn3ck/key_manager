@@ -721,14 +721,19 @@ class HyperliquidAdapter(VenueAdapter):
         - 42-char hex (20-byte EVM) is treated as Hyperliquid L1 unless chain_hint
           explicitly says HyperEVM/hype.
         - 42-char hex with chain_hint 'hyperevm' or 'hype' is HyperEVM.
+        - 66-char hex (32-byte transaction hash) is accepted as HyperEVM (used to
+          resolve LP positions via eth_getTransactionReceipt + Transfer event).
+        - Numeric strings (NFT token IDs) are accepted as HyperEVM.
         """
         hint = chain_hint.lower()
         if any(k in hint for k in ("hyperliquid", "hyperevm", "hype")):
             return _is_hex_string(address_or_id, length=42) or _is_hex_string(
-                address_or_id, length=None
-            )
-        # Default: only accept 20-byte EVM addresses as Hyperliquid L1 wallet addresses.
-        return _is_hex_string(address_or_id, length=42)
+                address_or_id, length=66
+            ) or _is_hex_string(address_or_id, length=None)
+        # Default: accept 42-char EVM addresses and 66-char tx hashes.
+        return _is_hex_string(address_or_id, length=42) or _is_hex_string(
+            address_or_id, length=66
+        )
 
     def _chain_mode(self, address_or_id: str, chain_hint: str = "") -> str:
         """Return 'l1' or 'evm' based on address + hint."""
