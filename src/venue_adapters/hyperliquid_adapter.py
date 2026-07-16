@@ -758,16 +758,13 @@ class HyperliquidAdapter(VenueAdapter):
         online_mode: bool = False,
         price_engine: Optional[PriceEngine] = None,
     ) -> List[LPPosition]:
-        """Scan the NFT Position Manager for all LP positions owned by wallet.
+        """Fetch all LP positions owned by a wallet via tokenOfOwnerByIndex.
 
-        The Project X position manager tracks ownership but does not expose
-        tokenOfOwnerByIndex. We scan the global NFT id space up to totalSupply
-        and collect positions whose ownerOf() matches the wallet. This avoids
-        relying on an enumeration index that reverts on this contract.
-
-        To keep runtime reasonable despite ~1.4s per HyperEVM RPC round-trip,
-        we batch ownerOf() calls and stop once the wallet's balanceOf() count
-        of owned tokens has been found.
+        The Project X PositionManager supports ERC-721 Enumerable, so we can
+        call tokenOfOwnerByIndex(address, index) for each index from 0 to
+        balanceOf(address)-1. This is instant (1 RPC per owned token) vs
+        the old brute-force scan of thousands of ownerOf() calls that missed
+        positions with token IDs above totalSupply.
         """
         if not online_mode:
             raise OfflineError("Hyperliquid adapter requires online mode.")
@@ -775,18 +772,7 @@ class HyperliquidAdapter(VenueAdapter):
         wallet_address = wallet_address.lower()
         positions: List[LPPosition] = []
 
-        total_result = _evm_rpc_call(
-            "eth_call",
-            [{"to": POSITION_MANAGER, "data": SELECTOR_TOTAL_SUPPLY}, "latest"],
-        )
-        try:
-            total_supply = int(total_result[2:66], 16) if total_result and isinstance(total_result, str) else 0
-        except (ValueError, IndexError):
-            total_supply = 0
-
-        if total_supply == 0:
-            return positions
-
+        # 1. Get the wallet's NFT balance
         balance_result = _evm_rpc_call(
             "eth_call",
             [
@@ -804,160 +790,32 @@ class HyperliquidAdapter(VenueAdapter):
             except (ValueError, IndexError):
                 balance = 0
 
-        # HyperEVM public RPC rate-limits at ~2 calls per batch and each batch
-        # takes ~1.4 s. Scanning the whole token space is infeasible, so we walk
-        # backward from the most recently minted NFTs.  The window is 2000 NFTs,
-        # which covers several days of activity while remaining reasonable for a
-        # background scan.  We stop early once we have found balance-many tokens.
+        print(f"[scan] balanceOf={balance} for {wallet_address}")
+
+        if balance == 0:
+            return positions
+
+        # 2. Get each token ID via tokenOfOwnerByIndex
+        # ERC-721 Enumerable: tokenOfOwnerByIndex(address owner, uint256 index)
+        # Selector: 0x2f745c59
         owned_ids: List[int] = []
-        batch_size = 2
-        scan_start = max(0, total_supply - 5000)
-        print(f"[scan] totalSupply={total_supply}, balanceOf={balance} for {wallet_address}")
-        print(f"[scan] scanning range: {scan_start} to {total_supply}")
-        for batch_start in range(scan_start, total_supply, batch_size):
-            if balance and len(owned_ids) >= balance:
-                break
-            batch_end = min(batch_start + batch_size, total_supply)
-            calls = [
-                (
-                    "eth_call",
-                    [
-                        {
-                            "to": POSITION_MANAGER,
-                            "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id),
-                        },
-                        "latest",
-                    ],
-                )
-                for token_id in range(batch_start, batch_end)
-            ]
-            results = _evm_rpc_batch(calls)
-            # If all results were None, RPC may be rate-limiting — add a small delay
-            if all(r is None for r in results):
-                time.sleep(0.5)
-            for token_id, owner_result in zip(range(batch_start, batch_end), results):
-                if balance and len(owned_ids) >= balance:
-                    break
-                if not owner_result or not isinstance(owner_result, str):
-                    continue
+        for idx in range(balance):
+            data = SELECTOR_TOKEN_OF_OWNER_BY_INDEX + _pad_address(wallet_address) + _pad_int_to_64(idx)
+            result = _evm_rpc_call(
+                "eth_call",
+                [{"to": POSITION_MANAGER, "data": data}, "latest"],
+            )
+            if result and isinstance(result, str) and len(result) >= 66:
                 try:
-                    owner = _decode_address(owner_result[2:66]).lower()
-                except (ValueError, IndexError):
-                    continue
-                if owner == wallet_address:
+                    token_id = int(result[2:66], 16)
                     owned_ids.append(token_id)
-
-        # If we found fewer tokens than balanceOf reports, extend the scan
-        if balance > 0 and len(owned_ids) < balance:
-            print(f"[scan] found {len(owned_ids)}/{balance} expected — extending scan")
-            extended_start = max(0, scan_start - 5000)
-            for batch_start in range(extended_start, scan_start, batch_size):
-                if len(owned_ids) >= balance:
-                    break
-                batch_end = min(batch_start + batch_size, scan_start)
-                calls = [
-                    (
-                        "eth_call",
-                        [
-                            {
-                                "to": POSITION_MANAGER,
-                                "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id),
-                            },
-                            "latest",
-                        ],
-                    )
-                    for token_id in range(batch_start, batch_end)
-                ]
-                results = _evm_rpc_batch(calls)
-                if all(r is None for r in results):
-                    time.sleep(0.5)
-                for token_id, owner_result in zip(range(batch_start, batch_end), results):
-                    if balance and len(owned_ids) >= balance:
-                        break
-                    if not owner_result or not isinstance(owner_result, str):
-                        continue
-                    try:
-                        owner = _decode_address(owner_result[2:66]).lower()
-                    except (ValueError, IndexError):
-                        continue
-                    if owner == wallet_address:
-                        owned_ids.append(token_id)
-
-        # Positions may have been minted while the scan above was running.
-        # Re-check total_supply and probe up to 100 new tokens beyond the
-        # original total so a user does not have to wait for a second scan.
-        fresh_total_result = _evm_rpc_call(
-            "eth_call",
-            [{"to": POSITION_MANAGER, "data": SELECTOR_TOTAL_SUPPLY}, "latest"],
-        )
-        try:
-            fresh_total_supply = int(fresh_total_result[2:66], 16) if fresh_total_result and isinstance(fresh_total_result, str) else total_supply
-        except (ValueError, IndexError):
-            fresh_total_supply = total_supply
-        if fresh_total_supply > total_supply:
-            extra_end = min(fresh_total_supply, total_supply + 100)
-            for batch_start in range(total_supply, extra_end, batch_size):
-                if balance and len(owned_ids) >= balance:
-                    break
-                batch_end = min(batch_start + batch_size, extra_end)
-                calls = [
-                    (
-                        "eth_call",
-                        [
-                            {
-                                "to": POSITION_MANAGER,
-                                "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id),
-                            },
-                            "latest",
-                        ],
-                    )
-                    for token_id in range(batch_start, batch_end)
-                ]
-                results = _evm_rpc_batch(calls)
-                for token_id, owner_result in zip(range(batch_start, batch_end), results):
-                    if balance and len(owned_ids) >= balance:
-                        break
-                    if not owner_result or not isinstance(owner_result, str):
-                        continue
-                    try:
-                        owner = _decode_address(owner_result[2:66]).lower()
-                    except (ValueError, IndexError):
-                        continue
-                    if owner == wallet_address:
-                        owned_ids.append(token_id)
-
-        # Defensive ownership re-verification: a position may have been
-        # transferred or burned while the scan was in progress.  Drop any token
-        # IDs whose current owner is no longer the wallet.
-        if owned_ids:
-            verify_calls = [
-                (
-                    "eth_call",
-                    [
-                        {
-                            "to": POSITION_MANAGER,
-                            "data": SELECTOR_OWNER_OF + _pad_int_to_64(tid),
-                        },
-                        "latest",
-                    ],
-                )
-                for tid in owned_ids
-            ]
-            verified_ids: List[int] = []
-            verify_results = _evm_rpc_batch(verify_calls)
-            for tid, owner_result in zip(owned_ids, verify_results):
-                if not owner_result or not isinstance(owner_result, str):
-                    continue
-                try:
-                    owner = _decode_address(owner_result[2:66]).lower()
+                    print(f"[scan] tokenOfOwnerByIndex({idx}) = {token_id}")
                 except (ValueError, IndexError):
-                    continue
-                if owner == wallet_address:
-                    verified_ids.append(tid)
-            owned_ids = verified_ids
+                    pass
 
-        print(f"[scan] found {len(owned_ids)} owned token IDs: {owned_ids}")
+        print(f"[scan] found {len(owned_ids)} token IDs: {owned_ids}")
 
+        # 3. Fetch each position by token ID
         for token_id in owned_ids:
             pos = self.fetch_evm_position_by_token_id(token_id, price_engine, wallet_address)
             if pos and not pos.error:

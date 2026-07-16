@@ -4219,6 +4219,75 @@ class ColdStackGUI:
 
         threading.Thread(target=_fetch_thread, daemon=True).start()
 
+    def _lp_do_filtered_scan(self, address: str, venue_key: str):
+        """Scan a wallet for positions on a specific venue only (no warning dialog).
+
+        Used when the user selects a specific Platform and clicks Fetch Position
+        with an empty Position ID. Skips the "20 minutes" warning since the
+        scan is limited to one venue.
+        """
+        if not self.lp_engine or not self.online_mode:
+            self.show_notification("Offline - enable Online Mode in Settings", error=True)
+            return
+
+        status = self._lp_widgets.get("status_label")
+        refresh_btn = self._lp_widgets.get("refresh_btn")
+        scroll = self._lp_widgets.get("scroll")
+        if refresh_btn:
+            refresh_btn.configure(state="disabled")
+        if scroll:
+            for widget in scroll.winfo_children():
+                widget.destroy()
+
+        # Check saved pools first for fast-path
+        saved = load_saved_pools(self.key_manager.address_db, wallet_address=address)
+        if saved:
+            if status:
+                status.configure(text=f"Fetching saved positions on {venue_key}... Full scan will follow.")
+            self._lp_render_saved_placeholders(address)
+            self._lp_fetch_saved_only(address)
+            self.root.after(2000, lambda: self._lp_do_filtered_full_scan(address, venue_key))
+        else:
+            if status:
+                status.configure(text=f"Scanning wallet on {venue_key}...")
+            self._lp_do_filtered_full_scan(address, venue_key)
+
+    def _lp_do_filtered_full_scan(self, address: str, venue_key: str):
+        """Full scan filtered to a specific venue (threaded)."""
+        status = self._lp_widgets.get("status_label")
+        if status:
+            status.configure(text=f"Fetching positions on {venue_key}...")
+
+        def _fetch_thread():
+            try:
+                # Use fetch_all_positions with venue_key filter
+                positions = self.lp_engine.fetch_all_positions(address, venue_key=venue_key)
+                # Merge saved pools for this wallet
+                saved = load_saved_pools(self.key_manager.address_db, wallet_address=address)
+                if saved:
+                    from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
+                    adapter = HyperliquidAdapter()
+                    for entry in saved:
+                        tid = entry.get("token_id")
+                        venue = entry.get("venue", "HyperEVM")
+                        if tid and venue == "HyperEVM":
+                            pid = f"hyperevm:{tid}"
+                            if any(p.position_id == pid for p in positions):
+                                continue
+                            try:
+                                pos = adapter.fetch_evm_position_by_token_id(tid, self.price_engine)
+                                if pos and not pos.error:
+                                    positions.append(pos)
+                            except Exception:
+                                pass
+                self.root.after(0, lambda: self._lp_on_loaded(positions, address))
+            except OfflineError:
+                self.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
+            except Exception as e:
+                self.root.after(0, lambda: self._lp_on_error(str(e)))
+
+        threading.Thread(target=_fetch_thread, daemon=True).start()
+
     def _lp_do_fetch_single(self):
         """Fetch a single LP position by NFT ID / position ID / pool address (threaded).
 
@@ -4253,7 +4322,20 @@ class ColdStackGUI:
         position_id = pos_entry.get().strip()
         if not position_id:
             # No position ID entered — fall through to wallet scan
-            self._lp_do_fetch()
+            # Check if a specific platform is selected
+            platform_menu = self._lp_widgets.get("platform_menu")
+            selected_venue = None
+            if platform_menu:
+                val = platform_menu.get()
+                if val and val != "Auto-detect":
+                    selected_venue = self.LP_PLATFORM_MAP.get(val, val)
+
+            if selected_venue:
+                # Specific platform selected — do a filtered scan without the warning
+                self._lp_do_filtered_scan(wallet_address, selected_venue)
+            else:
+                # Auto-detect — full scan with warning
+                self._lp_do_fetch()
             return
 
         # v5.1: Map friendly platform name back to adapter key
