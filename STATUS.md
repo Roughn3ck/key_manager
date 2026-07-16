@@ -1,5 +1,25 @@
 ## v5.1 - Hyperliquid Vaults + LP Fee Fix (July 2026)
 
+### Bug Fixes (v5.1 refresh)
+- Fee buttons (Compound, Collect, Close Position) now visible in Standard mode (not just Advanced)
+- "Withdraw Fees" button replaced with "Close Position" (decreaseLiquidity + collect)
+- Canceling a fee operation confirmation no longer clears the screen
+- Switching Standard/Advanced mode re-renders LP cards immediately
+- Currency display: Vault and LP tabs now show USD + selected display currency (e.g. AUD, CAD)
+- Scan Wallet NFT detection: increased scan window from 2000 to 5000, with fallback extension
+- Transaction hash entry: better error message suggesting numeric Position ID
+- Pool address entry: shows pool price/token pair without error note
+- Fee reporting: live fee data via collect() eth_call with wallet_address context
+- Auto-detect + Position ID: user-friendly "Select a Platform" notification
+- Fetch Position with empty Position ID: falls through to Scan Wallet
+- Scan Wallet button: enabled immediately when wallet address is available
+
+### UI Improvements (v5.1 refresh)
+- % In Range: green/bold when in range, red/bold when out of range
+- Value: green/bold, positioned after Holdings
+- Suggestion: yellow/bold, at the end of Line 3
+- Scan Wallet: time warning dialog before starting full scan
+
 ### Completed
 - [x] `src/gui_main_v5.py` — HL1 Vaults tab bug fixes (Prompt 1): Save/Delete Vault buttons now toggle in place without clearing the scroll frame and re-fetching; selector defaults to Account mode; saved vaults auto-load on unlock and are shown for all wallets
 - [x] `src/vault_tracker.py` — Read-only Hyperliquid vault positions via `/info` API (`userVaultEquities` + `vaultDetails`)

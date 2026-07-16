@@ -74,6 +74,7 @@ class VenueAdapter(ABC):
         online_mode: bool = False,
         price_engine: Optional[PriceEngine] = None,
         chain_hint: str = "",
+        wallet_address: str = "",
     ) -> LPPosition:
         """Fetch a single LP position by contract address or NFT ID."""
         raise NotImplementedError
@@ -319,6 +320,7 @@ class LPEngine:
         address_or_id: str,
         venue_key: Optional[str] = None,
         chain_hint: str = "",
+        wallet_address: str = "",
     ) -> LPPosition:
         """Fetch a single position, auto-detecting venue if not supplied."""
         self._require_online()
@@ -342,6 +344,7 @@ class LPEngine:
             online_mode=True,
             price_engine=self.price_engine,
             chain_hint=chain_hint,
+            wallet_address=wallet_address,
         )
         return self.strategy_engine.analyze(pos)
 

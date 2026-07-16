@@ -13,6 +13,7 @@ Version: v5.1 (June 2026) - NFT position reads + multi-position scan + pool stat
 """
 import json
 import math
+import time
 import urllib.request
 import urllib.error
 from typing import Any, Dict, List, Optional, Tuple
@@ -468,32 +469,19 @@ def _compute_fee_growth_inside(
 def _estimate_uncollected_fees(
     token_id: int, wallet_address: str, decimals0: int, decimals1: int
 ) -> Tuple[float, float]:
-    """Estimate uncollected fees via a read-only collect() eth_call.
+    """Estimate uncollected fees via a read-only collect() eth_call."""
+    if not wallet_address:
+        print(f"[fees] no wallet_address provided for token {token_id} — cannot read fees")
+        return (0.0, 0.0)
 
-    The Project X PositionManager's collect() function can be called via
-    eth_call (without sending a transaction) to read the exact uncollected
-    fee amounts. This returns the real fees, unlike the feeGrowthGlobal
-    delta which overcounts by ~100x on this fork.
-
-    Args:
-        token_id: NFT token ID of the position.
-        wallet_address: The position owner's wallet address (used as `from`).
-        decimals0: Decimals of token0.
-        decimals1: Decimals of token1.
-
-    Returns:
-        (amount0_human, amount1_human) or (0.0, 0.0) on failure.
-    """
     try:
-        # ABI encode collect((uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max))
-        # uint128 max = 0xffffffffffffffffffffffffffffffff
         uint128_max = (1 << 128) - 1
         data = (
             SELECTOR_COLLECT
-            + _pad_int_to_64(token_id)  # tokenId (uint256)
-            + _pad_address(wallet_address)  # recipient (address)
-            + _pad_int_to_64(uint128_max)  # amount0Max (uint128 -> padded to 32 bytes)
-            + _pad_int_to_64(uint128_max)  # amount1Max (uint128 -> padded to 32 bytes)
+            + _pad_int_to_64(token_id)
+            + _pad_address(wallet_address)
+            + _pad_int_to_64(uint128_max)
+            + _pad_int_to_64(uint128_max)
         )
         result = _evm_rpc_call(
             "eth_call",
@@ -501,12 +489,27 @@ def _estimate_uncollected_fees(
         )
         if not result or not isinstance(result, str) or len(result) < 2 + 64:
             print(f"[fees] collect() eth_call returned no data for token {token_id}")
-            return (0.0, 0.0)
+            # Try without the `from` field — some RPCs don't require it
+            result = _evm_rpc_call(
+                "eth_call",
+                [{"to": POSITION_MANAGER, "data": data}, "latest"],
+            )
+            if not result or not isinstance(result, str) or len(result) < 2 + 64:
+                return (0.0, 0.0)
 
         body = result[2:]
-        # Return is (uint128 amount0, uint128 amount1) packed in two 32-byte words
-        amount0_raw = int(body[0:64], 16)
-        amount1_raw = int(body[64:128], 16)
+        # Handle both packed (2 x uint128 in 32 bytes) and padded (2 x uint256) formats
+        if len(body) >= 128:
+            # Padded format: two 32-byte words
+            amount0_raw = int(body[0:64], 16)
+            amount1_raw = int(body[64:128], 16)
+        elif len(body) >= 64:
+            # Packed format: two 16-byte values in 32 bytes
+            amount0_raw = int(body[0:32], 16)
+            amount1_raw = int(body[32:64], 16)
+        else:
+            print(f"[fees] collect() returned insufficient data: {len(body)} chars")
+            return (0.0, 0.0)
 
         amount0_human = amount0_raw / (10 ** decimals0)
         amount1_human = amount1_raw / (10 ** decimals1)
@@ -572,7 +575,7 @@ def _decode_positions_response(
     # The Project X PositionManager's collect() function returns exact uncollected
     # fee amounts when called via eth_call with the wallet address as `from`.
     # This replaces the broken feeGrowthGlobal delta which overcounted by ~100x.
-    fees_note = "Collect fees to report on fee income"
+    fees_note = None
     if wallet_address:
         real_fee0, real_fee1 = _estimate_uncollected_fees(
             token_id, wallet_address, decimals0, decimals1
@@ -580,8 +583,11 @@ def _decode_positions_response(
         if real_fee0 > 0 or real_fee1 > 0:
             owed0_h = real_fee0
             owed1_h = real_fee1
-            fees_note = None  # We have real fees, no need for the note
-        # Fallback: if collect() returns 0, keep checkpointed tokens_owed values
+        else:
+            # collect() returned 0 — either no fees earned or RPC issue
+            fees_note = "No uncollected fees (or RPC unreachable)"
+    else:
+        fees_note = "Connect wallet to read fees"
 
     fees_earned = {symbol0: owed0_h, symbol1: owed1_h}
     fees_earned_usd = (
@@ -805,7 +811,9 @@ class HyperliquidAdapter(VenueAdapter):
         # background scan.  We stop early once we have found balance-many tokens.
         owned_ids: List[int] = []
         batch_size = 2
-        scan_start = max(0, total_supply - 2000)
+        scan_start = max(0, total_supply - 5000)
+        print(f"[scan] totalSupply={total_supply}, balanceOf={balance} for {wallet_address}")
+        print(f"[scan] scanning range: {scan_start} to {total_supply}")
         for batch_start in range(scan_start, total_supply, batch_size):
             if balance and len(owned_ids) >= balance:
                 break
@@ -824,6 +832,9 @@ class HyperliquidAdapter(VenueAdapter):
                 for token_id in range(batch_start, batch_end)
             ]
             results = _evm_rpc_batch(calls)
+            # If all results were None, RPC may be rate-limiting — add a small delay
+            if all(r is None for r in results):
+                time.sleep(0.5)
             for token_id, owner_result in zip(range(batch_start, batch_end), results):
                 if balance and len(owned_ids) >= balance:
                     break
@@ -835,6 +846,42 @@ class HyperliquidAdapter(VenueAdapter):
                     continue
                 if owner == wallet_address:
                     owned_ids.append(token_id)
+
+        # If we found fewer tokens than balanceOf reports, extend the scan
+        if balance > 0 and len(owned_ids) < balance:
+            print(f"[scan] found {len(owned_ids)}/{balance} expected — extending scan")
+            extended_start = max(0, scan_start - 5000)
+            for batch_start in range(extended_start, scan_start, batch_size):
+                if len(owned_ids) >= balance:
+                    break
+                batch_end = min(batch_start + batch_size, scan_start)
+                calls = [
+                    (
+                        "eth_call",
+                        [
+                            {
+                                "to": POSITION_MANAGER,
+                                "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id),
+                            },
+                            "latest",
+                        ],
+                    )
+                    for token_id in range(batch_start, batch_end)
+                ]
+                results = _evm_rpc_batch(calls)
+                if all(r is None for r in results):
+                    time.sleep(0.5)
+                for token_id, owner_result in zip(range(batch_start, batch_end), results):
+                    if balance and len(owned_ids) >= balance:
+                        break
+                    if not owner_result or not isinstance(owner_result, str):
+                        continue
+                    try:
+                        owner = _decode_address(owner_result[2:66]).lower()
+                    except (ValueError, IndexError):
+                        continue
+                    if owner == wallet_address:
+                        owned_ids.append(token_id)
 
         # Positions may have been minted while the scan above was running.
         # Re-check total_supply and probe up to 100 new tokens beyond the
@@ -909,6 +956,8 @@ class HyperliquidAdapter(VenueAdapter):
                     verified_ids.append(tid)
             owned_ids = verified_ids
 
+        print(f"[scan] found {len(owned_ids)} owned token IDs: {owned_ids}")
+
         for token_id in owned_ids:
             pos = self.fetch_evm_position_by_token_id(token_id, price_engine, wallet_address)
             if pos and not pos.error:
@@ -982,23 +1031,32 @@ class HyperliquidAdapter(VenueAdapter):
         tx_hash: str,
         price_engine: Optional[PriceEngine],
     ) -> LPPosition:
-        """Resolve a 32-byte HyperEVM transaction hash to an LP position.
-
-        Looks at the transaction receipt logs for a Project X PositionManager
-        ERC-721 Transfer event and extracts the token ID.  If the transaction
-        minted or transferred a position NFT, returns the decoded position.
-        """
+        """Resolve a 32-byte HyperEVM transaction hash to an LP position."""
         tx_hash = tx_hash.lower()
+        if not tx_hash.startswith("0x"):
+            tx_hash = "0x" + tx_hash
+
         receipt = _evm_rpc_single(
             "eth_getTransactionReceipt",
             [tx_hash],
         )
         if not receipt or not isinstance(receipt, dict):
+            # Fallback: try fetching the transaction itself to at least get the block
+            tx_data = _evm_rpc_single("eth_getTransactionByHash", [tx_hash])
+            if not tx_data or not isinstance(tx_data, dict):
+                return LPPosition(
+                    position_id=tx_hash,
+                    venue="HyperEVM",
+                    chain="HyperEVM",
+                    error="Could not fetch transaction receipt. The HyperEVM RPC may not have this transaction indexed. Try entering the numeric Position ID instead (e.g. 512359).",
+                )
+            # Transaction exists but no receipt — try to find the block's logs
+            # This is a deeper fallback that may not work on all RPCs
             return LPPosition(
                 position_id=tx_hash,
                 venue="HyperEVM",
                 chain="HyperEVM",
-                error="Could not fetch transaction receipt.",
+                error="Transaction found but receipt not available. Try entering the numeric Position ID instead (e.g. 512359).",
             )
         logs = receipt.get("logs", [])
         pm_address = POSITION_MANAGER.lower()
@@ -1022,7 +1080,7 @@ class HyperliquidAdapter(VenueAdapter):
             position_id=tx_hash,
             venue="HyperEVM",
             chain="HyperEVM",
-            error="Transaction does not appear to be an LP position mint/transfer.",
+            error="Transaction does not appear to be an LP position mint/transfer. Try entering the numeric Position ID instead (e.g. 512359).",
         )
 
     def fetch_position(
@@ -1031,6 +1089,7 @@ class HyperliquidAdapter(VenueAdapter):
         online_mode: bool = False,
         price_engine: Optional[PriceEngine] = None,
         chain_hint: str = "",
+        wallet_address: str = "",
     ) -> LPPosition:
         if not online_mode:
             raise OfflineError("Hyperliquid adapter requires online mode.")
@@ -1087,7 +1146,7 @@ class HyperliquidAdapter(VenueAdapter):
         # 3. NFT token id (numeric)
         try:
             numeric_id = int(address_or_id)
-            return self.fetch_evm_position_by_token_id(numeric_id, price_engine, "")
+            return self.fetch_evm_position_by_token_id(numeric_id, price_engine, wallet_address)
         except (ValueError, TypeError):
             pass
 
@@ -1367,38 +1426,28 @@ class HyperliquidAdapter(VenueAdapter):
             )
 
         try:
-            slot0_result = _evm_rpc_call(
-                "eth_call",
-                [{"to": pool_address, "data": SELECTOR_SLOT0}, "latest"],
-            )
+            current_price, current_tick, fee, token0, token1, _, _ = _fetch_pool_state(pool_address)
         except Exception as e:
             return LPPosition(
                 position_id=pool_address,
                 venue="HyperEVM",
                 chain="HyperEVM",
-                error=f"Pool slot0 call failed: {e}",
+                error=f"Pool state fetch failed: {e}",
             )
 
-        current_price: Optional[float] = None
-        if slot0_result and isinstance(slot0_result, str) and len(slot0_result) >= 66:
-            try:
-                sqrt_price_x96 = int(slot0_result[2:66], 16)
-                price_raw = (sqrt_price_x96 / (2 ** 96)) ** 2
-                current_price = price_raw
-            except (ValueError, OverflowError):
-                current_price = None
+        symbol0 = _get_token_symbol(token0) if token0 else "Unknown"
+        symbol1 = _get_token_symbol(token1) if token1 else "Unknown"
 
         return LPPosition(
             position_id=pool_address,
+            pool_id=pool_address,
             venue="HyperEVM",
             chain="HyperEVM",
-            pair="Unknown/Unknown",
+            pair=f"{symbol0}/{symbol1}" if symbol0 != "Unknown" or symbol1 != "Unknown" else "Unknown/Unknown",
+            token_0=symbol0,
+            token_1=symbol1,
             current_price=current_price,
-            error=(
-                "Pool price only. Full position decoding requires tokenId."
-                if current_price is not None
-                else "Could not decode pool slot0."
-            ),
+            error=None,  # This is a pool, not a position — no error
         )
 
 

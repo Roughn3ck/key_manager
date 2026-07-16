@@ -3171,6 +3171,8 @@ class ColdStackGUI:
                     self._save_vault_config()
                     dialog.destroy()
                     self.show_settings_dialog()
+                    # Re-render LP cards to show/hide advanced buttons
+                    self._lp_rerender_cards()
 
             ctk.CTkButton(form, text="Switch to Standard", command=switch_to_standard,
                           width=160, height=30, fg_color="gray30",
@@ -3191,6 +3193,8 @@ class ColdStackGUI:
                     self._save_vault_config()
                     dialog.destroy()
                     self.show_settings_dialog()
+                    # Re-render LP cards to show/hide advanced buttons
+                    self._lp_rerender_cards()
 
             ctk.CTkButton(form, text="Switch to Advanced", command=switch_to_advanced,
                           width=160, height=30, fg_color=("#007bff", "#0056b3"),
@@ -3321,6 +3325,28 @@ class ColdStackGUI:
             self.root.after(0, lambda: self._display_balances(results))
 
         threading.Thread(target=_do_fetch, daemon=True).start()
+
+    def _format_currency(self, usd_amount: float, include_usd_label: bool = False) -> str:
+        """Format a USD amount with optional secondary currency conversion.
+
+        Args:
+            usd_amount: The amount in USD.
+            include_usd_label: If True, always include "USD" label.
+
+        Returns:
+            Formatted string like "$1,234.56" or "$1,234.56 USD · $1,890.23 AUD"
+        """
+        if self.display_currency == "none" or self.display_currency == "usd":
+            if include_usd_label:
+                return f"${usd_amount:,.2f} USD"
+            return f"${usd_amount:,.2f}"
+        # Convert to selected currency
+        converted = self.price_engine.convert_balance_to_fiat(usd_amount, "USDC", self.display_currency)
+        if converted is not None:
+            curr_sym = self.display_currency.upper()
+            return f"${usd_amount:,.2f} USD · ${converted:,.2f} {curr_sym}"
+        # Conversion failed — show USD only
+        return f"${usd_amount:,.2f} USD"
 
     def _display_balances(self, results):
         """Display fetched balances inline on the address cards."""
@@ -3629,6 +3655,8 @@ class ColdStackGUI:
         # Address entry (shown when "Address" mode is selected)
         address_entry = ctk.CTkEntry(wallet_bar, width=320,
                                      font=ctk.CTkFont(size=11))
+        address_entry.bind("<KeyRelease>", lambda e: self._lp_update_button_states())
+        address_entry.bind("<FocusOut>", lambda e: self._lp_update_button_states())
         self._lp_widgets["address_entry"] = address_entry
 
         # Account dropdown (shown when "Account" mode is selected)
@@ -3771,16 +3799,25 @@ class ColdStackGUI:
         else:
             status.configure(text=f"{base}  ·  Saved Pools: {total} total")
 
+    def _lp_update_button_states(self):
+        """Update LP tab button states based on current conditions."""
+        if not self._lp_widgets:
+            return
+        refresh_btn = self._lp_widgets.get("refresh_btn")
+        fetch_pos_btn = self._lp_widgets.get("fetch_pos_btn")
+        address = self._lp_get_current_wallet_address()
+        has_address = bool(address and address.startswith("0x") and len(address) == 42)
+        enabled = self.online_mode and has_address
+        if refresh_btn:
+            refresh_btn.configure(state="normal" if enabled else "disabled")
+        if fetch_pos_btn:
+            fetch_pos_btn.configure(state="normal" if enabled else "disabled")
+
     def _lp_update_online_state(self):
         """Enable/disable LP tab widgets based on online_mode."""
         if not self._lp_widgets:
             return
-        refresh_btn = self._lp_widgets.get("refresh_btn")
-        if refresh_btn:
-            refresh_btn.configure(state="normal" if self.online_mode else "disabled")
-        fetch_pos_btn = self._lp_widgets.get("fetch_pos_btn")
-        if fetch_pos_btn:
-            fetch_pos_btn.configure(state="normal" if self.online_mode else "disabled")
+        self._lp_update_button_states()
         offline_banner = self._lp_widgets.get("offline_banner")
         if offline_banner:
             try:
@@ -3807,6 +3844,7 @@ class ColdStackGUI:
             if account_menu:
                 account_menu.pack_forget()
             entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self._lp_update_button_states()
 
     def _lp_on_selector_change(self, choice: str):
         """Handle Address/Account mode switch."""
@@ -3847,8 +3885,9 @@ class ColdStackGUI:
                 cfg = self.key_manager.address_db.setdefault("config", {})
                 cfg["lp_selected_account"] = choice
                 self.key_manager.save_encrypted_data(self.current_password)
-            # Update saved-pools counter and auto-fetch
+            # Update saved-pools counter, button states, and auto-fetch
             self._lp_update_saved_pools_count(addr)
+            self._lp_update_button_states()
             self._lp_maybe_auto_fetch()
 
     def _lp_resolve_account_address(self, account_name: str) -> str:
@@ -4065,6 +4104,20 @@ class ColdStackGUI:
                 else:
                     status.configure(text="Enter a wallet address first")
             return
+        # Warn user about scan time for full wallet scans without saved pools
+        saved = load_saved_pools(self.key_manager.address_db, wallet_address=address)
+        if not saved:
+            from tkinter import messagebox
+            confirm = messagebox.askyesno(
+                "Scan Wallet — Estimated Time",
+                "Scan Wallet will search your wallet address across all enabled platforms.\n"
+                "This could take up to 20 minutes.\n\n"
+                "To locate a pool quickly, select the Platform and use \"Fetch Position\".\n\n"
+                "Would you like to use Scan Wallet to search all platforms while you grab a coffee ☕?",
+            )
+            if not confirm:
+                return
+
         status = self._lp_widgets.get("status_label")
         refresh_btn = self._lp_widgets.get("refresh_btn")
         scroll = self._lp_widgets.get("scroll")
@@ -4075,7 +4128,6 @@ class ColdStackGUI:
                 widget.destroy()
 
         # v5.1: Fast-path check — if saved pools exist, fetch them first.
-        saved = load_saved_pools(self.key_manager.address_db, wallet_address=address)
         if saved:
             if status:
                 status.configure(text="Fetching saved positions... Full wallet scan will follow.")
@@ -4200,9 +4252,8 @@ class ColdStackGUI:
             return
         position_id = pos_entry.get().strip()
         if not position_id:
-            status = self._lp_widgets.get("status_label")
-            if status:
-                status.configure(text="Enter a position ID, NFT token ID, or pool address.")
+            # No position ID entered — fall through to wallet scan
+            self._lp_do_fetch()
             return
 
         # v5.1: Map friendly platform name back to adapter key
@@ -4259,8 +4310,20 @@ class ColdStackGUI:
         def _fetch_single_thread():
             try:
                 position = self.lp_engine.fetch_position(
-                    position_id, venue_key=selected_venue
+                    position_id, venue_key=selected_venue, wallet_address=wallet_address
                 )
+                # Check for venue detection errors
+                if position and position.error and "Unsupported" in (position.error or ""):
+                    self.root.after(0, lambda: self.show_notification(
+                        "Select a Platform to fetch the position.", error=True))
+                    # Re-enable buttons
+                    refresh_btn = self._lp_widgets.get("refresh_btn")
+                    fetch_pos_btn = self._lp_widgets.get("fetch_pos_btn")
+                    if refresh_btn:
+                        self.root.after(0, lambda: refresh_btn.configure(state="normal" if self.online_mode else "disabled"))
+                    if fetch_pos_btn:
+                        self.root.after(0, lambda: fetch_pos_btn.configure(state="normal" if self.online_mode else "disabled"))
+                    return
                 self.root.after(0, lambda: self._lp_on_loaded([position], wallet_address))
             except OfflineError:
                 self.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
@@ -4325,11 +4388,7 @@ class ColdStackGUI:
                 self._lp_render_card(pos)
         if status:
             status.configure(text=f"Last check: {len(unique_positions)} position(s)")
-        if refresh_btn:
-            refresh_btn.configure(state="normal" if self.online_mode else "disabled")
-        fetch_pos_btn = self._lp_widgets.get("fetch_pos_btn")
-        if fetch_pos_btn:
-            fetch_pos_btn.configure(state="normal" if self.online_mode else "disabled")
+        self._lp_update_button_states()
         # v5.1: Update saved-pools counter after rendering live cards
         self._lp_update_saved_pools_count(address)
 
@@ -4371,21 +4430,28 @@ class ColdStackGUI:
         ctk.CTkLabel(info, text=header_text,
                      font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
 
-        # Line 2: Range · Current · % In/Out Range
+        # Line 2: Range · Current · % In/Out Range (with colored % In Range)
+        range_frame = ctk.CTkFrame(info, fg_color="transparent")
+        range_frame.pack(fill="x", pady=(2, 0))
         range_parts = []
         if position.range_low is not None and position.range_high is not None:
             range_parts.append(f"Range: {position.range_low:g} – {position.range_high:g}")
         if position.current_price is not None:
             range_parts.append(f"Current: {position.current_price:g}")
+        if range_parts:
+            ctk.CTkLabel(range_frame, text="  ·  ".join(range_parts),
+                         font=ctk.CTkFont(size=11), text_color="gray70").pack(side="left", anchor="w")
         if position.position_in_range_pct is not None:
             pct = position.position_in_range_pct
             in_range = 0 <= pct <= 100
-            range_parts.append(f"{pct:.1f}% {'In Range' if in_range else 'Out of Range'}")
+            pct_color = "#51cf94" if in_range else "#ff6b6b"
+            pct_text = f"  ·  {pct:.1f}% {'In Range' if in_range else 'Out of Range'}"
+            ctk.CTkLabel(range_frame, text=pct_text,
+                         font=ctk.CTkFont(size=11, weight="bold"),
+                         text_color=pct_color).pack(side="left", anchor="w")
         elif position.range_low is not None:
-            range_parts.append("? Not fetched")
-        if range_parts:
-            ctk.CTkLabel(info, text="  ·  ".join(range_parts),
-                         font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", pady=(2, 0))
+            ctk.CTkLabel(range_frame, text="  ·  ? Not fetched",
+                         font=ctk.CTkFont(size=11), text_color="gray50").pack(side="left", anchor="w")
 
         # v5.1: Position range slider with marker
         if position.range_low is not None and position.range_high is not None:
@@ -4408,36 +4474,48 @@ class ColdStackGUI:
                                   fg_color=marker_color)
             marker.place(relx=marker_pos / 100.0, rely=0.15, anchor="n")
 
-        # Line 3: Fees earned (breakdown) · Value · PnL · Holdings · Suggestion
-        line3_parts = []
+        # Line 3: Fees (gray) · PnL (gray) · Holdings (gray) · Value (green/bold) · Suggestion (yellow/bold)
+        line3_frame = ctk.CTkFrame(info, fg_color="transparent")
+        line3_frame.pack(fill="x", pady=(2, 0))
+
+        line3_gray_parts = []
         if getattr(position, "fees_note", None):
-            line3_parts.append(f"Fees: {position.fees_note}")
+            line3_gray_parts.append(f"Fees: {position.fees_note}")
         elif position.fees_earned_usd is not None and position.fees_earned_usd != 0:
-            fee_str = f"Fees earned: ${position.fees_earned_usd:,.2f}"
+            fee_str = f"Fees earned: {self._format_currency(position.fees_earned_usd)}"
             token_fees = " · ".join(
                 f"{amt:g} {sym}" for sym, amt in position.fees_earned.items() if amt
             )
             if token_fees:
                 fee_str += f" ({token_fees})"
-            line3_parts.append(fee_str)
-        if position.current_value_usd is not None:
-            line3_parts.append(f"Value: ${position.current_value_usd:,.2f}")
+            line3_gray_parts.append(fee_str)
         if position.pnl_usd is not None:
             sign = "+" if position.pnl_usd >= 0 else ""
-            pnl_str = f"PnL: {sign}${position.pnl_usd:,.2f}"
+            pnl_str = f"PnL: {sign}{self._format_currency(position.pnl_usd)}"
             if position.pnl_pct is not None:
                 sign2 = "+" if position.pnl_pct >= 0 else ""
                 pnl_str += f" ({sign2}{position.pnl_pct:.2f}%)"
-            line3_parts.append(pnl_str)
+            line3_gray_parts.append(pnl_str)
         if position.deposit_amounts:
             holdings_parts = [f"{amt:g} {sym}" for sym, amt in position.deposit_amounts.items() if amt]
             if holdings_parts:
-                line3_parts.append(f"Holdings: {' · '.join(holdings_parts)}")
+                line3_gray_parts.append(f"Holdings: {' · '.join(holdings_parts)}")
+
+        if line3_gray_parts:
+            ctk.CTkLabel(line3_frame, text="  ·  ".join(line3_gray_parts),
+                         font=ctk.CTkFont(size=11), text_color="gray70").pack(side="left", anchor="w")
+
+        # Value — green and bold, after Holdings, before Suggestion
+        if position.current_value_usd is not None:
+            ctk.CTkLabel(line3_frame, text=f"  ·  Value: {self._format_currency(position.current_value_usd)}",
+                         font=ctk.CTkFont(size=11, weight="bold"),
+                         text_color="#51cf94").pack(side="left", anchor="w")
+
+        # Suggestion — yellow and bold, at the end
         if position.suggested_action:
-            line3_parts.append(f"Suggestion: {position.suggested_action}")
-        if line3_parts:
-            ctk.CTkLabel(info, text="  ·  ".join(line3_parts),
-                         font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", pady=(2, 0))
+            ctk.CTkLabel(line3_frame, text=f"  ·  Suggestion: {position.suggested_action}",
+                         font=ctk.CTkFont(size=11, weight="bold"),
+                         text_color="#ffd43b").pack(side="left", anchor="w")
 
         if position.error:
             ctk.CTkLabel(info, text=f"Note: {position.error}",
@@ -4452,26 +4530,26 @@ class ColdStackGUI:
                           command=lambda pid=position.position_id: self.copy_to_clipboard(pid)
                           ).pack(pady=2)
 
-        if self.app_mode == "advanced" and position.position_id and position.position_id.startswith("hyperevm:"):
+        if position.position_id and position.position_id.startswith("hyperevm:"):
             ctk.CTkButton(button_frame, text="Compound Fees", width=110, height=26,
                           font=ctk.CTkFont(size=10),
                           fg_color=("#20c997", "#1aa179"),
                           command=lambda pos=position: self._lp_compound_fees_dialog(pos)
                           ).pack(pady=2)
 
-        if self.app_mode == "advanced" and position.position_id:
+        if position.position_id:
             ctk.CTkButton(button_frame, text="Collect Fees", width=100, height=26,
                           font=ctk.CTkFont(size=10),
                           fg_color=("#fd7e14", "#dc6602"),
                           command=lambda pos=position: self._lp_collect_fees_dialog(pos)
                           ).pack(pady=2)
 
-        if self.app_mode == "advanced" and position.position_id and position.position_id.startswith("hyperevm:"):
-            ctk.CTkButton(button_frame, text="Withdraw Fees", width=100, height=26,
+        if position.position_id and position.position_id.startswith("hyperevm:"):
+            ctk.CTkButton(button_frame, text="Close Position", width=100, height=26,
                           font=ctk.CTkFont(size=10),
                           fg_color=("#6f42c1", "#5a32a3"),
                           hover_color=("#5a32a3", "#42288a"),
-                          command=lambda pos=position: self._lp_withdraw_fees_dialog(pos)
+                          command=lambda pos=position: self._lp_close_position_dialog(pos)
                           ).pack(pady=2)
 
         # v5.1: Save Pool / Remove Pool button — checks if pool is already saved
@@ -4757,7 +4835,6 @@ class ColdStackGUI:
             "  3. Increase liquidity with collected amounts\n\n"
             "The key_manager_agent must be running and unlocked.\n\n"
             "Continue?",
-            parent=self.root,
         )
         if not confirm:
             return
@@ -4810,7 +4887,6 @@ class ColdStackGUI:
             "This will spend gas on HyperEVM.\n"
             "The key_manager_agent must be running and unlocked.\n\n"
             "Continue?",
-            parent=self.root,
         )
         if not confirm:
             return
@@ -4845,18 +4921,81 @@ class ColdStackGUI:
 
         threading.Thread(target=_do_collect, daemon=True).start()
 
-    def _lp_withdraw_fees_dialog(self, position):
-        """Withdraw fees — same as collect fees but with different confirmation messaging.
+    def _lp_close_position_dialog(self, position):
+        """Show confirmation dialog and close an LP position completely.
 
-        Calls the same collect() function on the PositionManager.
+        Calls decreaseLiquidity(100%) + collect() to withdraw all liquidity
+        and fees, effectively closing the position.
         """
-        if not position.position_id or not position.position_id.startswith("hyperevm:"):
-            self.show_notification("Only HyperEVM positions support fee withdrawal", error=True)
+        from tkinter import messagebox
+        wallet_address = self._lp_get_current_wallet_address() or getattr(self, "_lp_last_fetched_address", "")
+        if not wallet_address:
+            self.show_notification("Enter or select a wallet address first", error=True)
             return
-        # Re-use the existing collect fees logic
-        self._lp_collect_fees_dialog(position)
+        account_name = self._lp_get_current_account_name()
+        if not account_name:
+            self.show_notification("Could not resolve vault account for this address", error=True)
+            return
+        confirm = messagebox.askyesno(
+            "Confirm: Close Position",
+            "You are about to CLOSE this position completely:\n"
+            f"  {position.pair} ({position.position_id})\n\n"
+            "This will:\n"
+            "  1. Withdraw ALL liquidity from the position\n"
+            "  2. Collect any remaining fees\n\n"
+            "Your position NFT will remain but with zero liquidity.\n"
+            "The key_manager_agent must be running and unlocked.\n\n"
+            "Continue?",
+        )
+        if not confirm:
+            return
+        self.show_notification("Closing position... (multi-TX operation)")
+
+        def _do_close():
+            try:
+                writer = self.lp_engine.get_writer("hyperliquid", self.current_password)
+                if writer is None:
+                    self.root.after(0, lambda: self.show_notification(
+                        "Writer not available", error=True))
+                    return
+                if not writer.is_available():
+                    self.root.after(0, lambda: self.show_notification(
+                        "Agent not running. Start key_manager_agent with --serve.", error=True))
+                    return
+                tx_hashes = writer.close_position(position.position_id, account_name)
+                if tx_hashes:
+                    self.root.after(0, lambda: self.show_notification(
+                        f"Position closed. {len(tx_hashes)} TXs submitted. First: {tx_hashes[0][:20]}..."))
+                else:
+                    self.root.after(0, lambda: self.show_notification(
+                        "Close position: no transactions submitted", error=True))
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[close_position] error: {error_msg}")
+                self.root.after(0, lambda: self.show_notification(
+                    f"Close error: {error_msg}", error=True))
+
+        threading.Thread(target=_do_close, daemon=True).start()
 
     # --- End v5.0 LP tab methods ---
+
+    def _lp_rerender_cards(self):
+        """Re-render existing LP position cards to reflect mode changes.
+
+        Called when the user switches between Standard and Advanced mode.
+        Preserves the current position data but re-creates the card widgets
+        so buttons that are mode-dependent appear/disappear immediately.
+        """
+        cards = self._lp_widgets.get("position_cards", {})
+        if not cards:
+            return
+        # We need the position objects to re-render. Since we don't store them,
+        # we trigger a re-fetch of the current wallet instead.
+        # But if we have saved positions data, we can re-render from that.
+        # Simplest approach: re-fetch the current wallet.
+        address = self._lp_get_current_wallet_address()
+        if address and self.online_mode:
+            self._lp_do_fetch()
 
     # ------------------------------------------------------------------
     # v5.1: Hyperliquid Vaults section
@@ -5255,7 +5394,7 @@ class ColdStackGUI:
         else:
             metric_parts.append("APR: see Hyperliquid")
         if position.tvl_usd is not None:
-            metric_parts.append(f"TVL: ${position.tvl_usd:,.2f}")
+            metric_parts.append(f"TVL: {self._format_currency(position.tvl_usd)}")
         # Vault age: from first_deposit_time (earliest portfolio timestamp)
         if position.first_deposit_time is not None:
             delta = datetime.now(timezone.utc) - position.first_deposit_time
@@ -5281,9 +5420,9 @@ class ColdStackGUI:
         # Deposited + Current value
         value_parts = []
         if position.deposited_usd is not None:
-            value_parts.append(f"Deposited: ${position.deposited_usd:,.2f}")
+            value_parts.append(f"Deposited: {self._format_currency(position.deposited_usd)}")
         if position.current_value_usd is not None:
-            value_parts.append(f"Current: ${position.current_value_usd:,.2f}")
+            value_parts.append(f"Current: {self._format_currency(position.current_value_usd)}")
         if value_parts:
             ctk.CTkLabel(
                 info, text="  \u00b7  ".join(value_parts),
@@ -5294,7 +5433,7 @@ class ColdStackGUI:
         pnl_parts = []
         if position.unrealized_pnl_usd is not None:
             sign = "+" if position.unrealized_pnl_usd >= 0 else ""
-            pnl_parts.append(f"P&L: {sign}${position.unrealized_pnl_usd:,.2f}")
+            pnl_parts.append(f"P&L: {sign}{self._format_currency(position.unrealized_pnl_usd)}")
         if position.unrealized_pnl_pct is not None:
             sign = "+" if position.unrealized_pnl_pct >= 0 else ""
             pnl_parts.append(f"({sign}{position.unrealized_pnl_pct:.2f}%)")
