@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PyInstaller build script for ColdStack GUI v5.1.
+PyInstaller build script for ColdStack GUI v5.1.1.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v5.1 (July 2026) - LP Engine + Hyperliquid Writer + LP Positions Tab
+Version: v5.1.1 (July 2026) - LP Liquidity Manager + Gas Price Fix + Fee Tracking
 Builds: src/gui_main_v5.py
 Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
 
@@ -12,7 +12,7 @@ Changes from build_gui_v4.py:
   2. New hidden imports: lp_engine, venue_adapters, venue_adapters.hyperliquid_adapter,
      venue_adapters.venue_writer, venue_adapters.hyperliquid_writer, price_engine
   3. Backup previous EXE as coldstack_v4_2.exe (fixes known backup naming issue)
-  4. Version strings updated to v5.1
+  4. Version strings updated to v5.1.1
 
 WARNING: After ANY source change, rebuild: python build_gui_v5.py
 """
@@ -33,8 +33,8 @@ def clean_build_dirs():
 
 
 def build_gui_exe():
-    """Run PyInstaller to build the ColdStack v5.1 EXE."""
-    print("Building ColdStack v5.1 executable...")
+    """Run PyInstaller to build the ColdStack v5.1.1 EXE."""
+    print("Building ColdStack v5.1.1 executable...")
 
     project_dir = Path(__file__).parent.resolve()
 
@@ -86,6 +86,8 @@ def build_gui_exe():
         '--hidden-import=http.client',
         '--hidden-import=socket',
         '--hidden-import=_socket',
+        # --- v5.1.1 LP Liquidity Manager hidden import ---
+        '--hidden-import=lp_liquidity_manager',
         # --- v5.1 LP Engine hidden imports ---
         '--hidden-import=lp_engine',
         '--hidden-import=price_engine',
@@ -159,7 +161,7 @@ def copy_to_usb_deployment():
         # Backup the previous production EXE using the version it was built from.
         # Bump this string whenever the shipped version changes so the backup name
         # matches the last stable build.
-        PREVIOUS_VERSION_TAG = "v5_1"
+        PREVIOUS_VERSION_TAG = "v5_1_1"
         backup_path = backups_dir / f'coldstack_{PREVIOUS_VERSION_TAG}.exe'
         print(f"Backing up previous EXE to {backup_path}...")
         shutil.copy2(target_path, backup_path)
@@ -182,7 +184,7 @@ echo ========================================
 echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting ColdStack v5.1...
+echo Starting ColdStack v5.1.1...
 echo.
 coldstack.exe
 pause
@@ -241,8 +243,8 @@ def main():
     print(f"Working directory: {os.getcwd()}")
 
     print("=" * 60)
-    print("ColdStack v5.1 - Portable EXE Builder")
-    print("LP Engine + Hyperliquid Writer + LP Positions Tab")
+    print("ColdStack v5.1.1 - Portable EXE Builder")
+    print("LP Liquidity Manager + Gas Price Fix + Fee Tracking")
     print("=" * 60)
 
     if not check_dependencies():

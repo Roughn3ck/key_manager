@@ -16,6 +16,7 @@ import math
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from lp_engine import LPPosition, OfflineError, VenueAdapter, register_adapter
@@ -468,59 +469,76 @@ def _compute_fee_growth_inside(
 
 def _estimate_uncollected_fees(
     token_id: int, wallet_address: str, decimals0: int, decimals1: int
-) -> Tuple[float, float]:
-    """Estimate uncollected fees via a read-only collect() eth_call."""
+) -> Tuple[float, float, str]:
+    """Estimate uncollected fees via a read-only collect() eth_call.
+
+    Returns:
+        (fee0, fee1, status) where status is one of:
+        - "ok" — RPC call succeeded and fees are > 0
+        - "zero" — RPC call succeeded, fees are 0
+        - "error" — RPC call failed
+    """
     if not wallet_address:
         print(f"[fees] no wallet_address provided for token {token_id} — cannot read fees")
-        return (0.0, 0.0)
+        return (0.0, 0.0, "error")
 
-    try:
-        uint128_max = (1 << 128) - 1
-        data = (
-            SELECTOR_COLLECT
-            + _pad_int_to_64(token_id)
-            + _pad_address(wallet_address)
-            + _pad_int_to_64(uint128_max)
-            + _pad_int_to_64(uint128_max)
-        )
-        result = _evm_rpc_call(
-            "eth_call",
-            [{"to": POSITION_MANAGER, "data": data, "from": wallet_address}, "latest"],
-        )
-        if not result or not isinstance(result, str) or len(result) < 2 + 64:
-            print(f"[fees] collect() eth_call returned no data for token {token_id}")
-            # Try without the `from` field — some RPCs don't require it
+    uint128_max = (1 << 128) - 1
+    data = (
+        SELECTOR_COLLECT
+        + _pad_int_to_64(token_id)
+        + _pad_address(wallet_address)
+        + _pad_int_to_64(uint128_max)
+        + _pad_int_to_64(uint128_max)
+    )
+
+    last_error: Optional[Exception] = None
+    for attempt in range(3):
+        try:
             result = _evm_rpc_call(
                 "eth_call",
-                [{"to": POSITION_MANAGER, "data": data}, "latest"],
+                [{"to": POSITION_MANAGER, "data": data, "from": wallet_address}, "latest"],
             )
             if not result or not isinstance(result, str) or len(result) < 2 + 64:
-                return (0.0, 0.0)
+                print(f"[fees] collect() eth_call returned no data for token {token_id}")
+                # Try without the `from` field — some RPCs don't require it
+                result = _evm_rpc_call(
+                    "eth_call",
+                    [{"to": POSITION_MANAGER, "data": data}, "latest"],
+                )
+                if not result or not isinstance(result, str) or len(result) < 2 + 64:
+                    return (0.0, 0.0, "error")
 
-        body = result[2:]
-        # Handle both packed (2 x uint128 in 32 bytes) and padded (2 x uint256) formats
-        if len(body) >= 128:
-            # Padded format: two 32-byte words
-            amount0_raw = int(body[0:64], 16)
-            amount1_raw = int(body[64:128], 16)
-        elif len(body) >= 64:
-            # Packed format: two 16-byte values in 32 bytes
-            amount0_raw = int(body[0:32], 16)
-            amount1_raw = int(body[32:64], 16)
-        else:
-            print(f"[fees] collect() returned insufficient data: {len(body)} chars")
-            return (0.0, 0.0)
+            body = result[2:]
+            # Handle both packed (2 x uint128 in 32 bytes) and padded (2 x uint256) formats
+            if len(body) >= 128:
+                # Padded format: two 32-byte words
+                amount0_raw = int(body[0:64], 16)
+                amount1_raw = int(body[64:128], 16)
+            elif len(body) >= 64:
+                # Packed format: two 16-byte values in 32 bytes
+                amount0_raw = int(body[0:32], 16)
+                amount1_raw = int(body[32:64], 16)
+            else:
+                print(f"[fees] collect() returned insufficient data: {len(body)} chars")
+                return (0.0, 0.0, "error")
 
-        amount0_human = amount0_raw / (10 ** decimals0)
-        amount1_human = amount1_raw / (10 ** decimals1)
+            amount0_human = amount0_raw / (10 ** decimals0)
+            amount1_human = amount1_raw / (10 ** decimals1)
 
-        print(f"[fees] token {token_id}: raw0={amount0_raw} raw1={amount1_raw} "
-              f"human0={amount0_human:.8f} human1={amount1_human:.8f}")
+            print(f"[fees] token {token_id}: raw0={amount0_raw} raw1={amount1_raw} "
+                  f"human0={amount0_human:.8f} human1={amount1_human:.8f}")
 
-        return (amount0_human, amount1_human)
-    except Exception as e:
-        print(f"[fees] collect() eth_call failed for token {token_id}: {e}")
-        return (0.0, 0.0)
+            if amount0_raw > 0 or amount1_raw > 0:
+                return (amount0_human, amount1_human, "ok")
+            return (0.0, 0.0, "zero")
+        except Exception as e:
+            last_error = e
+            print(f"[fees] collect() eth_call attempt {attempt + 1} failed for token {token_id}: {e}")
+            if attempt < 2:
+                time.sleep(1.0)
+
+    print(f"[fees] collect() eth_call failed for token {token_id} after 3 attempts: {last_error}")
+    return (0.0, 0.0, "error")
 
 
 def _decode_positions_response(
@@ -577,15 +595,16 @@ def _decode_positions_response(
     # This replaces the broken feeGrowthGlobal delta which overcounted by ~100x.
     fees_note = None
     if wallet_address:
-        real_fee0, real_fee1 = _estimate_uncollected_fees(
+        real_fee0, real_fee1, fee_status = _estimate_uncollected_fees(
             token_id, wallet_address, decimals0, decimals1
         )
-        if real_fee0 > 0 or real_fee1 > 0:
+        if fee_status == "ok":
             owed0_h = real_fee0
             owed1_h = real_fee1
-        else:
-            # collect() returned 0 — either no fees earned or RPC issue
-            fees_note = "No uncollected fees (or RPC unreachable)"
+        elif fee_status == "zero":
+            fees_note = "No uncollected fees"
+        else:  # "error"
+            fees_note = "RPC unreachable"
     else:
         fees_note = "Connect wallet to read fees"
 
@@ -597,6 +616,13 @@ def _decode_positions_response(
     # v5.1: Compute real position value using V3 liquidity math
     position_value_usd = fees_earned_usd
     deposit_amounts: Dict[str, float] = {}
+
+    # Tracking metrics (populated by GUI's _lp_merge_tracking after fetch)
+    pnl_usd: Optional[float] = None
+    pnl_pct: Optional[float] = None
+    apy: Optional[float] = None
+    days_active: Optional[int] = None
+
     if liquidity > 0 and current_tick is not None and tick_upper != tick_lower:
         import math as _math
         sqrt_lower = 1.0001 ** (tick_lower / 2.0)
@@ -655,6 +681,10 @@ def _decode_positions_response(
         fees_note=fees_note,
         current_value_usd=position_value_usd,
         deposit_value_usd=position_value_usd,
+        pnl_usd=pnl_usd,
+        pnl_pct=pnl_pct,
+        apy=apy,
+        days_active=days_active,
         raw_data={
             "token_id": token_id,
             "nonce": nonce,

@@ -120,6 +120,91 @@ def is_pool_saved(address_db: Dict[str, Any], token_id: int, venue: str) -> bool
     )
 
 
+def _find_pool_entry(address_db: Dict[str, Any], token_id: int, venue: str) -> Optional[Dict[str, Any]]:
+    """Return the saved pool entry matching venue + token_id, or None."""
+    pools = address_db.get("saved_pools", [])
+    if not isinstance(pools, list):
+        return None
+    for entry in pools:
+        if (
+            isinstance(entry, dict)
+            and entry.get("venue") == venue
+            and entry.get("token_id") == token_id
+        ):
+            return entry
+    return None
+
+
+def update_position_tracking(
+    address_db: Dict[str, Any],
+    token_id: int,
+    venue: str,
+    current_value_usd: Optional[float] = None,
+    fees_collected_usd: Optional[float] = None,
+    fee_event: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """Update tracking fields for a saved pool.
+
+    On first call (no existing tracking data), sets first_seen_date and
+    initial_deposit_usd to the current value.
+
+    On subsequent calls, accumulates fees_collected_usd and appends fee_event
+    to fee_history.
+
+    The caller must re-encrypt the vault to persist changes.
+
+    Returns True on success, False on error or if no matching pool exists.
+    """
+    try:
+        entry = _find_pool_entry(address_db, token_id, venue)
+        if entry is None:
+            return False
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+
+        if "first_seen_date" not in entry or entry.get("initial_deposit_usd") is None:
+            entry["first_seen_date"] = now_iso
+            entry["initial_deposit_usd"] = current_value_usd or 0.0
+            entry["total_fees_collected_usd"] = 0.0
+            entry["last_fee_collect_date"] = None
+            entry["fee_history"] = []
+
+        if fees_collected_usd and fees_collected_usd > 0:
+            entry["total_fees_collected_usd"] = entry.get("total_fees_collected_usd", 0.0) + fees_collected_usd
+            entry["last_fee_collect_date"] = now_iso
+
+        if fee_event and isinstance(fee_event, dict):
+            history = entry.setdefault("fee_history", [])
+            if isinstance(history, list):
+                history.append(fee_event)
+
+        return True
+    except Exception:
+        return False
+
+
+def get_position_tracking(
+    address_db: Dict[str, Any],
+    token_id: int,
+    venue: str,
+) -> Dict[str, Any]:
+    """Get tracking data for a saved pool. Returns empty dict if not found."""
+    entry = _find_pool_entry(address_db, token_id, venue)
+    if entry is None:
+        return {}
+    return {
+        k: entry[k]
+        for k in (
+            "first_seen_date",
+            "initial_deposit_usd",
+            "total_fees_collected_usd",
+            "last_fee_collect_date",
+            "fee_history",
+        )
+        if k in entry
+    }
+
+
 def migrate_saved_pools_json(address_db: Dict[str, Any], base_dir: str) -> bool:
     """One-time migration: import saved_pools.json into the encrypted vault.
 

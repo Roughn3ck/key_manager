@@ -5,9 +5,9 @@ ColdStack is a secure cryptocurrency key storage application with a GUI interfac
 It encrypts wallet data (24-word mnemonics, addresses, private keys) using AES-256-GCM with Argon2id key derivation.
 Designed for portable USB deployment alongside a local script-mode workflow.
 
-**Current production version: v5.1** (July 2026) — Hyperliquid Vault Tracking (HL1 Vaults tab), saved vault snapshots in encrypted vault, wallet/account selector, LP fee reading via static `collect()` eth_call, HyperEVM ERC-20 support, Go Online toggle, wallet balances, CoinGecko prices. v4.2: Customizable RPC endpoints, Standard/Advanced mode, API key management.
+**Current production version: v5.1.1** (July 2026) — Add/Remove Liquidity UI, auto-balance (Zap In), gas price 6x boost, position decode fix, fee tracking, unstubbed HyperEVM swap, new `lp_liquidity_manager.py` module. v5.1: Hyperliquid Vault Tracking (HL1 Vaults tab), saved vault snapshots, wallet/account selector, LP fee reading via static `collect()` eth_call, HyperEVM ERC-20 support, Go Online toggle, wallet balances, CoinGecko prices. v4.2: Customizable RPC endpoints, Standard/Advanced mode, API key management.
 
-**Next version: v5.2** — saved pools moved into encrypted vault; HyperEVM swap router research; writer mainnet testing.
+**Next version: v5.2** — tick range editing, rebalancing, writer mainnet testing.
 
 ## ⚠️ CRITICAL: Always Compile After Changes
 
@@ -33,6 +33,7 @@ If the build fails, fix the error before considering the task complete. A stale 
 
 | Version | Description | Key Files |
 |---------|-------------|-----------|
+| v5.1.1 | Add/Remove Liquidity UI + gas 6x boost + position decode fix + fee tracking + swap unstub | `src/lp_liquidity_manager.py`, `src/gui_main_v5.py`, `src/venue_adapters/hyperliquid_writer.py`, `build_gui_v5.py` |
 | v5.1 | Hyperliquid Vaults + saved vault snapshots + LP fee fix + wallet selector | `src/gui_main_v5.py`, `src/vault_tracker.py`, `src/venue_adapters/hyperliquid_adapter.py`, `build_gui_v5.py` |
 | v5.0 | LP Engine + Hyperliquid Writer + LP Positions tab + CTkTabview | `src/gui_main_v5.py`, `src/venue_adapters/hyperliquid_writer.py`, `build_gui_v5.py` |
 | v4.2 | Customizable RPC endpoints + Standard/Advanced mode + API key management | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
@@ -58,7 +59,8 @@ key_manager/
 │   ├── venue_adapters/
 │   │   ├── __init__.py         # Auto-registers adapters on import
 │   │   ├── hyperliquid_adapter.py  # v5.1: Hyperliquid L1 + HyperEVM read adapter; fee reading via static collect() eth_call
-│   │   └── hyperliquid_writer.py    # v5.0: HyperEVM VenueWriter (sign via agent)
+│   │   └── hyperliquid_writer.py    # v5.1.1: HyperEVM VenueWriter (exactInputSingle swap + sign via agent)
+│   ├── lp_liquidity_manager.py  # v5.1.1: Add/Remove/Edit liquidity dialogs
 │   ├── lp_gui_poc.py          # v5.0: LP tab UI proof-of-concept (Tkinter)
 │   ├── crypto_engine.py       # AES-256-GCM encryption + Argon2id KDF (shared)
 │   ├── derivation_engine.py   # BIP39 mnemonic-to-address derivation (v3)
@@ -69,7 +71,7 @@ key_manager/
 ├── key_manager_gui_v4.spec    # PyInstaller spec (name='coldstack')
 ├── coldstack.spec             # Duplicate spec (kept for compatibility)
 ├── USB_DEPLOYMENT/
-│   ├── coldstack.exe          # Current production EXE (v5.1 build — rebuild after source changes)
+│   ├── coldstack.exe          # Current production EXE (v5.1.1 build — rebuild after source changes)
 │   ├── launch.bat             # Launcher script
 │   └── README.md              # USB deployment readme
 ├── backups/                   # Previous version backups
@@ -101,7 +103,9 @@ key_manager/
 - **Currency Toggle**: USD, AUD, CAD, EUR, CHF, or None. Stored in encrypted vault.
 - Only public addresses are queried — private keys and mnemonics NEVER leave the vault.
 
-### LP Engine Architecture (v5.0 — in progress)
+### LP Engine Architecture (v5.1.1 — liquidity management)
+- **lp_liquidity_manager.py** (v5.1.1 NEW): Add/Remove/Edit liquidity dialogs. AddLiquidityDialog supports auto-balance (Zap In). RemoveLiquidityDialog uses a percentage slider. EditPositionDialog is a stub for v5.2.
+
 - **lp_engine.py**: Core module with `LPPosition` dataclass, `VenueAdapter` ABC, `StrategyEngine`, `LPEngine` facade
 - **venue_adapters/**: One file per venue. Each adapter implements `can_handle()`, `fetch_position()`, `fetch_all_positions()`, `fetch_fees_earned()`
 - **Read-only**: Adapters never sign transactions, never access private keys

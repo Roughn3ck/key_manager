@@ -2,21 +2,37 @@
 
 *Secure offline crypto key vault with BIP39 derivation engine.*
 
-[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v5.1-success)]()
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production%20v5.1.1-success)]()
 
 ## Download
 
-**Latest release: [ColdStack v5.1 - Vault Tracking + HyperEVM ERC-20](https://github.com/Roughn3ck/key_manager/releases/tag/v5.1)**
+**Latest release: [ColdStack v5.1.1 - Add/Remove Liquidity + Gas Fix + Fee Tracking](https://github.com/Roughn3ck/key_manager/releases/tag/v5.1.1)**
 
 | File | Size | Description |
 |------|------|-------------|
-| `coldstack.exe` | ~50MB | Full GUI application - ColdStack branded, v5.1 with Vault Tracking, HyperEVM ERC-20, LP Engine, Hyperliquid Writer |
+| `coldstack.exe` | ~50MB | Full GUI application - ColdStack branded, v5.1.1 with Add/Remove Liquidity, gas 6x boost, fee tracking, LP Engine, Hyperliquid Writer |
 
 > The CLI executable (`key_manager.exe`) has been deprecated and removed from USB_DEPLOYMENT as of v3.1. The CLI source remains available for script-mode use (`python src/main.py`).
 
 > No installation required. Just download, run, and click "Initialize New Vault". Works on any Windows 10/11 machine - no Python needed.
 
 ---
+
+## v5.1.1 Features - Add/Remove Liquidity + Gas Fix + Fee Tracking (July 2026)
+
+- **Add/Remove Liquidity UI**: + / − / ✎ icons on each HyperEVM LP position card.
+  - **+ (Add Liquidity)**: Opens the `AddLiquidityDialog` with token inputs, 50%/Max buttons, wallet balance display, live USD total, and an **Auto-Balance (Zap In)** toggle.
+  - **− (Remove Liquidity)**: Opens the `RemoveLiquidityDialog` with a 0-100% slider, estimated token output, and an optional **Collect fees after removal** checkbox.
+  - **✎ (Edit Position)**: Placeholder dialog — full tick-range editing and rebalancing coming in v5.2.
+  - **New module**: `src/lp_liquidity_manager.py` isolates all liquidity dialog logic from `gui_main_v5.py`.
+- **Auto-Balance (Zap In)**: When adding liquidity, enter one token amount and let the system swap the excess to match the position's current ratio before depositing. Uses `get_swap_quote()` for estimates and `swap()` for execution.
+- **Gas Price 6x Boost**: Embedded key_manager_agent now multiplies HyperEVM `eth_gasPrice` by 6x, clearing "nonce too high" mempool rejections (eth_gasPrice returns 0.1 Gwei; 6x = 0.6 Gwei, well above the ~0.28 Gwei market rate).
+- **Position Decode Offset Fix**: `hyperliquid_writer._read_position_data()` now reads `fee`/`tickLower`/`tickUpper` from the correct ABI offsets (256:320, 320:384, 384:448), fixing `OverflowError: Result too large` during compound fees.
+- **Fee Status Detection**: `_estimate_uncollected_fees()` returns `ok`/`zero`/`error` so the UI distinguishes between genuinely zero fees and RPC failures.
+- **Fee/Performance Tracking**: LP position cards display **PnL** (capital gain/loss), **APR** (annualized fee yield), and **Days Active** since first load.
+- **`_evm_rpc_call` Bug Fix**: Module-level helper used correctly in fee tracking instead of being called as an `HyperliquidAdapter` instance method.
+- **`swap()` Unstubbed**: `hyperliquid_writer.swap()` now executes `exactInputSingle` via the confirmed SwapRouter at `0x1ebdfc75ffe3ba3de61e7138a3e8706ac841af9b`.
+- **`get_swap_quote()`**: Read-only pool price estimate via `slot0`/`sqrtPriceX96`, used by the Add Liquidity dialog for USD totals and auto-balance planning.
 
 ## v5.1 Features - Vault Tracking + HyperEVM ERC-20 + LP Fee Fix (July 2026)
 
@@ -46,12 +62,12 @@
 - **Address Pre-fill**: LP tab and HL1 Vaults tab address entry auto-fill from the selected account's first EVM/HYPE address.
 - **Offline-aware**: LP tab and HL1 Vaults tab respect Go Online toggle. Refresh disabled when offline. Offline banner shown.
 
-### Running v5.1
+### Running v5.1.1
 - **GUI (script mode):** `python src/gui_main_v5.py`
 - **Build EXE:** `python build_gui_v5.py` -> `USB_DEPLOYMENT/coldstack.exe`
 - **CLI (script mode only):** `python src/main.py`
-- **No new dependencies**: Uses stdlib `urllib.request` only. Swap router stubbed (HyperEVM swap router address TBD).
-- **Backward compatible**: v4.2 vaults open in v5.0 without migration. LP tab is additive.
+- **No new dependencies**: Uses stdlib `urllib.request` only.
+- **Backward compatible**: v5.1 vaults open in v5.1.1 without migration. LP tab is additive.
 
 ### Security Rules (v5.1)
 1. LP Engine is read-only by default. Writer only accessible when vault is unlocked + user confirms each operation.

@@ -405,9 +405,13 @@ def rpc_call(rpc_url: str, method: str, params: list) -> dict:
 
 
 def get_nonce(rpc_url: str, address: str) -> int:
-    """Get transaction count for an address."""
-    result = rpc_call(rpc_url, "eth_getTransactionCount", [address, "latest"])
-    return int(result["result"], 16)
+    """Get transaction count for an address. Returns 0 on error."""
+    try:
+        result = rpc_call(rpc_url, "eth_getTransactionCount", [address, "latest"])
+        return int(result["result"], 16)
+    except Exception as e:
+        print(f"[get_nonce] exception: {type(e).__name__}: {e}")
+        return 0
 
 
 def get_chain_id(rpc_url: str) -> int:
@@ -417,23 +421,38 @@ def get_chain_id(rpc_url: str) -> int:
 
 
 def estimate_gas(rpc_url: str, tx: dict) -> int:
-    """Estimate gas for a transaction."""
-    result = rpc_call(rpc_url, "eth_estimateGas", [tx])
-    return int(result["result"], 16)
+    """Estimate gas for a transaction. Returns gas limit or 0 on error."""
+    try:
+        result = rpc_call(rpc_url, "eth_estimateGas", [tx])
+        if "result" in result and result["result"]:
+            return int(result["result"], 16)
+        else:
+            # RPC returned an error (e.g., "execution reverted")
+            err = result.get("error", {})
+            err_msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
+            print(f"[estimate_gas] RPC error: {err_msg}")
+            return 0
+    except Exception as e:
+        print(f"[estimate_gas] exception: {type(e).__name__}: {e}")
+        return 0
 
 
 def get_gas_price(rpc_url: str) -> dict:
-    """Get gas price info (legacy + EIP-1559)."""
-    legacy = rpc_call(rpc_url, "eth_gasPrice", [])
+    """Get gas price info (legacy + EIP-1559). Returns dict with gasPrice."""
+    try:
+        legacy = rpc_call(rpc_url, "eth_gasPrice", [])
+        base = int(legacy["result"], 16)
+    except Exception as e:
+        print(f"[get_gas_price] eth_gasPrice failed: {e}, using fallback 100M")
+        base = 100_000_000  # 0.1 Gwei fallback
     try:
         max_fee = rpc_call(rpc_url, "eth_maxPriorityFeePerGas", [])
         max_priority = int(max_fee["result"], 16)
     except Exception:
         max_priority = 0
-    base = int(legacy["result"], 16)
     return {
         "gasPrice": base,
-        "maxFeePerGas": int(base * 1.2) + max_priority,  # 20% buffer for base fee fluctuations
+        "maxFeePerGas": int(base * 1.2) + max_priority,
         "maxPriorityFeePerGas": max_priority,
     }
 
@@ -542,7 +561,13 @@ class KeyManagerAgent:
         return {"status": "ok", "result": addresses}
 
     def _get_private_key(self, account: str, chain: str = "EVM") -> str:
-        """Get private key for an account/chain. Internal only — never returned to caller."""
+        """Get private key for an account/chain. Internal only — never returned to caller.
+
+        When multiple keys match the chain substring (e.g. both "EVM (Ethereum)"
+        and "Hyperliquid (HL1 & HyperEVM)" match chain="EVM"), prefer the most
+        specific match. HyperEVM/Hyperliquid keys are preferred when the chain
+        is "EVM" and the RPC is HyperEVM (chain_id 999).
+        """
         pk_store = self.vault_data.get("private_keys", {})
         keys = pk_store.get(account)
         if keys is None:
@@ -551,14 +576,42 @@ class KeyManagerAgent:
         if isinstance(keys, str):
             return keys
         # List of {chain, key} dicts
+        chain_upper = chain.upper()
+        matches = []
         for entry in keys:
             entry_chain = entry.get("chain", "").upper()
-            if chain.upper() in entry_chain or entry_chain in chain.upper():
-                return entry["key"]
-        # If no chain match, return first key
-        if keys:
-            return keys[0]["key"]
-        raise ValueError(f"No private key found for account '{account}' chain '{chain}'")
+            if chain_upper in entry_chain or entry_chain in chain_upper:
+                matches.append(entry)
+
+        if not matches:
+            # No chain match at all — return first key as fallback
+            if keys:
+                print(f"[WARNING] No private key match for chain='{chain}' "
+                      f"account='{account}'. Using first key as fallback. "
+                      f"Available chains: {[e.get('chain', '') for e in keys]}")
+                return keys[0]["key"]
+            raise ValueError(f"No private key found for account '{account}' chain '{chain}'")
+
+        if len(matches) == 1:
+            return matches[0]["key"]
+
+        # Multiple matches — disambiguate by checking for HyperEVM/Hyperliquid
+        # when chain is "EVM" (since HyperEVM is a specific EVM chain)
+        # Priority: HyperEVM > Hyperliquid > generic EVM > other
+        priority_keywords = ["HYPEREVM", "HYPERLIQUID", "HYPE"]
+        for keyword in priority_keywords:
+            for match in matches:
+                if keyword in match.get("chain", "").upper():
+                    print(f"[key_select] chain='{chain}' matched multiple keys for "
+                          f"account='{account}', selecting HyperEVM key "
+                          f"(chain='{match.get('chain', '')}')")
+                    return match["key"]
+
+        # No HyperEVM-specific match found among multiple matches — return first
+        print(f"[key_select] chain='{chain}' matched multiple keys for "
+              f"account='{account}', using first match "
+              f"(chain='{matches[0].get('chain', '')}')")
+        return matches[0]["key"]
 
     def sign_tx(self, account: str, to: str, data: str, value: str = "0",
                 chain_id: int = None, rpc: str = None, chain: str = "EVM",
@@ -572,6 +625,8 @@ class KeyManagerAgent:
 
             # Derive sender address for nonce/chain_id fetch
             sender = private_key_to_address(privkey)
+            print(f"[sign_tx] account={account} chain={chain} sender={sender} "
+                  f"chain_id={chain_id}")
 
             # Get chain_id from RPC if not provided
             if chain_id is None and rpc:
@@ -615,8 +670,40 @@ class KeyManagerAgent:
                 max_fee_per_gas = gas_info["maxFeePerGas"]
                 max_priority_fee_per_gas = gas_info["maxPriorityFeePerGas"]
 
-            # Try EIP-1559 if we have fee info, otherwise legacy
-            if max_fee_per_gas is not None:
+            # HyperEVM (chain_id 999) does NOT support EIP-1559 (type 2) transactions.
+            # It returns a misleading "nonce too high" error when an EIP-1559 tx
+            # is submitted. Force legacy (type 0) transactions for HyperEVM.
+            # Other chains that don't support EIP-1559 can be added here.
+            FORCE_LEGACY_CHAIN_IDS = {999}  # HyperEVM
+
+            if chain_id in FORCE_LEGACY_CHAIN_IDS:
+                # Force legacy tx — use gas_price, ignore EIP-1559 params
+                if gas_price is None:
+                    if rpc:
+                        gas_info = get_gas_price(rpc)
+                        gas_price = gas_info["gasPrice"]
+                    else:
+                        gas_price = 100_000_000  # 0.1 Gwei fallback
+
+                # HyperEVM mempool bug: previous failed broadcasts can leave ghost txs
+                # in the mempool. eth_gasPrice returns a value too low to replace them.
+                # Multiply gas_price by 3x to ensure replacement of any ghost tx.
+                # This also helps with the misleading "nonce too high" error which is
+                # actually a gas-price-too-low-to-replace error.
+                gas_price = int(gas_price * 6)
+                print(f"[sign_tx] HyperEVM gas_price after 6x boost: {gas_price} wei ({gas_price / 1e9:.4f} Gwei)")
+
+                signed_hex = sign_legacy_tx(
+                    to=to,
+                    data=data_hex,
+                    value=val,
+                    gas_limit=gas_limit,
+                    gas_price=gas_price,
+                    nonce=nonce,
+                    chain_id=chain_id,
+                    privkey_hex=privkey,
+                )
+            elif max_fee_per_gas is not None:
                 signed_hex = sign_eip1559_tx(
                     to=to,
                     data=data_hex,
@@ -653,6 +740,11 @@ class KeyManagerAgent:
                     "gas_limit": gas_limit,
                 }
             }
+        except OverflowError as e:
+            import traceback
+            print(f"[sign_tx] OverflowError: {e}")
+            traceback.print_exc()
+            return {"status": "error", "error": f"OverflowError: {e}. This may be a transient RPC issue. Try again."}
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
@@ -661,7 +753,13 @@ class KeyManagerAgent:
                       gas_limit: int = None, gas_price: int = None,
                       max_fee_per_gas: int = None, max_priority_fee_per_gas: int = None,
                       nonce: int = None) -> dict:
-        """Sign and broadcast a transaction. Returns tx hash."""
+        """Sign and broadcast a transaction. Returns tx hash.
+
+        Handles HyperEVM's mempool bugs:
+        - Gas price is boosted 3x in sign_tx for HyperEVM to clear ghost txs
+        - "nonce too high" may be a bogus error -- tx can still enter the mempool
+        - "nonce too low" means a previous tx already used that nonce
+        """
         self._check_session()
         try:
             # Sign first
@@ -678,11 +776,50 @@ class KeyManagerAgent:
 
             signed_tx = sign_result["result"]["signed_tx"]
 
-            # Broadcast
             if not rpc:
                 return {"status": "error", "error": "rpc URL required for broadcast"}
 
-            tx_hash = broadcast_raw_tx(rpc, signed_tx)
+            try:
+                tx_hash = broadcast_raw_tx(rpc, signed_tx)
+            except Exception as broadcast_err:
+                err_msg = str(broadcast_err)
+                if "nonce too high" in err_msg.lower() and rpc:
+                    # HyperEVM bug: the tx may have entered the mempool despite
+                    # the error. Wait and retry with fresh nonce + boosted gas.
+                    print(f"[broadcast_tx] nonce too high, retrying after 3s...")
+                    time.sleep(3)
+                    sender = sign_result["result"]["from"]
+                    fresh_nonce = get_nonce(rpc, sender)
+                    print(f"[broadcast_tx] fresh nonce: {fresh_nonce}")
+                    retry_sign = self.sign_tx(
+                        account=account, to=to, data=data, value=value,
+                        chain_id=chain_id, rpc=rpc, chain=chain,
+                        gas_limit=gas_limit, gas_price=gas_price,
+                        max_fee_per_gas=max_fee_per_gas,
+                        max_priority_fee_per_gas=max_priority_fee_per_gas,
+                        nonce=fresh_nonce,
+                    )
+                    if retry_sign["status"] != "ok":
+                        return retry_sign
+                    signed_tx = retry_sign["result"]["signed_tx"]
+                    sign_result = retry_sign
+                    try:
+                        tx_hash = broadcast_raw_tx(rpc, signed_tx)
+                    except Exception as retry_err:
+                        retry_msg = str(retry_err)
+                        if "nonce too low" in retry_msg.lower():
+                            # The first tx (nonce too high) actually entered the
+                            # mempool and got mined. We don't have its tx hash.
+                            return {"status": "error",
+                                    "error": f"Nonce conflict -- a previous tx may have succeeded. Check on-chain. ({retry_msg})"}
+                        raise
+                elif "nonce too low" in err_msg.lower():
+                    # A previous tx already used this nonce. The tx may have succeeded.
+                    return {"status": "error",
+                            "error": f"Nonce too low -- a previous tx may have already used this nonce. Check on-chain. ({err_msg})"}
+                else:
+                    raise
+
             return {
                 "status": "ok",
                 "result": {
@@ -690,6 +827,7 @@ class KeyManagerAgent:
                     "signed_tx": signed_tx,
                     "from": sign_result["result"]["from"],
                     "nonce": sign_result["result"]["nonce"],
+                    "gas_limit": sign_result["result"].get("gas_limit"),
                 }
             }
         except Exception as e:

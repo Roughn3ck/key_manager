@@ -1,3 +1,30 @@
+## v5.1.1 - Add/Remove Liquidity + Gas Fix + Fee Tracking (July 2026)
+
+### New Features
+- **Add/Remove Liquidity UI**: + / − / ✎ icons on LP position cards next to Value
+  - "+" opens Add Liquidity dialog with token inputs, 50%/Max buttons, and auto-balance (Zap In) toggle
+  - "−" opens Remove Liquidity dialog with percentage slider and estimated output
+  - "✎" opens Edit Position stub (coming in v5.2)
+- **Auto-balance (Zap In)**: When enabled, system swaps excess token to match position ratio before depositing
+- **New module `lp_liquidity_manager.py`**: All liquidity management dialogs in a separate file
+- **Unstubbed `swap()` method**: SwapRouter.exactInputSingle now working for standalone swaps
+- **`get_swap_quote()`**: Read-only swap price estimation for UI display
+
+### Bug Fixes
+- **Position decode offset fix (Forge-17/18)**: `_read_position_data()` now reads fee/tickLower/tickUpper from correct byte offsets (was reading token0/token1 as fee/ticks → OverflowError)
+- **Gas price 6x boost**: Increased from 3x to 6x to clear HyperEVM mempool rejections (eth_gasPrice returns 0.1 Gwei, market is ~0.28 Gwei, 6x = 0.6 Gwei)
+- **Fee tracking bug**: Fixed `_evm_rpc_call` called as instance method instead of module function
+- **Compound fees flow**: Collect → Swap → IncreaseLiquidity now works end-to-end (IncreaseLiquidity fails only on dust amounts, which is expected contract behavior)
+- **Nonce retry logic**: Fresh nonce fetch on "nonce too high" with 3s delay
+
+### Verification
+- Compound fees: collect ✅ → swap ✅ → increaseLiquidity ✅ (on meaningful amounts)
+- Add/Remove liquidity dialogs open from position cards
+- Position decode: tick_lower=-300060, tick_upper=-297120, fee=3000 (correct)
+- Fee tracking: PnL, APR, days active display on position cards
+
+---
+
 ## v5.1 - Hyperliquid Vaults + LP Fee Fix (July 2026)
 
 ### Bug Fixes (v5.1 refresh)
@@ -61,17 +88,24 @@
 - **Vault Age**: earliest timestamp in `vaultDetails.portfolio` history
 - **Deposit Age**: `vaultDetails.followerState.vaultEntryTime` for the queried user
 
-### Known Limitations
-- Swap router address on HyperEVM still not confirmed — `swap()` raises `NotImplementedError`; cross-ratio rebalances deferred
-- Compound Fees not yet tested live (waiting for fees to accrue)
+### Known Limitations (v5.1)
+- ~~Swap router address on HyperEVM still not confirmed — `swap()` raises `NotImplementedError`; cross-ratio rebalances deferred~~ Fixed in v5.1.1
+- ~~Compound Fees not yet tested live (waiting for fees to accrue)~~ Tested and working in v5.1.1
 
-### Next Steps
-- [ ] Research/confirm HyperEVM swap router contract address
+### Next Steps (v5.1.1)
+- [x] Research/confirm HyperEVM swap router contract address
 - [x] Collect Fees tested and confirmed working on Project X mainnet
-- [ ] Test Compound Fees end-to-end with embedded agent on mainnet once fees have accrued
-- [x] Build EXE with `python build_gui_v5.py` (45.14 MB, 15/07/2026 — all network features working)
+- [x] Test Compound Fees end-to-end with embedded agent on mainnet
+- [ ] Build EXE with `python build_gui_v5.py` (in progress)
 - [ ] Test EXE on clean Windows machine
-- [ ] Test "Withdraw Fees" button end-to-end on mainnet
+- [x] Test Add/Remove Liquidity dialogs from position cards
+
+### v5.1.1 Completed
+- [x] `src/lp_liquidity_manager.py` created with Add/Remove/Edit dialogs
+- [x] `src/gui_main_v5.py` wired + / − / ✎ icons with status-bar tooltips
+- [x] `src/venue_adapters/hyperliquid_writer.py` — unstubbed `swap()` + `get_swap_quote()`
+- [x] `build_gui_v5.py` — version strings v5.1.1 + `lp_liquidity_manager` hidden import
+- [x] `AGENTS.md`, `.clinerules`, `README.md`, `STATUS.md` updated for v5.1.1
 
 ---
 
@@ -178,8 +212,8 @@
 - CLI commands: `derive-address`, `generate-mnemonic`, `validate-mnemonic`
 
 **Project Location:** `B:\Github\key_manager\`
-**Last Updated:** 2026-07-15
-**Current Version:** v5.1 (Vault Tracking + HyperEVM ERC-20 + LP Fee Fix)
+**Last Updated:** 2026-07-21
+**Current Version:** v5.1.1 (Add/Remove Liquidity + Gas Fix + Fee Tracking)
 
 ## Versioning
 
@@ -191,6 +225,7 @@
 | v3.1 | ColdStack rebrand + Check for Updates | `src/gui_main_v3_1.py`, `build_gui_v3_1.py` |
 | v4.1 | Price Feeds + Wallet Balances + Go Online | `src/gui_main_v4.py`, `build_gui_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |
 | v4.2 | Customizable RPC + Standard/Advanced Mode | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
+| v5.1.1 | Add/Remove Liquidity + Gas Fix + Fee Tracking | `src/lp_liquidity_manager.py`, `src/gui_main_v5.py`, `src/venue_adapters/hyperliquid_writer.py`, `build_gui_v5.py` |
 
 ## Architecture
 

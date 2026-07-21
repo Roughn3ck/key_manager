@@ -1,0 +1,746 @@
+"""
+ColdStack LP Liquidity Manager -- Add/Remove/Edit liquidity dialogs.
+
+Separate module to keep gui_main_v5.py focused on layout/navigation.
+All liquidity management UI lives here.
+"""
+import threading
+import time
+import customtkinter as ctk
+from tkinter import messagebox
+from typing import Optional, List, Dict
+from datetime import datetime
+
+from venue_adapters.venue_writer import (
+    SwapParams,
+    IncreaseLiquidityParams,
+    DecreaseLiquidityParams,
+    CollectFeesParams,
+)
+
+# Token constants (match hyperliquid_writer.py)
+WHYPE = "0x5555555555555555555555555555555555555555"
+UBTC = "0x9FDBdA0A5e284c32744D2f17Ee5c74B284993463"
+WHYPE_DECIMALS = 18
+UBTC_DECIMALS = 8
+
+
+def _resolve_account_name(parent, wallet_address: str) -> Optional[str]:
+    """Resolve a wallet address to a vault account name, if possible."""
+    key_manager = getattr(parent, "key_manager", None)
+    if not key_manager or not wallet_address:
+        return None
+    accounts_data = key_manager.address_db.get("accounts", {})
+    for acct, data in accounts_data.items():
+        for addr in data.get("addresses", []):
+            if addr.get("address", "").lower() == wallet_address.lower():
+                return acct
+    return None
+
+
+def _get_writer(parent):
+    """Return an unlocked HyperliquidWriter from the parent's LPEngine, or None."""
+    lp_engine = getattr(parent, "lp_engine", None)
+    current_password = getattr(parent, "current_password", None)
+    if not lp_engine:
+        return None
+    writer = lp_engine.get_writer("hyperliquid", current_password)
+    return writer
+
+
+def _notify(parent, message: str, error: bool = False):
+    """Call parent's show_notification safely."""
+    show = getattr(parent, "show_notification", None)
+    if show:
+        show(message, error=error)
+
+
+def _add_status_tooltip(widget, status_label, text):
+    """Show text in a status label when the widget is hovered."""
+    widget.bind("<Enter>", lambda e: status_label.configure(text=text))
+    widget.bind("<Leave>", lambda e: status_label.configure(text=""))
+
+
+def _safe_after(parent, delay_ms: int, callback):
+    """Schedule a callback on the parent's root widget after delay_ms."""
+    root = getattr(parent, "root", None)
+    if root:
+        root.after(delay_ms, callback)
+
+
+class AddLiquidityDialog:
+    """Add Liquidity sub-window with manual entry or auto-balance (Zap In)."""
+
+    def __init__(self, parent, position, key_manager, price_engine, wallet_address):
+        """
+        Args:
+            parent: The main GUI window (for notifications and refresh callbacks)
+            position: LPPosition object for the position to add liquidity to
+            key_manager: KeyManagerAgent instance for signing txs
+            price_engine: PriceEngine for USD conversions
+            wallet_address: The wallet address to use
+        """
+        self.parent = parent
+        self.position = position
+        self.key_manager = key_manager
+        self.price_engine = price_engine
+        self.wallet_address = wallet_address
+
+        self.win = ctk.CTkToplevel(parent.root)
+        self.win.title("Add Liquidity")
+        self.win.geometry("440x640")
+        self.win.resizable(False, False)
+        self.win.grab_set()
+
+        self._build_ui()
+
+    def _build_ui(self):
+        """Build the Add Liquidity dialog."""
+        # -- Header --
+        header_frame = ctk.CTkFrame(self.win, fg_color="transparent")
+        header_frame.pack(fill="x", padx=20, pady=(15, 5))
+
+        ctk.CTkLabel(header_frame, text="Add Liquidity",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        ctk.CTkButton(header_frame, text="\u2715", width=28, height=28,
+                      fg_color="transparent", hover_color="gray20",
+                      command=self.win.destroy).pack(side="right")
+
+        # -- Subheader: pair . fee . range status --
+        pair = self.position.pair or "WHYPE/UBTC"
+        in_range = (self.position.position_in_range_pct is not None
+                    and 0 <= self.position.position_in_range_pct <= 100)
+        range_status = "IN RANGE" if in_range else "OUT OF RANGE"
+        fee_text = f"{pair} \u00b7 0.3% fee \u00b7 {range_status}"
+        ctk.CTkLabel(self.win, text=fee_text,
+                     font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", padx=20)
+
+        # -- Token input boxes --
+        # Determine token0/token1 from position deposit_amounts
+        # deposit_amounts is a dict like {"HYPE": 71.1058, "BTC": 0.00401725}
+        tokens = list(self.position.deposit_amounts.keys()) if self.position.deposit_amounts else ["HYPE", "BTC"]
+
+        # Token display info
+        token_info = {
+            "HYPE": {"label": "HYPE", "address": WHYPE, "decimals": WHYPE_DECIMALS},
+            "BTC": {"label": "UBTC", "address": UBTC, "decimals": UBTC_DECIMALS},
+        }
+
+        self.token_entries: Dict[str, ctk.CTkEntry] = {}
+        self.balance_labels: Dict[str, ctk.CTkLabel] = {}
+
+        for i, sym in enumerate(tokens):
+            info = token_info.get(sym, {"label": sym, "address": "", "decimals": 18})
+
+            # Token input box
+            box = ctk.CTkFrame(self.win, fg_color="gray15", corner_radius=10)
+            box.pack(fill="x", padx=20, pady=(10 if i == 0 else 5, 5))
+
+            # Token name + balance
+            top_row = ctk.CTkFrame(box, fg_color="transparent")
+            top_row.pack(fill="x", padx=10, pady=(8, 0))
+            ctk.CTkLabel(top_row, text=info["label"],
+                         font=ctk.CTkFont(size=13, weight="bold")).pack(side="left")
+
+            # Wallet balance for this token (fetch via RPC)
+            balance_text = f"Balance: {self._get_wallet_balance(sym):.8f}"
+            bal_label = ctk.CTkLabel(top_row, text=balance_text,
+                                      font=ctk.CTkFont(size=10), text_color="gray60")
+            bal_label.pack(side="right")
+            self.balance_labels[sym] = bal_label
+
+            # Input row
+            input_row = ctk.CTkFrame(box, fg_color="transparent")
+            input_row.pack(fill="x", padx=10, pady=(5, 10))
+
+            entry = ctk.CTkEntry(input_row, placeholder_text="0.0",
+                                 font=ctk.CTkFont(size=16))
+            entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
+            self.token_entries[sym] = entry
+
+            # 50% and Max buttons
+            ctk.CTkButton(input_row, text="50%", width=40, height=28,
+                          font=ctk.CTkFont(size=10),
+                          command=lambda s=sym: self._fill_percent(s, 50)
+                          ).pack(side="left", padx=2)
+            ctk.CTkButton(input_row, text="Max", width=40, height=28,
+                          font=ctk.CTkFont(size=10),
+                          command=lambda s=sym: self._fill_percent(s, 100)
+                          ).pack(side="left", padx=2)
+
+            # "+" separator between the two token boxes
+            if i == 0 and len(tokens) > 1:
+                ctk.CTkLabel(self.win, text="+",
+                             font=ctk.CTkFont(size=16, weight="bold"),
+                             text_color="gray50").pack(pady=2)
+
+        # -- Liquidity composition bar --
+        comp_frame = ctk.CTkFrame(self.win, fg_color="transparent")
+        comp_frame.pack(fill="x", padx=20, pady=(10, 5))
+        ctk.CTkLabel(comp_frame, text="Liquidity Composition:",
+                     font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w")
+
+        # Composition bar (updates as user types)
+        self.comp_bar = ctk.CTkProgressBar(comp_frame, height=8, corner_radius=4)
+        self.comp_bar.pack(fill="x", pady=5)
+        self.comp_label = ctk.CTkLabel(comp_frame, text="",
+                                       font=ctk.CTkFont(size=10), text_color="gray60")
+        self.comp_label.pack(anchor="w")
+
+        # Bind entry changes to update composition
+        for entry in self.token_entries.values():
+            entry.bind("<KeyRelease>", lambda e: self._update_composition())
+
+        # -- Auto-balance (Zap In) toggle --
+        self.auto_balance_var = ctk.BooleanVar(value=False)
+        ab_frame = ctk.CTkFrame(self.win, fg_color="gray15", corner_radius=8)
+        ab_frame.pack(fill="x", padx=20, pady=10)
+
+        ab_top = ctk.CTkFrame(ab_frame, fg_color="transparent")
+        ab_top.pack(fill="x", padx=10, pady=(8, 0))
+        ctk.CTkLabel(ab_top, text="Auto-Balance (Zap In)",
+                     font=ctk.CTkFont(size=12, weight="bold")).pack(side="left")
+        ctk.CTkSwitch(ab_top, variable=self.auto_balance_var, text="",
+                      command=self._on_auto_balance_toggle
+                      ).pack(side="right")
+
+        ctk.CTkLabel(ab_frame,
+                     text="When ON: enter one token amount, system swaps\n"
+                          "to match the position's current ratio, then deposits.",
+                     font=ctk.CTkFont(size=10), text_color="gray60"
+                     ).pack(anchor="w", padx=10, pady=(0, 8))
+
+        # -- Footer: slippage + total deposit --
+        footer = ctk.CTkFrame(self.win, fg_color="transparent")
+        footer.pack(fill="x", padx=20, pady=(5, 10))
+
+        ctk.CTkLabel(footer, text="Slippage: 2%",
+                     font=ctk.CTkFont(size=11), text_color="gray70").pack(side="left")
+        self.total_label = ctk.CTkLabel(footer, text="Total Deposit: $0.00",
+                                         font=ctk.CTkFont(size=11, weight="bold"),
+                                         text_color="#51cf94")
+        self.total_label.pack(side="right")
+
+        # -- Submit button --
+        self.submit_btn = ctk.CTkButton(
+            self.win, text="ENTER AMOUNT", height=44,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=("#20c997", "#1aa179"),
+            state="disabled",
+            command=self._submit
+        )
+        self.submit_btn.pack(fill="x", padx=20, pady=10)
+
+    def _get_wallet_balance(self, symbol: str) -> float:
+        """Fetch wallet balance for a token via RPC."""
+        # For v5.1.1: fetch from the adapter or directly via RPC
+        try:
+            from venue_adapters.hyperliquid_adapter import _evm_rpc_call
+            token_addr = (WHYPE if symbol in ("HYPE", "WHYPE") else UBTC)
+            decimals = (WHYPE_DECIMALS if symbol in ("HYPE", "WHYPE") else UBTC_DECIMALS)
+            # balanceOf(address) selector = 0x70a08231
+            data = "0x70a08231" + self.wallet_address[2:].lower().zfill(64)
+            result = _evm_rpc_call("eth_call", [{"to": token_addr, "data": data}, "latest"])
+            if result:
+                raw = int(result, 16)
+                return raw / (10 ** decimals)
+        except Exception:
+            pass
+        return 0.0
+
+    def _fill_percent(self, symbol: str, pct: int):
+        """Fill entry with pct% of wallet balance."""
+        balance = self._get_wallet_balance(symbol)
+        amount = balance * pct / 100
+        self.token_entries[symbol].delete(0, "end")
+        self.token_entries[symbol].insert(0, f"{amount:.8f}".rstrip('0').rstrip('.'))
+        self._update_composition()
+
+    def _update_composition(self):
+        """Update the composition bar and total deposit as user types."""
+        tokens = list(self.token_entries.keys())
+        amounts = []
+        for sym in tokens:
+            try:
+                val = float(self.token_entries[sym].get() or "0")
+            except ValueError:
+                val = 0
+            amounts.append(val)
+
+        total = sum(amounts)
+        if total > 0:
+            # Update bar
+            pct0 = amounts[0] / total
+            self.comp_bar.set(pct0)
+            # Label
+            pct_text = f"{pct0*100:.0f}% {tokens[0]} / {(1-pct0)*100:.0f}% {tokens[1]}"
+            self.comp_label.configure(text=pct_text)
+        else:
+            self.comp_bar.set(0)
+            self.comp_label.configure(text="")
+
+        # Update total deposit in USD
+        usd_total = 0.0
+        price_map = {"HYPE": "HYPE", "BTC": "BTC"}
+        for sym, amt in zip(tokens, amounts):
+            if amt > 0 and self.price_engine:
+                fiat = self.price_engine.convert_balance_to_fiat(amt, price_map.get(sym, sym), currency="usd")
+                usd_total += fiat or 0
+        self.total_label.configure(text=f"Total Deposit: ${usd_total:.2f}")
+
+        # Enable/disable submit button
+        has_input = any(a > 0 for a in amounts)
+        if self.auto_balance_var.get():
+            # Auto-balance: only need one input
+            has_input = sum(amounts) > 0
+        if has_input:
+            self.submit_btn.configure(state="normal",
+                                       text="ADD LIQUIDITY")
+        else:
+            self.submit_btn.configure(state="disabled",
+                                       text="ENTER AMOUNT")
+
+    def _on_auto_balance_toggle(self):
+        """When auto-balance is toggled, update UI hints."""
+        if self.auto_balance_var.get():
+            # Auto-balance ON: user can enter one token, system handles the rest
+            self.comp_label.configure(text="Auto-balance ON -- enter one amount, ratio will be matched automatically")
+        else:
+            self._update_composition()
+
+    def _submit(self):
+        """Execute the add liquidity flow."""
+        # Resolve vault account from wallet address
+        account_name = _resolve_account_name(self.parent, self.wallet_address)
+        if not account_name:
+            _notify(self.parent, "Could not resolve vault account for this address", error=True)
+            return
+
+        tokens = list(self.token_entries.keys())
+        amounts = []
+        for sym in tokens:
+            try:
+                val = float(self.token_entries[sym].get() or "0")
+            except ValueError:
+                val = 0.0
+            amounts.append(val)
+
+        if sum(amounts) <= 0:
+            _notify(self.parent, "Enter an amount to add", error=True)
+            return
+
+        _notify(self.parent, "Preparing add liquidity...")
+
+        def _do_add():
+            try:
+                writer = _get_writer(self.parent)
+                if writer is None:
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "Writer not available", error=True))
+                    return
+                if not writer.is_available():
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "Agent not running. Start key_manager_agent with --serve.", error=True))
+                    return
+
+                token0 = WHYPE
+                token1 = UBTC
+                amount0 = amounts[0]
+                amount1 = amounts[1]
+
+                if self.auto_balance_var.get():
+                    # Determine target ratio from position holdings
+                    holdings = self.position.deposit_amounts or {}
+                    hype_amt = holdings.get("HYPE", 0.0)
+                    btc_amt = holdings.get("BTC", 0.0)
+                    input_amts = dict(zip(tokens, amounts))
+                    input_total = sum(amounts)
+
+                    # Decide which token is present and whether it is excess relative to holdings ratio
+                    if len(tokens) >= 2:
+                        ratio = hype_amt / (hype_amt + btc_amt) if (hype_amt + btc_amt) > 0 else 0.5
+                        first_is_hype = tokens[0] in ("HYPE", "WHYPE")
+                        first_amt = input_amts.get(tokens[0], 0.0)
+                        if first_is_hype:
+                            target_hype = input_total * ratio
+                            if first_amt > target_hype:
+                                swap_in_token = WHYPE
+                                swap_out_token = UBTC
+                                swap_amount = first_amt - target_hype
+                            else:
+                                swap_in_token = UBTC
+                                swap_out_token = WHYPE
+                                swap_amount = input_total - first_amt - (input_total * (1 - ratio))
+                                if swap_amount <= 0:
+                                    swap_amount = 0.0
+                        else:
+                            # First token is BTC
+                            target_btc = input_total * (1 - ratio)
+                            if first_amt > target_btc:
+                                swap_in_token = UBTC
+                                swap_out_token = WHYPE
+                                swap_amount = first_amt - target_btc
+                            else:
+                                swap_in_token = WHYPE
+                                swap_out_token = UBTC
+                                swap_amount = input_total - first_amt - (input_total * ratio)
+                                if swap_amount <= 0:
+                                    swap_amount = 0.0
+
+                        if swap_amount > 0:
+                            _safe_after(self.parent, 0, lambda: _notify(
+                                self.parent, f"Auto-balancing: swapping {swap_amount:.8f} {swap_in_token}..."))
+                            quote = writer.get_swap_quote(swap_in_token, swap_out_token, swap_amount)
+                            _safe_after(self.parent, 0, lambda: _notify(
+                                self.parent, f"Swap quote: {quote:.8f} {swap_out_token}" if quote else "Swap quote unavailable"))
+                            swap_tx = writer.swap(SwapParams(
+                                account=account_name,
+                                token_in=swap_in_token,
+                                token_out=swap_out_token,
+                                amount_in=swap_amount,
+                                recipient=self.wallet_address,
+                            ))
+                            _safe_after(self.parent, 0, lambda: _notify(
+                                self.parent, f"Swap broadcast: {swap_tx[:20]}..."))
+                            receipt = writer._wait_for_tx_receipt(swap_tx, timeout=120, poll_interval=2.0)
+                            if receipt is None:
+                                _safe_after(self.parent, 0, lambda: _notify(
+                                    self.parent, "Swap not mined in time -- continuing with entered amounts", error=True))
+                            elif receipt.get("status") != "0x1":
+                                _safe_after(self.parent, 0, lambda: _notify(
+                                    self.parent, "Swap reverted -- continuing with entered amounts", error=True))
+
+                            # Re-read wallet balances after swap and use them as deposit amounts
+                            try:
+                                amount0 = writer._read_balance(self.wallet_address, token0) / (10 ** WHYPE_DECIMALS)
+                                amount1 = writer._read_balance(self.wallet_address, token1) / (10 ** UBTC_DECIMALS)
+                                # Cap at the original intended total so pre-existing funds are not consumed
+                                original_hype = input_amts.get("HYPE", input_amts.get("WHYPE", 0.0))
+                                original_btc = input_amts.get("BTC", 0.0)
+                                amount0 = min(amount0, original_hype * 1.05)
+                                amount1 = min(amount1, original_btc * 1.05)
+                            except Exception:
+                                pass
+
+                tx_hash = writer.increase_liquidity(IncreaseLiquidityParams(
+                    account=account_name,
+                    position_id=self.position.position_id,
+                    amount0=amount0,
+                    amount1=amount1,
+                ))
+
+                _safe_after(self.parent, 0, lambda: _notify(
+                    self.parent, f"Adding liquidity. TX: {tx_hash[:20]}..."))
+                receipt = writer._wait_for_tx_receipt(tx_hash, timeout=120, poll_interval=2.0)
+                if receipt and receipt.get("status") == "0x1":
+                    _safe_after(self.parent, 0, lambda: _notify(self.parent, "Liquidity added \u2713"))
+                else:
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "Liquidity added TX mined, verify on-chain", error=True))
+
+                refresh = getattr(self.parent, "_lp_refresh_position_fees", None)
+                if refresh:
+                    _safe_after(self.parent, 5000, lambda: refresh(self.position.position_id, self.wallet_address))
+                _safe_after(self.parent, 5000, self.win.destroy)
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[add_liquidity] error: {error_msg}")
+                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
+                    error_msg = (
+                        f"Wallet has no HYPE for gas. Send HYPE to your wallet address "
+                        f"to pay for transactions. (Details: {error_msg})"
+                    )
+                elif "nonce too high" in error_msg.lower():
+                    error_msg = (
+                        "Transaction rejected (nonce conflict). Wait a moment and try again. "
+                        f"(Details: {error_msg})"
+                    )
+                elif "OverflowError" in error_msg or "result too large" in error_msg.lower():
+                    error_msg = (
+                        "Internal error during transaction signing. The transaction may have "
+                        "succeeded on-chain -- check Project X to verify. Try again if needed."
+                    )
+                _safe_after(self.parent, 0, lambda: _notify(
+                    self.parent, f"Add liquidity error: {error_msg}", error=True))
+
+        threading.Thread(target=_do_add, daemon=True).start()
+
+
+class RemoveLiquidityDialog:
+    """Remove Liquidity sub-window with percentage slider."""
+
+    def __init__(self, parent, position, key_manager, price_engine, wallet_address):
+        self.parent = parent
+        self.position = position
+        self.key_manager = key_manager
+        self.price_engine = price_engine
+        self.wallet_address = wallet_address
+
+        self.win = ctk.CTkToplevel(parent.root)
+        self.win.title("Remove Liquidity")
+        self.win.geometry("440x520")
+        self.win.resizable(False, False)
+        self.win.grab_set()
+
+        self._build_ui()
+
+    def _build_ui(self):
+        """Build the Remove Liquidity dialog."""
+        # -- Header --
+        header_frame = ctk.CTkFrame(self.win, fg_color="transparent")
+        header_frame.pack(fill="x", padx=20, pady=(15, 5))
+
+        ctk.CTkLabel(header_frame, text="Remove Liquidity",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        ctk.CTkButton(header_frame, text="\u2715", width=28, height=28,
+                      fg_color="transparent", hover_color="gray20",
+                      command=self.win.destroy).pack(side="right")
+
+        # -- Subheader --
+        pair = self.position.pair or "WHYPE/UBTC"
+        in_range = (self.position.position_in_range_pct is not None
+                    and 0 <= self.position.position_in_range_pct <= 100)
+        range_status = "IN RANGE" if in_range else "OUT OF RANGE"
+        ctk.CTkLabel(self.win, text=f"{pair} \u00b7 {range_status}",
+                     font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", padx=20)
+
+        # -- Current liquidity --
+        # Read from position or fetch on-chain
+        ctk.CTkLabel(self.win, text="Current Position Liquidity:",
+                     font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", padx=20, pady=(15, 0))
+        ctk.CTkLabel(self.win, text=f"{self._get_position_liquidity():,}",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w", padx=20)
+
+        # -- Percentage slider --
+        slider_frame = ctk.CTkFrame(self.win, fg_color="transparent")
+        slider_frame.pack(fill="x", padx=20, pady=15)
+
+        ctk.CTkLabel(slider_frame, text="Amount to Remove:",
+                     font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w")
+
+        self.pct_var = ctk.DoubleVar(value=0)
+        slider = ctk.CTkSlider(slider_frame, from_=0, to=100, variable=self.pct_var,
+                               command=self._on_slider_change)
+        slider.pack(fill="x", pady=5)
+
+        # Percentage entry
+        pct_row = ctk.CTkFrame(slider_frame, fg_color="transparent")
+        pct_row.pack(fill="x")
+        self.pct_entry = ctk.CTkEntry(pct_row, width=80, placeholder_text="0")
+        self.pct_entry.pack(side="left")
+        ctk.CTkLabel(pct_row, text="%", font=ctk.CTkFont(size=13)).pack(side="left", padx=(2, 0))
+
+        # -- Estimated output --
+        est_frame = ctk.CTkFrame(self.win, fg_color="gray15", corner_radius=8)
+        est_frame.pack(fill="x", padx=20, pady=10)
+        ctk.CTkLabel(est_frame, text="Estimated Output:",
+                     font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w", padx=10, pady=(8, 4))
+        self.est_label = ctk.CTkLabel(est_frame, text="\u2014",
+                                       font=ctk.CTkFont(size=12), text_color="gray70")
+        self.est_label.pack(anchor="w", padx=10, pady=(0, 8))
+
+        # -- Collect fees checkbox --
+        self.collect_after_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(self.win, text="Collect fees after removal",
+                        variable=self.collect_after_var,
+                        font=ctk.CTkFont(size=11)).pack(anchor="w", padx=20, pady=5)
+
+        # -- Note at 100% --
+        self.note_label = ctk.CTkLabel(self.win, text="",
+                                        font=ctk.CTkFont(size=10), text_color="#ffd43b")
+        self.note_label.pack(anchor="w", padx=20)
+
+        # -- Submit button --
+        self.submit_btn = ctk.CTkButton(
+            self.win, text="REMOVE LIQUIDITY", height=44,
+            font=ctk.CTkFont(size=14, weight="bold"),
+            fg_color=("#fd7e14", "#dc6602"),
+            state="disabled",
+            command=self._submit
+        )
+        self.submit_btn.pack(fill="x", padx=20, pady=10)
+
+    def _get_position_liquidity(self) -> int:
+        """Fetch current position liquidity from chain."""
+        writer = _get_writer(self.parent)
+        if writer is None:
+            # Fallback: read via adapter
+            try:
+                from venue_adapters.hyperliquid_adapter import _evm_rpc_call
+                token_id = int(self.position.position_id.split(":", 1)[1])
+                data = "0x99fbab88" + format(token_id, '064x')
+                result = _evm_rpc_call("eth_call", [{"to": "0xead19ae861c29bbb2101e834922b2feee69b9091", "data": data}, "latest"])
+                if result:
+                    body = result[2:]
+                    liquidity = int(body[448:512], 16)
+                    return liquidity
+            except Exception:
+                pass
+            return 0
+        try:
+            token_id = writer._parse_token_id(self.position.position_id)
+            if token_id is None:
+                return 0
+            return writer._get_position_liquidity(token_id)
+        except Exception:
+            return 0
+
+    def _on_slider_change(self, value):
+        """Update estimated output when slider moves."""
+        pct = int(value)
+        self.pct_entry.delete(0, "end")
+        self.pct_entry.insert(0, str(pct))
+
+        if pct == 0:
+            self.submit_btn.configure(state="disabled")
+            self.est_label.configure(text="\u2014")
+            self.note_label.configure(text="")
+            return
+
+        self.submit_btn.configure(state="normal")
+
+        # Estimate output based on position holdings * pct
+        holdings = self.position.deposit_amounts or {}
+        est_parts = []
+        for sym, amt in holdings.items():
+            est_amt = amt * pct / 100
+            est_parts.append(f"{est_amt:.8f} {sym}")
+        self.est_label.configure(text=" \u00b7 ".join(est_parts))
+
+        if pct == 100:
+            self.note_label.configure(text="This will close your position. Use Close Position for the full flow.")
+        else:
+            self.note_label.configure(text="")
+
+    def _submit(self):
+        """Execute the remove liquidity flow."""
+        account_name = _resolve_account_name(self.parent, self.wallet_address)
+        if not account_name:
+            _notify(self.parent, "Could not resolve vault account for this address", error=True)
+            return
+
+        try:
+            pct = int(self.pct_entry.get() or "0")
+        except ValueError:
+            _notify(self.parent, "Invalid percentage", error=True)
+            return
+
+        if pct <= 0 or pct > 100:
+            _notify(self.parent, "Enter a percentage between 1 and 100", error=True)
+            return
+
+        _notify(self.parent, "Preparing remove liquidity...")
+
+        def _do_remove():
+            try:
+                writer = _get_writer(self.parent)
+                if writer is None:
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "Writer not available", error=True))
+                    return
+                if not writer.is_available():
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "Agent not running. Start key_manager_agent with --serve.", error=True))
+                    return
+
+                total_liquidity = writer._get_position_liquidity(writer._parse_token_id(self.position.position_id))
+                liquidity_to_remove = int(total_liquidity * pct / 100)
+                if liquidity_to_remove <= 0:
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "No liquidity to remove", error=True))
+                    return
+
+                tx_hash = writer.decrease_liquidity(DecreaseLiquidityParams(
+                    account=account_name,
+                    position_id=self.position.position_id,
+                    liquidity=liquidity_to_remove,
+                ))
+
+                _safe_after(self.parent, 0, lambda: _notify(
+                    self.parent, f"Removing liquidity. TX: {tx_hash[:20]}..."))
+                receipt = writer._wait_for_tx_receipt(tx_hash, timeout=120, poll_interval=2.0)
+                if receipt and receipt.get("status") == "0x1":
+                    _safe_after(self.parent, 0, lambda: _notify(self.parent, "Liquidity removed \u2713"))
+                else:
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "Remove TX mined, verify on-chain", error=True))
+
+                if self.collect_after_var.get():
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "Collecting fees after removal..."))
+                    collect_tx = writer.collect_fees(CollectFeesParams(
+                        account=account_name,
+                        position_id=self.position.position_id,
+                        recipient=self.wallet_address,
+                    ))
+                    writer._wait_for_tx_receipt(collect_tx, timeout=120, poll_interval=2.0)
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, f"Fees collected. TX: {collect_tx[:20]}..."))
+
+                refresh = getattr(self.parent, "_lp_refresh_position_fees", None)
+                if refresh:
+                    _safe_after(self.parent, 5000, lambda: refresh(self.position.position_id, self.wallet_address))
+                _safe_after(self.parent, 5000, self.win.destroy)
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[remove_liquidity] error: {error_msg}")
+                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
+                    error_msg = (
+                        f"Wallet has no HYPE for gas. Send HYPE to your wallet address "
+                        f"to pay for transactions. (Details: {error_msg})"
+                    )
+                elif "nonce too high" in error_msg.lower():
+                    error_msg = (
+                        "Transaction rejected (nonce conflict). Wait a moment and try again. "
+                        f"(Details: {error_msg})"
+                    )
+                elif "OverflowError" in error_msg or "result too large" in error_msg.lower():
+                    error_msg = (
+                        "Internal error during transaction signing. The transaction may have "
+                        "succeeded on-chain -- check Project X to verify. Try again if needed."
+                    )
+                _safe_after(self.parent, 0, lambda: _notify(
+                    self.parent, f"Remove liquidity error: {error_msg}", error=True))
+
+        threading.Thread(target=_do_remove, daemon=True).start()
+
+
+class EditPositionDialog:
+    """Edit Position -- stub for v5.2."""
+
+    def __init__(self, parent, position):
+        self.parent = parent
+        self.position = position
+
+        self.win = ctk.CTkToplevel(parent.root)
+        self.win.title("Edit Position")
+        self.win.geometry("360x220")
+        self.win.resizable(False, False)
+        self.win.grab_set()
+
+        ctk.CTkLabel(self.win, text="\u270e Edit Position",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(30, 10))
+        ctk.CTkLabel(self.win, text="Coming in v5.2",
+                     font=ctk.CTkFont(size=13), text_color="gray70").pack(pady=5)
+        ctk.CTkLabel(self.win,
+                     text="Will allow editing tick range,\nrebalancing, and position settings.",
+                     font=ctk.CTkFont(size=11), text_color="gray50").pack(pady=5)
+        ctk.CTkButton(self.win, text="Close", width=100, height=30,
+                      command=self.win.destroy).pack(pady=15)
+
+
+# -- Convenience functions for the main GUI to call --
+
+def open_add_liquidity(parent, position, key_manager, price_engine, wallet_address):
+    """Open the Add Liquidity dialog."""
+    AddLiquidityDialog(parent, position, key_manager, price_engine, wallet_address)
+
+
+def open_remove_liquidity(parent, position, key_manager, price_engine, wallet_address):
+    """Open the Remove Liquidity dialog."""
+    RemoveLiquidityDialog(parent, position, key_manager, price_engine, wallet_address)
+
+
+def open_edit_position(parent, position):
+    """Open the Edit Position stub dialog."""
+    EditPositionDialog(parent, position)

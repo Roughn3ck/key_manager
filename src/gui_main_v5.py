@@ -2,7 +2,7 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.1 (July 2026) - Vault Tracking + HyperEVM ERC-20 + Password Toggle
+Version: v5.1.1 (July 2026) - LP Liquidity Manager + Gas Price Fix + Fee Tracking
 """
 import sys
 import os
@@ -12,6 +12,8 @@ if sys.stdout is None:
     sys.stdout = open(os.devnull, 'w', encoding='utf-8', errors='replace')
 if sys.stderr is None:
     sys.stderr = open(os.devnull, 'w', encoding='utf-8', errors='replace')
+
+import time as _time
 
 # In the PyInstaller-frozen EXE, Python cannot locate the CA bundle that the
 # stdlib ssl module uses by default. certifi ships a current CA bundle as a
@@ -52,16 +54,31 @@ if sys.platform == 'win32' and getattr(sys, 'frozen', False):
         pass
     # After FreeConsole(), the original stdout/stderr handles are invalid.
     # Writing to them (print/traceback) raises OSError and crashes the app.
-    # Redirect to a log file next to the EXE so errors remain diagnosable,
-    # falling back to devnull if the log file cannot be opened.
+    # Redirect to a log file next to the EXE so errors remain diagnosable.
     try:
         _log_path = os.path.join(os.path.dirname(sys.executable), 'gui_debug.log')
-        _log_file = open(_log_path, 'a', encoding='utf-8', errors='replace')
+        # Use line-buffered mode (buffering=1) so output is flushed after each line
+        _log_file = open(_log_path, 'a', encoding='utf-8', errors='replace', buffering=1)
         sys.stdout = _log_file
         sys.stderr = _log_file
-    except Exception:
-        sys.stdout = open(os.devnull, 'w', encoding='utf-8', errors='replace')
-        sys.stderr = open(os.devnull, 'w', encoding='utf-8', errors='replace')
+        # Write a startup marker so we can confirm logging works
+        print(f"\n{'='*60}")
+        print(f"ColdStack started at {_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        print(f"EXE: {sys.executable}")
+        print(f"Log: {_log_path}")
+        print(f"{'='*60}")
+    except Exception as e:
+        # Fallback: try user temp directory
+        try:
+            import tempfile
+            _log_path = os.path.join(tempfile.gettempdir(), 'coldstack_debug.log')
+            _log_file = open(_log_path, 'a', encoding='utf-8', errors='replace', buffering=1)
+            sys.stdout = _log_file
+            sys.stderr = _log_file
+            print(f"Primary log failed ({e}), using fallback: {_log_path}")
+        except Exception:
+            sys.stdout = open(os.devnull, 'w', encoding='utf-8', errors='replace')
+            sys.stderr = open(os.devnull, 'w', encoding='utf-8', errors='replace')
 
 import tkinter as tk
 import customtkinter as ctk
@@ -84,10 +101,17 @@ from price_engine import PriceEngine, DISPLAY_CURRENCY_OPTIONS
 from rpc_config import load_rpc_config, save_rpc_config, get_default_endpoints, get_default_for_chain
 # v5.0: LP Engine imports
 from lp_engine import LPEngine, OfflineError
-from saved_pools import load_saved_pools, save_pool, remove_saved_pool, is_pool_saved, migrate_saved_pools_json
+from saved_pools import (
+    load_saved_pools, save_pool, remove_saved_pool, is_pool_saved,
+    migrate_saved_pools_json, update_position_tracking, get_position_tracking,
+)
 from venue_adapters.venue_writer import (
     CollectFeesParams, CompoundFeesParams, DecreaseLiquidityParams, RebalanceParams,
 )
+# v5.1.1: Add/Remove/Edit liquidity dialogs
+from lp_liquidity_manager import open_add_liquidity, open_remove_liquidity, open_edit_position
+# v5.1.1: Tooltip helper for icon buttons on LP cards
+from lp_liquidity_manager import _add_status_tooltip as _lp_tooltip
 # v5.1: Vault tracker imports
 from vault_tracker import HyperliquidVaultTracker, VaultPosition
 # BackupEngine import removed — backups are deprecated; users copy
@@ -352,6 +376,7 @@ class ColdStackGUI:
         # Notification timer
         self._notification_timer = None
         self._notification_label = None
+        self._notification_close_btn = None
 
         # Create login screen
         self.create_login_screen()
@@ -384,7 +409,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v5.1 - ColdStack | Vault Tracking + HyperEVM ERC-20",
+            text="v5.1.1 - ColdStack | Add/Remove Liquidity + Gas Fix + Fee Tracking",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )
@@ -569,6 +594,7 @@ class ColdStackGUI:
                 widget.destroy()
             self._notification_label = None
             self._notification_timer = None
+            self._notification_close_btn = None
 
             # v5.1: Ensure embedded agent is running (restarts if dashboard is
             # recreated, e.g., after returning from lock screen path).
@@ -645,7 +671,7 @@ class ColdStackGUI:
         self.create_status_bar()
 
     def _on_tab_changed(self):
-        """Handle tab change — auto-fetch saved pools when LP tab is first shown."""
+        """Handle tab change — preload saved pools when LP tab is first shown."""
         if not hasattr(self, 'tabview'):
             return
         try:
@@ -658,7 +684,8 @@ class ColdStackGUI:
                 addr = entry.get().strip() if entry else ""
                 if addr and addr.startswith("0x") and len(addr) == 42:
                     self._lp_auto_fetched = True
-                    self.root.after(500, self._lp_do_fetch)
+                    # Only preload saved pools (fast, silent) — don't trigger full scan
+                    self._lp_preload_saved_only(addr)
 
     def create_left_panel(self, parent):
         """Create left panel with scrollable account list organized by pool."""
@@ -1289,11 +1316,16 @@ class ColdStackGUI:
             self.show_notification(f"Failed to copy: {str(e)}", error=True)
 
     def show_notification(self, message, error=False):
-        """Show a temporary toast notification overlay."""
+        """Show a notification toast. Errors persist until dismissed; success auto-dismisses."""
         # Cancel any existing notification timer
         if self._notification_timer is not None:
             self.root.after_cancel(self._notification_timer)
             self._notification_timer = None
+
+        # Destroy any existing close button
+        if hasattr(self, '_notification_close_btn') and self._notification_close_btn is not None:
+            self._notification_close_btn.place_forget()
+            self._notification_close_btn = None
 
         # Create notification label if it doesn't exist
         if self._notification_label is None:
@@ -1324,13 +1356,40 @@ class ColdStackGUI:
         self._notification_label.place(relx=0.5, rely=0.93, anchor="center")
         self._notification_label.lift()
 
-        # Auto-dismiss after 3 seconds
-        self._notification_timer = self.root.after(3000, self._dismiss_notification)
+        if error:
+            # Error notifications persist — add a close button to the right of the label
+            self._notification_close_btn = ctk.CTkLabel(
+                self.root,
+                text="\u2715",
+                font=ctk.CTkFont(size=14, weight="bold"),
+                text_color="#ff6b6b",
+                fg_color="#3a1a1a",
+                corner_radius=8,
+                width=30,
+                height=30,
+                cursor="hand2"
+            )
+            # Fixed offset fallback for reliable placement
+            close_x = 200
+            try:
+                close_x = self._notification_label.winfo_reqwidth() // 2 + 25
+            except Exception:
+                pass
+            self._notification_close_btn.place(relx=0.5, rely=0.93, anchor="center", x=close_x)
+            self._notification_close_btn.lift()
+            self._notification_close_btn.bind("<Button-1>", lambda e: self._dismiss_notification())
+            # Do NOT set auto-dismiss timer for errors
+        else:
+            # Success notifications auto-dismiss after 3 seconds
+            self._notification_timer = self.root.after(3000, self._dismiss_notification)
 
     def _dismiss_notification(self):
         """Dismiss the current notification."""
         if self._notification_label is not None:
             self._notification_label.place_forget()
+        if hasattr(self, '_notification_close_btn') and self._notification_close_btn is not None:
+            self._notification_close_btn.place_forget()
+            self._notification_close_btn = None
         self._notification_timer = None
 
     def start_session_timer(self):
@@ -4072,6 +4131,22 @@ class ColdStackGUI:
                 self._lp_maybe_auto_fetch()
                 return
 
+    def _lp_preload_saved_only(self, address: str):
+        """Pre-load saved pool positions for a wallet without triggering a full scan.
+
+        This is called on tab change to show cached positions quickly.
+        The user must manually click Fetch/Scan to discover new positions.
+        """
+        if not self.lp_engine or not self.online_mode:
+            return
+        saved = load_saved_pools(self.key_manager.address_db, wallet_address=address)
+        if not saved:
+            return
+        # Render saved pool placeholders immediately
+        self._lp_render_saved_placeholders(address)
+        # Fetch saved positions in background (fast — 1-4 seconds)
+        self._lp_fetch_saved_only(address)
+
     def _lp_maybe_auto_fetch(self):
         """If online and not yet auto-fetched, schedule a fetch."""
         if self.online_mode and not self._lp_auto_fetched:
@@ -4079,7 +4154,8 @@ class ColdStackGUI:
             addr = entry.get().strip() if entry else ""
             if addr and addr.startswith("0x") and len(addr) == 42:
                 self._lp_auto_fetched = True
-                self.root.after(500, self._lp_do_fetch)
+                # Don't auto-trigger full scan — just preload saved pools
+                self._lp_preload_saved_only(addr)
 
     def _lp_do_fetch(self):
         """Fetch LP positions for the entered address (threaded).
@@ -4467,12 +4543,39 @@ class ColdStackGUI:
                          font=ctk.CTkFont(size=13), text_color="gray60").pack(pady=20)
         else:
             for pos in unique_positions:
+                self._lp_initialize_tracking(pos, address)
                 self._lp_render_card(pos)
         if status:
             status.configure(text=f"Last check: {len(unique_positions)} position(s)")
         self._lp_update_button_states()
         # v5.1: Update saved-pools counter after rendering live cards
         self._lp_update_saved_pools_count(address)
+
+    def _lp_initialize_tracking(self, position, wallet_address: str):
+        """Initialize saved-pool tracking for a position if missing.
+
+        If the position matches a saved pool without tracking data, seed it with
+        the current position value as the initial deposit. The caller must later
+        save the vault to persist changes.
+        """
+        if not position.position_id.startswith("hyperevm:"):
+            return
+        try:
+            raw_id = position.position_id.split(":", 1)[1]
+            token_id = int(raw_id)
+        except (ValueError, IndexError):
+            return
+        venue = "HyperEVM"
+        if not is_pool_saved(self.key_manager.address_db, token_id, venue):
+            return
+        tracking = get_position_tracking(self.key_manager.address_db, token_id, venue)
+        if not tracking.get("first_seen_date"):
+            update_position_tracking(
+                self.key_manager.address_db,
+                token_id,
+                venue,
+                current_value_usd=position.current_value_usd,
+            )
 
     def _lp_on_error(self, message: str):
         """Show an error in the LP tab."""
@@ -4578,6 +4681,10 @@ class ColdStackGUI:
                 sign2 = "+" if position.pnl_pct >= 0 else ""
                 pnl_str += f" ({sign2}{position.pnl_pct:.2f}%)"
             line3_gray_parts.append(pnl_str)
+        if position.apy is not None:
+            line3_gray_parts.append(f"APR: {position.apy:.2f}%")
+        if position.days_active is not None and position.days_active > 0:
+            line3_gray_parts.append(f"Active: {position.days_active}d")
         if position.deposit_amounts:
             holdings_parts = [f"{amt:g} {sym}" for sym, amt in position.deposit_amounts.items() if amt]
             if holdings_parts:
@@ -4592,6 +4699,37 @@ class ColdStackGUI:
             ctk.CTkLabel(line3_frame, text=f"  ·  Value: {self._format_currency(position.current_value_usd)}",
                          font=ctk.CTkFont(size=11, weight="bold"),
                          text_color="#51cf94").pack(side="left", anchor="w")
+
+            # v5.1.1: Add / Remove / Edit liquidity icons
+            if position.position_id and position.position_id.startswith("hyperevm:"):
+                status_label = self._lp_widgets.get("status_label")
+
+                add_btn = ctk.CTkButton(line3_frame, text="+", width=26, height=26,
+                                        font=ctk.CTkFont(size=14, weight="bold"),
+                                        fg_color=("#20c997", "#1aa179"),
+                                        hover_color=("#1aa179", "#158f63"),
+                                        command=lambda pos=position: self._lp_open_add_liquidity(pos))
+                add_btn.pack(side="left", padx=(8, 2), anchor="w")
+                if status_label:
+                    _lp_tooltip(add_btn, status_label, "Add Liquidity")
+
+                remove_btn = ctk.CTkButton(line3_frame, text="−", width=26, height=26,
+                                           font=ctk.CTkFont(size=14, weight="bold"),
+                                           fg_color=("#fd7e14", "#dc6602"),
+                                           hover_color=("#dc6602", "#b85700"),
+                                           command=lambda pos=position: self._lp_open_remove_liquidity(pos))
+                remove_btn.pack(side="left", padx=2, anchor="w")
+                if status_label:
+                    _lp_tooltip(remove_btn, status_label, "Remove Liquidity")
+
+                edit_btn = ctk.CTkButton(line3_frame, text="✎", width=26, height=26,
+                                         font=ctk.CTkFont(size=12),
+                                         fg_color=("#6f42c1", "#5a32a3"),
+                                         hover_color=("#5a32a3", "#42288a"),
+                                         command=lambda pos=position: self._lp_open_edit_position(pos))
+                edit_btn.pack(side="left", padx=2, anchor="w")
+                if status_label:
+                    _lp_tooltip(edit_btn, status_label, "Edit Position")
 
         # Suggestion — yellow and bold, at the end
         if position.suggested_action:
@@ -4896,6 +5034,161 @@ class ColdStackGUI:
         addr = entry.get().strip() if entry else ""
         self._lp_update_saved_pools_count(addr)
 
+    def _lp_refresh_position_fees(self, position_id: str, wallet_address: str):
+        """Refresh just the fee display for a single LP position after collect/compound.
+
+        Re-reads the position data from the adapter and updates the card in-place,
+        without triggering a full wallet rescan. If the re-read fails, falls back to
+        updating the fee display to $0.00 (since fees were just collected).
+
+        Args:
+            position_id: The position ID (e.g., 'hyperevm:512359')
+            wallet_address: The wallet address for fee reading
+        """
+        if not self.lp_engine or not self.online_mode:
+            return
+
+        def _refresh_thread():
+            try:
+                # Parse the token ID from the position_id
+                from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
+                adapter = HyperliquidAdapter()
+
+                # Extract numeric token ID from position_id
+                raw_id = position_id
+                if raw_id.startswith("hyperevm:"):
+                    raw_id = raw_id.split(":", 1)[1]
+                numeric_tid = int(raw_id)
+
+                # Load saved-pool tracking data so the refreshed position includes
+                # cumulative fees, APR, and PnL.
+                tracking = get_position_tracking(self.key_manager.address_db, numeric_tid, "HyperEVM")
+
+                # Re-read the position data (includes fresh fee reading)
+                fresh_pos = adapter.fetch_evm_position_by_token_id(
+                    numeric_tid, self.price_engine, wallet_address=wallet_address
+                )
+
+                if fresh_pos and not fresh_pos.error:
+                    if tracking:
+                        fresh_pos.raw_data = fresh_pos.raw_data or {}
+                        fresh_pos.raw_data["tracking"] = tracking
+                        # Re-decode with tracking data by re-fetching (the adapter
+                        # doesn't expose a recompute method, so merge manually).
+                        fresh_pos = self._lp_merge_tracking(fresh_pos, tracking)
+                    # Update the card in-place
+                    self.root.after(0, lambda: self._lp_update_card_fees(position_id, fresh_pos))
+                else:
+                    # Fallback: just set fees to $0.00
+                    self.root.after(0, lambda: self._lp_update_card_fees_zero(position_id))
+            except Exception as e:
+                print(f"[refresh_fees] error: {e}")
+                # Fallback: just set fees to $0.00
+                self.root.after(0, lambda: self._lp_update_card_fees_zero(position_id))
+
+        threading.Thread(target=_refresh_thread, daemon=True).start()
+
+    def _lp_merge_tracking(self, position, tracking: Dict[str, Any]):
+        """Recompute LPPosition tracking fields from saved-pools tracking data."""
+        initial_deposit = tracking.get("initial_deposit_usd")
+        total_fees = tracking.get("total_fees_collected_usd", 0.0)
+        first_seen = tracking.get("first_seen_date")
+
+        if initial_deposit and initial_deposit > 0 and position.current_value_usd:
+            position.pnl_usd = (position.current_value_usd + total_fees) - initial_deposit
+            position.pnl_pct = (position.pnl_usd / initial_deposit) * 100
+
+        if first_seen:
+            try:
+                from datetime import datetime, timezone
+                first_dt = datetime.fromisoformat(first_seen.replace("Z", "+00:00"))
+                position.days_active = (datetime.now(timezone.utc) - first_dt).days
+            except Exception:
+                position.days_active = None
+
+        if (
+            initial_deposit
+            and initial_deposit > 0
+            and total_fees > 0
+            and position.days_active
+            and position.days_active > 0
+        ):
+            position.apy = (total_fees / initial_deposit) * (365 / position.days_active) * 100
+
+        return position
+
+    def _lp_update_card_fees(self, position_id: str, fresh_pos):
+        """Update a single position card with fresh fee data (in-place).
+
+        Instead of removing and re-rendering the card, this finds the card
+        by position_id and updates only the fee-related labels.
+
+        Args:
+            position_id: The position ID (e.g., 'hyperevm:512359')
+            fresh_pos: The fresh LPPosition with updated fees
+        """
+        cards = self._lp_widgets.get("position_cards", {})
+        key = f"HyperEVM:{position_id}"
+        card = cards.get(key)
+        if not card:
+            # Try with just the position_id (without venue prefix)
+            card = cards.get(position_id)
+        if not card:
+            # Card not found — fall back to full render
+            print(f"[update_card_fees] card not found for {position_id}, doing full render")
+            self._lp_do_fetch()
+            return
+
+        # Destroy the old card and re-render with fresh data
+        # This is simpler than trying to find and update individual labels,
+        # and preserves the visual layout exactly
+        card.destroy()
+        cards.pop(key, None)
+        cards.pop(position_id, None)
+        self._lp_render_card(fresh_pos)
+
+        # Update status
+        status = self._lp_widgets.get("status_label")
+        if status:
+            status.configure(text=f"Fees updated for {fresh_pos.pair}")
+
+    def _lp_update_card_fees_zero(self, position_id: str):
+        """Fallback: update card to show $0.00 fees after collect.
+
+        This is used when the fresh position read fails. It simply
+        re-renders the card with fees set to $0.00 by doing a targeted
+        re-fetch of just this position.
+
+        Args:
+            position_id: The position ID (e.g., 'hyperevm:512359')
+        """
+        # Just trigger a single-position fetch for this ID
+        pos_entry = self._lp_widgets.get("position_entry")
+        if pos_entry:
+            pos_entry.delete(0, "end")
+            pos_entry.insert(0, position_id)
+            self._lp_do_fetch_single()
+
+    def _lp_open_add_liquidity(self, position):
+        """Open the Add Liquidity dialog from the new module."""
+        wallet_address = self._lp_get_current_wallet_address()
+        if not wallet_address:
+            self.show_notification("No wallet address selected", error=True)
+            return
+        open_add_liquidity(self, position, self.key_manager, self.price_engine, wallet_address)
+
+    def _lp_open_remove_liquidity(self, position):
+        """Open the Remove Liquidity dialog from the new module."""
+        wallet_address = self._lp_get_current_wallet_address()
+        if not wallet_address:
+            self.show_notification("No wallet address selected", error=True)
+            return
+        open_remove_liquidity(self, position, self.key_manager, self.price_engine, wallet_address)
+
+    def _lp_open_edit_position(self, position):
+        """Open the Edit Position stub from the new module."""
+        open_edit_position(self, position)
+
     def _lp_compound_fees_dialog(self, position):
         """Show confirmation dialog and compound fees for an LP position."""
         from tkinter import messagebox
@@ -4940,14 +5233,37 @@ class ColdStackGUI:
                 if tx_hashes:
                     self.root.after(0, lambda: self.show_notification(
                         f"Compound fees done. {len(tx_hashes)} TXs submitted. First: {tx_hashes[0][:20]}..."))
+                    # Record collected fees in saved-pools tracking
+                    self._lp_record_fee_collection(position.position_id, wallet_address, tx_hashes)
+                    # Wait for the last tx to be mined, then refresh fees
+                    self.root.after(8000, lambda: self._lp_refresh_position_fees(
+                        position.position_id, wallet_address))
                 else:
                     self.root.after(0, lambda: self.show_notification(
                         "Compound fees: no transactions submitted", error=True))
             except Exception as e:
                 error_msg = str(e)
                 print(f"[compound_fees] error: {error_msg}")
+                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
+                    error_msg = (
+                        f"Wallet has no HYPE for gas. Send HYPE to your wallet address "
+                        f"to pay for transactions. (Details: {error_msg})"
+                    )
+                elif "nonce too high" in error_msg.lower():
+                    error_msg = (
+                        "Transaction rejected (nonce conflict). Wait a moment and try again. "
+                        f"(Details: {error_msg})"
+                    )
+                elif "OverflowError" in error_msg or "result too large" in error_msg.lower():
+                    error_msg = (
+                        "Internal error during transaction signing. The transaction may have "
+                        "succeeded on-chain — check Project X to verify. Try again if needed."
+                    )
                 self.root.after(0, lambda: self.show_notification(
                     f"Compound error: {error_msg}", error=True))
+                # Even on error, the tx may have gone through — refresh fees after a delay
+                self.root.after(5000, lambda: self._lp_refresh_position_fees(
+                    position.position_id, wallet_address))
 
         threading.Thread(target=_do_compound, daemon=True).start()
 
@@ -4992,16 +5308,122 @@ class ColdStackGUI:
                 if tx_hash:
                     self.root.after(0, lambda: self.show_notification(
                         f"Fees collected. TX: {tx_hash[:20]}..."))
+                    # Record collected fees in saved-pools tracking
+                    self._lp_record_fee_collection(position.position_id, wallet_address, [tx_hash])
+                    # Wait a moment for the tx to be mined, then refresh fees
+                    self.root.after(5000, lambda: self._lp_refresh_position_fees(
+                        position.position_id, wallet_address))
                 else:
                     self.root.after(0, lambda: self.show_notification(
                         "Collect failed: no tx hash returned", error=True))
             except Exception as e:
                 error_msg = str(e)
                 print(f"[collect_fees] error: {error_msg}")
+                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
+                    error_msg = (
+                        f"Wallet has no HYPE for gas. Send HYPE to your wallet address "
+                        f"to pay for transactions. (Details: {error_msg})"
+                    )
+                elif "nonce too high" in error_msg.lower():
+                    error_msg = (
+                        "Transaction rejected (nonce conflict). Wait a moment and try again. "
+                        f"(Details: {error_msg})"
+                    )
+                elif "OverflowError" in error_msg or "result too large" in error_msg.lower():
+                    error_msg = (
+                        "Internal error during transaction signing. The transaction may have "
+                        "succeeded on-chain — check Project X to verify. Try again if needed."
+                    )
                 self.root.after(0, lambda: self.show_notification(
                     f"Collect error: {error_msg}", error=True))
+                # Even on error, the tx may have gone through — refresh fees after a delay
+                self.root.after(5000, lambda: self._lp_refresh_position_fees(
+                    position.position_id, wallet_address))
 
         threading.Thread(target=_do_collect, daemon=True).start()
+
+    def _lp_record_fee_collection(self, position_id: str, wallet_address: str, tx_hashes: List[str]):
+        """Record collected fees from a collect/compound tx into saved-pools tracking.
+
+        This is called after a successful collect_fees or compound_fees. It reads
+        the collect tx receipt to get exact fee amounts, converts them to USD, and
+        updates the saved pool's cumulative fee tracking.
+        """
+        try:
+            raw_id = position_id.split(":", 1)[1]
+            token_id = int(raw_id)
+        except (ValueError, IndexError):
+            return
+
+        venue = "HyperEVM"
+        if not is_pool_saved(self.key_manager.address_db, token_id, venue):
+            return
+
+        def _record_thread():
+            try:
+                from venue_adapters.hyperliquid_adapter import HyperliquidAdapter, _evm_rpc_call
+                from price_engine import PriceEngine
+                adapter = HyperliquidAdapter()
+                # The first tx in compound_fees is always the collect tx.
+                collect_tx = tx_hashes[0] if tx_hashes else ""
+                if not collect_tx:
+                    return
+
+                # Parse Transfer events from the collect tx receipt to get exact fees
+                receipt = _evm_rpc_call("eth_getTransactionReceipt", [collect_tx])
+                fee0_raw = 0
+                fee1_raw = 0
+                TRANSFER_SIG = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+                if receipt and isinstance(receipt, dict):
+                    wallet_lower = wallet_address.lower()
+                    for log in receipt.get("logs", []):
+                        topics = log.get("topics", [])
+                        if len(topics) < 3:
+                            continue
+                        if topics[0].lower() != TRANSFER_SIG:
+                            continue
+                        recipient = topics[2][26:].lower()
+                        if recipient != wallet_lower[2:]:
+                            continue
+                        token = log.get("address", "").lower()
+                        amount = int(log.get("data", "0x0"), 16)
+                        if token == "0x5555555555555555555555555555555555555555":
+                            fee0_raw = amount
+                        elif token == "0x9fdbda0a5e284c32744d2f17ee5c74b284993463":
+                            fee1_raw = amount
+
+                fee0_human = fee0_raw / 1e18
+                fee1_human = fee1_raw / 1e8
+                price_engine = self.price_engine
+                usd0 = price_engine.convert_balance_to_fiat(fee0_human, "HYPE", currency="usd") or 0.0
+                usd1 = price_engine.convert_balance_to_fiat(fee1_human, "BTC", currency="usd") or 0.0
+                fees_usd = usd0 + usd1
+
+                if fees_usd <= 0:
+                    return
+
+                from datetime import datetime, timezone
+                fee_event = {
+                    "date": datetime.now(timezone.utc).isoformat(),
+                    "fee0": fee0_human,
+                    "fee1": fee1_human,
+                    "usd": fees_usd,
+                    "tx_hash": collect_tx,
+                }
+                update_position_tracking(
+                    self.key_manager.address_db,
+                    token_id,
+                    venue,
+                    fees_collected_usd=fees_usd,
+                    fee_event=fee_event,
+                )
+                # Persist vault changes
+                if self.current_password:
+                    self.key_manager.save_encrypted_data(self.current_password)
+            except Exception as e:
+                print(f"[record_fees] error: {e}")
+
+        threading.Thread(target=_record_thread, daemon=True).start()
 
     def _lp_close_position_dialog(self, position):
         """Show confirmation dialog and close an LP position completely.
@@ -5054,6 +5476,11 @@ class ColdStackGUI:
             except Exception as e:
                 error_msg = str(e)
                 print(f"[close_position] error: {error_msg}")
+                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
+                    error_msg = (
+                        f"Wallet has no HYPE for gas. Send HYPE to your wallet address "
+                        f"to pay for transactions. (Details: {error_msg})"
+                    )
                 self.root.after(0, lambda: self.show_notification(
                     f"Close error: {error_msg}", error=True))
 

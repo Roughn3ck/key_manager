@@ -228,7 +228,34 @@ class HyperliquidWriter(VenueWriter):
 
         Returns:
             The transaction hash.
+
+        Raises:
+            RuntimeError: If the agent returns an error or is unreachable.
         """
+        # Pre-flight: check signer's gas balance before attempting broadcast
+        vault_address = self._get_account_address(account)
+        gas_balance = self._read_native_balance(vault_address)
+        if gas_balance == 0:
+            raise RuntimeError(
+                f"Insufficient gas: wallet {vault_address} has 0 HYPE. "
+                f"Send HYPE to this address to pay for transaction gas."
+            )
+
+        # If nonce is provided (e.g. from compound_fees), verify it matches
+        # the chain nonce for the vault address. If the key-derived address
+        # differs from the vault address, the agent will use its own fetched
+        # nonce — but if an explicit nonce was passed, it may be wrong.
+        if nonce is not None:
+            chain_nonce = self._rpc_call(
+                "eth_getTransactionCount", [vault_address, "latest"]
+            )
+            if chain_nonce is not None:
+                chain_nonce_int = int(chain_nonce, 16) if isinstance(chain_nonce, str) else int(chain_nonce)
+                if nonce > chain_nonce_int:
+                    print(f"[broadcast WARNING] Provided nonce {nonce} > chain nonce "
+                          f"{chain_nonce_int} for {vault_address}. Resetting to chain nonce.")
+                    nonce = chain_nonce_int
+
         params = dict(
             cmd="broadcast_tx",
             account=account,
@@ -243,8 +270,28 @@ class HyperliquidWriter(VenueWriter):
             params["nonce"] = nonce
         result = self._agent_call(**params)
         tx_hash = result.get("tx_hash", "")
-        _log_action("broadcast", tx_hash=tx_hash, extra=f"to={to}")
+        signer = result.get("from", "unknown")
+        used_nonce = result.get("nonce", "unknown")
+        _log_action("broadcast", tx_hash=tx_hash,
+                    extra=f"to={to} from={signer} nonce={used_nonce}")
         return tx_hash
+
+    def _read_native_balance(self, address: str) -> int:
+        """Read the native HYPE balance of an address via RPC.
+
+        Args:
+            address: The EVM address to check.
+
+        Returns:
+            The balance in wei as an integer (0 if RPC fails).
+        """
+        result = self._rpc_call("eth_getBalance", [address, "latest"])
+        if not result or not isinstance(result, str):
+            return 0
+        try:
+            return int(result, 16)
+        except (ValueError, TypeError):
+            return 0
 
     def _rpc_call(self, method: str, params: list) -> Optional[Any]:
         """Make a direct JSON-RPC call to HyperEVM (for reads like allowance).
@@ -291,10 +338,12 @@ class HyperliquidWriter(VenueWriter):
             "eth_call",
             [{"to": POSITION_MANAGER, "data": data}, "latest"],
         )
-        if not result or not isinstance(result, str) or len(result) < 2 + 32 * 7:
+        if not result or not isinstance(result, str) or len(result) < 2 + 32 * 12:
             return 0
         try:
-            # liquidity is the 7th 32-byte word (offset 448-512 in the body)
+            # positions() returns 12 32-byte fields. Liquidity is the 8th field
+            # at body offset 448-512 (after nonce, operator, token0, token1,
+            # fee, tickLower, tickUpper).
             body = result[2:]
             return int(body[448:512], 16)
         except (ValueError, IndexError):
@@ -487,22 +536,115 @@ class HyperliquidWriter(VenueWriter):
         return tx_hash
 
     def swap(self, params: SwapParams) -> str:
-        """Execute a single-pool exact-input swap.
+        """Execute a single-pool exact-input swap on HyperEVM.
 
-        NOTE: The HyperEVM swap router address has not been confirmed yet.
-        This method is stubbed out until the router contract is verified.
+        Uses Uniswap V3 SwapRouter.exactInputSingle.
 
         Args:
-            params: SwapParameters including token_in, token_out, amount_in.
+            params: SwapParams with token_in, token_out, amount_in, fee, recipient.
 
-        Raises:
-            NotImplementedError: Always, until the swap router is confirmed.
+        Returns:
+            The swap transaction hash.
         """
-        raise NotImplementedError(
-            "HyperEVM swap router address has not been confirmed yet. "
-            "This functionality will be implemented once the router contract "
-            "address is verified on HyperEVM."
+        account_address = self._get_account_address(params.account)
+        decimals_in = _get_token_decimals(params.token_in)
+        amount_in_raw = _to_wei(params.amount_in, decimals_in)
+
+        # Approve token_in for the Swap Router
+        self._ensure_approval(params.account, account_address,
+                              params.token_in, SWAP_ROUTER, amount_in_raw)
+
+        deadline = int(time.time()) + params.deadline_seconds
+
+        # Encode exactInputSingle(ExactInputSingleParams)
+        # struct: tokenIn, tokenOut, fee, recipient, deadline,
+        #         amountIn, amountOutMinimum, sqrtPriceLimitX96
+        data = (
+            SELECTOR_EXACT_INPUT_SINGLE
+            + _pad_address(params.token_in)
+            + _pad_address(params.token_out)
+            + _pad_uint256(params.fee)
+            + _pad_address(account_address)
+            + _pad_uint256(deadline)
+            + _pad_uint256(amount_in_raw)
+            + _pad_uint256(0)  # amountOutMinimum -- TODO: slippage protection
+            + _pad_uint256(0)  # sqrtPriceLimitX96
         )
+
+        tx_hash = self._broadcast(params.account, SWAP_ROUTER, data)
+        _log_action("swap", tx_hash=tx_hash,
+                    extra=f"in={params.token_in} out={params.token_out} amount={amount_in_raw}")
+        return tx_hash
+
+    def get_swap_quote(self, token_in: str, token_out: str, amount_in: float,
+                       fee: int = 3000) -> Optional[float]:
+        """Estimate swap output amount via read-only pool price query.
+
+        Reads the pool's slot0 to get sqrtPriceX96 and computes
+        a simplified output estimate. Not exact (doesn't account for
+        liquidity depth beyond the current tick) but sufficient for UI display.
+
+        Args:
+            token_in: Input token address.
+            token_out: Output token address.
+            amount_in: Input amount (human-readable).
+            fee: Pool fee tier (default 3000).
+
+        Returns:
+            Estimated output amount (human-readable), or None if query fails.
+        """
+        try:
+            from venue_adapters.hyperliquid_adapter import _evm_rpc_call
+
+            # Ensure token_in < token_out for pool query (Uniswap sorts tokens)
+            token0 = min(token_in, token_out)
+            token1 = max(token_in, token_out)
+
+            # Call factory.getPool(token0, token1, fee)
+            FACTORY = "0xb1c0fa0b789320044a6f623cfe5ebda9562602e3"
+            factory_data = ("0x1698ee82"
+                            + _pad_address(token0)
+                            + _pad_address(token1)
+                            + _pad_uint256(fee))
+            pool_result = _evm_rpc_call("eth_call", [{"to": FACTORY, "data": factory_data}, "latest"])
+            if not pool_result or len(pool_result) < 66:
+                return None
+
+            pool_address = "0x" + pool_result[2:][24:64]  # address is last 20 bytes of 32-byte word
+
+            # Read slot0 (sqrtPriceX96, tick, protocolFee, ...)
+            # slot0() selector = 0x3850c7bd
+            slot0_data = "0x3850c7bd"
+            slot0_result = _evm_rpc_call("eth_call", [{"to": pool_address, "data": slot0_data}, "latest"])
+            if not slot0_result or len(slot0_result) < 66:
+                return None
+
+            body = slot0_result[2:]
+            sqrt_price_x96 = int(body[0:64], 16)
+
+            # Compute price: (sqrtPriceX96 / 2^96)^2 = price token1/token0
+            price_ratio = (sqrt_price_x96 / (2 ** 96)) ** 2
+
+            # Adjust for token order and decimals
+            decimals_in = _get_token_decimals(token_in)
+            decimals_out = _get_token_decimals(token_out)
+
+            # price_ratio is in terms of token1/token0
+            if token_in == token0:
+                # amount_out = amount_in * price_ratio * (10^decimals_out / 10^decimals_in)
+                raw_out = amount_in * price_ratio * (10 ** decimals_out) / (10 ** decimals_in)
+            else:
+                # Inverted: amount_out = amount_in / price_ratio * (10^decimals_out / 10^decimals_in)
+                raw_out = amount_in / price_ratio * (10 ** decimals_out) / (10 ** decimals_in)
+
+            # Subtract fee (0.3% = fee/1e6)
+            fee_fraction = fee / 1_000_000
+            estimated_out = raw_out * (1 - fee_fraction)
+
+            return estimated_out
+        except Exception as e:
+            print(f"[get_swap_quote] error: {e}")
+            return None
 
     def open_position(self, params: OpenPositionParams) -> Tuple[str, Optional[int]]:
         """Open a new concentrated-liquidity LP position.
@@ -724,16 +866,18 @@ class HyperliquidWriter(VenueWriter):
         """Collect fees, swap to optimal ratio, and increase liquidity.
 
         Multi-TX flow:
-          1. Snapshot wallet balances (before collect)
-          2. Collect all accrued fees to the wallet
-          3. Wait for collect TX to be mined
-          4. Read wallet balances after collect, compute delta (fees received)
-          5. Compute optimal swap to match position range
-          6. Approve swap router and execute swap if needed
-          7. Wait for swap TX to be mined
-          8. Read post-swap balances
-          9. Approve PositionManager for both tokens
-          10. Call increaseLiquidity with fee amounts (not total wallet)
+          1. Collect all accrued fees to the wallet
+          2. Wait for collect TX to be mined
+          3. Parse fee amounts from the collect TX receipt (Transfer events)
+          4. Fallback: if receipt parsing returns 0, use balance diff with retries
+          5. Read position data for tick range (with retry)
+          6. Read current sqrtPrice from pool (with retry)
+          7. Compute optimal swap to match position range
+          8. Execute swap if needed (approve + swap)
+          9. Wait for swap TX
+          10. Read post-swap balances
+          11. Approve PositionManager for both tokens
+          12. Call increaseLiquidity with fee amounts
 
         Returns:
             A list of transaction hashes for all transactions submitted.
@@ -747,268 +891,320 @@ class HyperliquidWriter(VenueWriter):
         account_address = self._get_account_address(params.account)
         deadline = int(time.time()) + params.deadline_seconds
 
-        # Get starting nonce from chain
-        base_nonce = self._rpc_call(
-            "eth_getTransactionCount", [account_address, "latest"]
-        )
-        if base_nonce is None:
-            base_nonce = 0
-        else:
-            base_nonce = int(base_nonce, 16) if isinstance(base_nonce, str) else int(base_nonce)
-        nonce_counter = 0
-
-        # Step 1: Snapshot wallet balances BEFORE collect
-        bal0_before = self._read_balance(account_address, WHYPE)
-        bal1_before = self._read_balance(account_address, UBTC)
-
-        # Step 2: Collect all fees
+        # Step 1: Collect all fees
         _log_action("compound_fees_step1", extra="collecting fees")
         collect_data = (
             SELECTOR_COLLECT
             + _pad_uint256(token_id)
             + _pad_address(account_address)
-            + _pad_uint256(MAX_UINT128)   # amount0Max (uint128)
-            + _pad_uint256(MAX_UINT128)   # amount1Max (uint128)
+            + _pad_uint256(MAX_UINT128)   # amount0Max
+            + _pad_uint256(MAX_UINT128)   # amount1Max
         )
-        collect_tx = self._broadcast(
-            params.account, POSITION_MANAGER, collect_data,
-            nonce=base_nonce + nonce_counter
-        )
-        nonce_counter += 1
+        collect_tx = self._broadcast(params.account, POSITION_MANAGER, collect_data)
         tx_hashes.append(collect_tx)
         _log_action("compound_fees_collect", tx_hash=collect_tx, extra=f"token_id={token_id}")
 
-        # Step 3: Wait for collect TX to be mined
-        receipt = self._wait_for_tx_receipt(collect_tx, timeout=120, poll_interval=2.0)
-        if receipt is None:
-            _log_action("compound_fees_fail", extra="collect TX not mined within timeout")
-            return tx_hashes
-
-        # Step 4: Read balances AFTER collect, compute delta (fees only)
-        bal0_after = self._read_balance(account_address, WHYPE)
-        bal1_after = self._read_balance(account_address, UBTC)
-        fee0_raw = bal0_after - bal0_before
-        fee1_raw = bal1_after - bal1_before
-
-        _log_action("compound_fees_collected", extra=f"fee0={fee0_raw} fee1={fee1_raw}")
-
-        if fee0_raw <= 0 and fee1_raw <= 0:
-            _log_action("compound_fees_skip", extra="no fees collected (delta=0)")
-            return tx_hashes
-
-        # Step 5: Read position data for tick range
-        pos_data = self._read_position_data(token_id)
-        if pos_data is None:
-            _log_action("compound_fees_skip", extra="could not read position data")
-            return tx_hashes
-
-        tick_lower, tick_upper, fee = pos_data
-
-        # Read current sqrtPrice from pool slot0
-        sqrt_price_x96 = self._read_sqrt_price_x96(WHYPE_UBTC_POOL_3000)
-        if sqrt_price_x96 is None or sqrt_price_x96 == 0:
-            _log_action("compound_fees_skip", extra="could not read pool price")
-            return tx_hashes
-
-        sqrt_price = sqrt_price_x96 / (2 ** 96)
-        sqrt_lower = 1.0001 ** (tick_lower / 2.0)
-        sqrt_upper = 1.0001 ** (tick_upper / 2.0)
-
-        # Compute optimal swap using fee amounts (not total balance)
-        fee0 = fee0_raw / (10 ** WHYPE_DECIMALS)
-        fee1 = fee1_raw / (10 ** UBTC_DECIMALS)
-        price = sqrt_price ** 2
-        human_price = price * (10 ** (WHYPE_DECIMALS - UBTC_DECIMALS))
-
-        swap_needed = False
-        swap_token_in = ""
-        swap_token_out = ""
-        swap_amount_raw = 0
-
-        current_tick = int(_math.floor(_math.log(sqrt_price ** 2, 1.0001)))
-
-        if current_tick >= tick_upper:
-            # Price above range: swap all token1 (UBTC) -> token0 (WHYPE)
-            swap_needed = fee1_raw > 0
-            swap_token_in = UBTC
-            swap_token_out = WHYPE
-            swap_amount_raw = fee1_raw
-        elif current_tick < tick_lower:
-            # Price below range: swap all token0 (WHYPE) -> token1 (UBTC)
-            swap_needed = fee0_raw > 0
-            swap_token_in = WHYPE
-            swap_token_out = UBTC
-            swap_amount_raw = fee0_raw
-        else:
-            # In range: compute optimal ratio
-            value_per_L = (human_price * (sqrt_upper - sqrt_price) / (sqrt_price * sqrt_upper)
-                          + (sqrt_price - sqrt_lower))
-            if value_per_L > 0 and (fee0 * human_price + fee1) > 0:
-                L = (fee0 * human_price + fee1) / value_per_L
-                target0 = L * (sqrt_upper - sqrt_price) / (sqrt_price * sqrt_upper)
-                target1 = L * (sqrt_price - sqrt_lower)
-                target0_raw = int(target0 * (10 ** WHYPE_DECIMALS))
-                target1_raw = int(target1 * (10 ** UBTC_DECIMALS))
-                if fee0_raw > target0_raw:
-                    swap_needed = True
-                    swap_token_in = WHYPE
-                    swap_token_out = UBTC
-                    swap_amount_raw = fee0_raw - target0_raw
-                elif fee1_raw > target1_raw:
-                    swap_needed = True
-                    swap_token_in = UBTC
-                    swap_token_out = WHYPE
-                    swap_amount_raw = fee1_raw - target1_raw
-
-        # Step 6: Execute swap if needed
-        if swap_needed and swap_amount_raw > 0:
-            _log_action("compound_fees_step2", extra=f"swapping {swap_token_in} -> {swap_token_out}")
-            self._ensure_approval(params.account, account_address,
-                                  swap_token_in, SWAP_ROUTER, swap_amount_raw)
-
-            # Re-fetch nonce since collect TX is now mined and chain nonce has incremented
-            current_nonce = self._rpc_call(
-                "eth_getTransactionCount", [account_address, "latest"]
-            )
-            if current_nonce is None:
-                current_nonce = base_nonce + nonce_counter
-            else:
-                current_nonce = int(current_nonce, 16) if isinstance(current_nonce, str) else int(current_nonce)
-
-            swap_data = (
-                SELECTOR_EXACT_INPUT_SINGLE
-                + _pad_address(swap_token_in)
-                + _pad_address(swap_token_out)
-                + _pad_uint256(fee)
-                + _pad_address(account_address)
-                + _pad_uint256(deadline)
-                + _pad_uint256(swap_amount_raw)
-                + _pad_uint256(0)  # amountOutMinimum
-                + _pad_uint256(0)  # sqrtPriceLimitX96
-            )
-            swap_tx = self._broadcast(
-                params.account, SWAP_ROUTER, swap_data,
-                nonce=current_nonce
-            )
-            tx_hashes.append(swap_tx)
-            _log_action("compound_fees_swap", tx_hash=swap_tx,
-                       extra=f"in={swap_token_in} out={swap_token_out}")
-
-            # Step 7: Wait for swap TX to be mined
-            swap_receipt = self._wait_for_tx_receipt(swap_tx, timeout=120, poll_interval=2.0)
-            if swap_receipt is None:
-                _log_action("compound_fees_warn", extra="swap TX not mined within timeout")
+        try:
+            # Step 2: Wait for collect TX to be mined
+            receipt = self._wait_for_tx_receipt(collect_tx, timeout=120, poll_interval=2.0)
+            if receipt is None:
+                _log_action("compound_fees_fail", extra="collect TX not mined within timeout")
                 return tx_hashes
 
-        # Step 8: Read post-swap balances (use delta from pre-collect, not total)
-        bal0_final = self._read_balance(account_address, WHYPE) - bal0_before
-        bal1_final = self._read_balance(account_address, UBTC) - bal1_before
+            # Step 3: Parse fee amounts from the collect TX receipt (Transfer events)
+            fee0_raw, fee1_raw = self._parse_fees_from_receipt(receipt, account_address)
+            _log_action("compound_fees_parsed", extra=f"fee0={fee0_raw} fee1={fee1_raw} (from receipt)")
 
-        if bal0_final <= 0 and bal1_final <= 0:
-            _log_action("compound_fees_skip", extra="no balances to add after swap")
-            return tx_hashes
+            # Step 4: Fallback to balance diff if receipt parsing returned zeros
+            if fee0_raw <= 0 and fee1_raw <= 0:
+                _log_action("compound_fees_fallback", extra="receipt parsing returned 0, trying balance diff")
+                try:
+                    bal0_before = self._read_balance(account_address, WHYPE)
+                    bal1_before = self._read_balance(account_address, UBTC)
+                    # We already have the receipt, so the state is updated.
+                    # But add a small delay for RPC consistency.
+                    time.sleep(1.0)
+                    bal0_after = self._read_balance(account_address, WHYPE)
+                    bal1_after = self._read_balance(account_address, UBTC)
+                    fee0_raw = bal0_after - bal0_before
+                    fee1_raw = bal1_after - bal1_before
+                except Exception as e:
+                    _log_action("compound_fees_warn", extra=f"balance read error in fallback: {e}")
+                    fee0_raw = 0
+                    fee1_raw = 0
+                _log_action("compound_fees_balancediff", extra=f"fee0={fee0_raw} fee1={fee1_raw} (from balance diff)")
 
-        # Step 9: Approve PositionManager for both tokens (using fee amounts, not max)
-        # Re-fetch nonce since swap TX may have been mined
-        current_nonce = self._rpc_call(
-            "eth_getTransactionCount", [account_address, "latest"]
-        )
-        if current_nonce is None:
-            current_nonce = base_nonce + nonce_counter
-        else:
-            current_nonce = int(current_nonce, 16) if isinstance(current_nonce, str) else int(current_nonce)
+            if fee0_raw <= 0 and fee1_raw <= 0:
+                _log_action("compound_fees_skip", extra=f"no fees collected (both methods returned 0) fee0={fee0_raw} fee1={fee1_raw}")
+                return tx_hashes
 
-        # Check and do approvals (each may broadcast a TX)
-        for token, amount in [(WHYPE, bal0_final), (UBTC, bal1_final)]:
-            if amount <= 0:
-                continue
-            existing = self._check_allowance(account_address, token, POSITION_MANAGER)
-            if existing < amount:
-                approve_data = SELECTOR_APPROVE + _pad_address(POSITION_MANAGER) + _pad_uint256(MAX_UINT256)
-                approve_tx = self._broadcast(
-                    params.account, token, approve_data,
-                    nonce=current_nonce
-                )
-                current_nonce += 1
-                tx_hashes.append(approve_tx)
-                _log_action("compound_fees_approve", tx_hash=approve_tx, extra=f"token={token}")
-                # Wait for approval to be mined
-                self._wait_for_tx_receipt(approve_tx, timeout=120, poll_interval=2.0)
+            # Step 5: Read position data for tick range (with retry)
+            pos_data = self._read_position_data(token_id)
+            if pos_data is None:
+                _log_action("compound_fees_skip", extra=f"could not read position data after retries token_id={token_id}")
+                return tx_hashes
 
-        # Step 10: Increase liquidity with fee amounts
-        if bal0_final > 0 or bal1_final > 0:
-            _log_action("compound_fees_step3", extra="increasing liquidity")
-            # Re-fetch nonce
-            current_nonce = self._rpc_call(
-                "eth_getTransactionCount", [account_address, "latest"]
-            )
-            if current_nonce is None:
-                current_nonce = base_nonce + nonce_counter
+            tick_lower, tick_upper, fee = pos_data
+
+            # Step 6: Read current sqrtPrice from pool (with retry)
+            sqrt_price_x96 = self._read_sqrt_price_x96(WHYPE_UBTC_POOL_3000)
+            if sqrt_price_x96 is None or sqrt_price_x96 == 0:
+                _log_action("compound_fees_skip", extra=f"could not read pool price after retries pool={WHYPE_UBTC_POOL_3000}")
+                return tx_hashes
+
+            sqrt_price = sqrt_price_x96 / (2 ** 96)
+            sqrt_lower = 1.0001 ** (tick_lower / 2.0)
+            sqrt_upper = 1.0001 ** (tick_upper / 2.0)
+
+            # Step 7: Compute optimal swap
+            fee0 = fee0_raw / (10 ** WHYPE_DECIMALS)
+            fee1 = fee1_raw / (10 ** UBTC_DECIMALS)
+            price = sqrt_price ** 2
+            human_price = price * (10 ** (WHYPE_DECIMALS - UBTC_DECIMALS))
+
+            swap_needed = False
+            swap_token_in = ""
+            swap_token_out = ""
+            swap_amount_raw = 0
+
+            current_tick = int(_math.floor(_math.log(sqrt_price ** 2, 1.0001)))
+
+            if current_tick >= tick_upper:
+                # Price above range: swap all token1 (UBTC) -> token0 (WHYPE)
+                swap_needed = fee1_raw > 0
+                swap_token_in = UBTC
+                swap_token_out = WHYPE
+                swap_amount_raw = fee1_raw
+            elif current_tick < tick_lower:
+                # Price below range: swap all token0 (WHYPE) -> token1 (UBTC)
+                swap_needed = fee0_raw > 0
+                swap_token_in = WHYPE
+                swap_token_out = UBTC
+                swap_amount_raw = fee0_raw
             else:
-                current_nonce = int(current_nonce, 16) if isinstance(current_nonce, str) else int(current_nonce)
+                # In range: compute optimal ratio
+                value_per_L = (human_price * (sqrt_upper - sqrt_price) / (sqrt_price * sqrt_upper)
+                              + (sqrt_price - sqrt_lower))
+                if value_per_L > 0 and (fee0 * human_price + fee1) > 0:
+                    L = (fee0 * human_price + fee1) / value_per_L
+                    target0 = L * (sqrt_upper - sqrt_price) / (sqrt_price * sqrt_upper)
+                    target1 = L * (sqrt_price - sqrt_lower)
+                    target0_raw = int(target0 * (10 ** WHYPE_DECIMALS))
+                    target1_raw = int(target1 * (10 ** UBTC_DECIMALS))
+                    if fee0_raw > target0_raw:
+                        swap_needed = True
+                        swap_token_in = WHYPE
+                        swap_token_out = UBTC
+                        swap_amount_raw = fee0_raw - target0_raw
+                    elif fee1_raw > target1_raw:
+                        swap_needed = True
+                        swap_token_in = UBTC
+                        swap_token_out = WHYPE
+                        swap_amount_raw = fee1_raw - target1_raw
 
-            increase_data = (
-                SELECTOR_INCREASE_LIQUIDITY
-                + _pad_uint256(token_id)
-                + _pad_uint256(bal0_final)
-                + _pad_uint256(bal1_final)
-                + _pad_uint256(0)
-                + _pad_uint256(0)
-                + _pad_uint256(deadline)
-            )
-            increase_tx = self._broadcast(
-                params.account, POSITION_MANAGER, increase_data,
-                nonce=current_nonce
-            )
-            tx_hashes.append(increase_tx)
-            _log_action("compound_fees_increase", tx_hash=increase_tx,
-                       extra=f"token_id={token_id}")
+            _log_action("compound_fees_position", extra=f"tick_lower={tick_lower} tick_upper={tick_upper} fee={fee} current_tick={current_tick}")
+            _log_action("compound_fees_swap_plan", extra=f"swap_needed={swap_needed} token_in={swap_token_in} token_out={swap_token_out} amount_raw={swap_amount_raw}")
 
-            # Wait for increase liquidity to be mined
-            self._wait_for_tx_receipt(increase_tx, timeout=120, poll_interval=2.0)
+            # Step 8: Execute swap if needed
+            if swap_needed and swap_amount_raw > 0:
+                _log_action("compound_fees_step2", extra=f"swapping {swap_token_in} -> {swap_token_out} amount_raw={swap_amount_raw}")
+                self._ensure_approval(params.account, account_address,
+                                      swap_token_in, SWAP_ROUTER, swap_amount_raw)
 
-        _log_action("compound_fees_done", extra=f"txs={len(tx_hashes)}")
+                swap_data = (
+                    SELECTOR_EXACT_INPUT_SINGLE
+                    + _pad_address(swap_token_in)
+                    + _pad_address(swap_token_out)
+                    + _pad_uint256(fee)
+                    + _pad_address(account_address)
+                    + _pad_uint256(deadline)
+                    + _pad_uint256(swap_amount_raw)
+                    + _pad_uint256(0)  # amountOutMinimum -- TODO: add slippage protection
+                    + _pad_uint256(0)  # sqrtPriceLimitX96
+                )
+                swap_tx = self._broadcast(params.account, SWAP_ROUTER, swap_data)
+                tx_hashes.append(swap_tx)
+                _log_action("compound_fees_swap", tx_hash=swap_tx,
+                           extra=f"in={swap_token_in} out={swap_token_out} amount={swap_amount_raw}")
+
+                # Step 9: Wait for swap TX
+                swap_receipt = self._wait_for_tx_receipt(swap_tx, timeout=120, poll_interval=2.0)
+                if swap_receipt is None:
+                    _log_action("compound_fees_warn", extra="swap TX not mined within timeout")
+                    return tx_hashes
+                if swap_receipt.get("status") != "0x1":
+                    _log_action("compound_fees_warn", extra="swap TX reverted -- continuing with pre-swap balances")
+                else:
+                    _log_action("compound_fees_swap_confirmed", tx_hash=swap_tx)
+            else:
+                _log_action("compound_fees_noswap", extra="no swap needed or amount too small")
+
+            # Step 10: Read post-swap balances and cap add amounts by actual wallet balance
+            try:
+                bal0_total = self._read_balance(account_address, WHYPE)
+                bal1_total = self._read_balance(account_address, UBTC)
+            except Exception as e:
+                _log_action("compound_fees_warn", extra=f"post-swap balance read error: {e}")
+                bal0_total = 0
+                bal1_total = 0
+
+            if not swap_needed or swap_amount_raw == 0:
+                add0 = min(fee0_raw, bal0_total)
+                add1 = min(fee1_raw, bal1_total)
+            else:
+                # After swap, the wallet contains the collected fees adjusted by the swap.
+                # Use the available balance as an upper bound, but never try to add more
+                # than the original fee amounts (so pre-existing wallet funds are not added).
+                if swap_token_in == WHYPE:
+                    add0 = min(fee0_raw - swap_amount_raw, bal0_total) if fee0_raw > swap_amount_raw else 0
+                    add1 = min(fee1_raw, bal1_total)
+                else:
+                    add0 = min(fee0_raw, bal0_total)
+                    add1 = min(fee1_raw - swap_amount_raw, bal1_total) if fee1_raw > swap_amount_raw else 0
+
+            _log_action("compound_fees_increase_plan", extra=f"add0={add0} add1={add1}")
+
+            if add0 <= 0 and add1 <= 0:
+                _log_action("compound_fees_skip", extra=f"no balances to add after swap add0={add0} add1={add1}")
+                return tx_hashes
+
+            # Step 11: Approve PositionManager for both tokens
+            for token, amount in [(WHYPE, add0), (UBTC, add1)]:
+                if amount <= 0:
+                    continue
+                existing = self._check_allowance(account_address, token, POSITION_MANAGER)
+                if existing < amount:
+                    approve_data = SELECTOR_APPROVE + _pad_address(POSITION_MANAGER) + _pad_uint256(MAX_UINT256)
+                    approve_tx = self._broadcast(params.account, token, approve_data)
+                    tx_hashes.append(approve_tx)
+                    _log_action("compound_fees_approve", tx_hash=approve_tx, extra=f"token={token}")
+                    self._wait_for_tx_receipt(approve_tx, timeout=120, poll_interval=2.0)
+
+            # Step 12: Increase liquidity
+            if add0 > 0 or add1 > 0:
+                _log_action("compound_fees_step3", extra=f"increasing liquidity add0={add0} add1={add1}")
+                increase_data = (
+                    SELECTOR_INCREASE_LIQUIDITY
+                    + _pad_uint256(token_id)
+                    + _pad_uint256(add0)
+                    + _pad_uint256(add1)
+                    + _pad_uint256(0)  # amount0Min
+                    + _pad_uint256(0)  # amount1Min
+                    + _pad_uint256(deadline)
+                )
+                increase_tx = self._broadcast(params.account, POSITION_MANAGER, increase_data)
+                tx_hashes.append(increase_tx)
+                _log_action("compound_fees_increase", tx_hash=increase_tx,
+                           extra=f"token_id={token_id} add0={add0} add1={add1}")
+
+                increase_receipt = self._wait_for_tx_receipt(increase_tx, timeout=120, poll_interval=2.0)
+                if increase_receipt:
+                    if increase_receipt.get("status") == "0x1":
+                        _log_action("compound_fees_increase_confirmed", tx_hash=increase_tx)
+                    else:
+                        _log_action("compound_fees_increase_reverted", tx_hash=increase_tx)
+
+            _log_action("compound_fees_done", extra=f"txs={len(tx_hashes)}")
+        except Exception as e:
+            _log_action("compound_fees_error", extra=f"post-collect error: {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
+
         return tx_hashes
 
+    def _parse_fees_from_receipt(self, receipt: dict, wallet_address: str) -> Tuple[int, int]:
+        """Parse Transfer events from a collect tx receipt to get exact fee amounts.
+
+        Args:
+            receipt: The transaction receipt dict (contains 'logs').
+            wallet_address: The recipient wallet address (lowercase hex).
+
+        Returns:
+            (fee0_raw, fee1_raw) where fee0 = WHYPE amount in wei, fee1 = UBTC amount in satoshi.
+            Returns (0, 0) if no matching Transfer events are found.
+        """
+        TRANSFER_SIG = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        wallet_lower = wallet_address.lower()
+        fee0_raw = 0
+        fee1_raw = 0
+
+        logs = receipt.get("logs", [])
+        for log in logs:
+            topics = log.get("topics", [])
+            if len(topics) < 3:
+                continue
+            if topics[0].lower() != TRANSFER_SIG:
+                continue
+            # topic[2] is the recipient (padded address)
+            recipient = topics[2][26:].lower()  # strip 24-char zero pad
+            if recipient != wallet_lower[2:]:  # compare without 0x prefix
+                continue
+            # This is a Transfer to our wallet
+            token = log.get("address", "").lower()
+            amount = int(log.get("data", "0x0"), 16)
+            if token == WHYPE.lower():
+                fee0_raw = amount
+            elif token == UBTC.lower():
+                fee1_raw = amount
+
+        return fee0_raw, fee1_raw
+
     def _read_balance(self, address: str, token: str) -> int:
-        """Read ERC-20 balanceOf for an address."""
+        """Read ERC-20 balanceOf for an address (with retry)."""
         data = SELECTOR_BALANCE_OF + _pad_address(address)
-        result = self._rpc_call("eth_call", [{"to": token, "data": data}, "latest"])
-        if not result or not isinstance(result, str) or len(result) < 66:
-            return 0
-        try:
-            return int(result[2:66], 16)
-        except (ValueError, IndexError):
-            return 0
+        for attempt in range(3):
+            result = self._rpc_call("eth_call", [{"to": token, "data": data}, "latest"])
+            if result and isinstance(result, str) and len(result) >= 66:
+                try:
+                    return int(result[2:66], 16)
+                except (ValueError, IndexError):
+                    pass
+            if attempt < 2:
+                time.sleep(1.0)
+        _log_action("read_balance_failed", extra=f"token={token} address={address}")
+        return 0
 
     def _read_position_data(self, token_id: int) -> Optional[Tuple[int, int, int]]:
-        """Read tickLower, tickUpper, fee from positions(tokenId)."""
+        """Read tickLower, tickUpper, fee from positions(tokenId) (with retry)."""
         data = SELECTOR_POSITIONS + _pad_uint256(token_id)
-        result = self._rpc_call("eth_call", [{"to": POSITION_MANAGER, "data": data}, "latest"])
-        if not result or not isinstance(result, str) or len(result) < 2 + 32 * 7:
-            return None
-        try:
-            body = result[2:]
-            fee = int(body[128:192], 16)
-            tick_lower = int(body[192:256], 16)
-            if tick_lower >= 2 ** 255:
-                tick_lower -= 2 ** 256
-            tick_upper = int(body[256:320], 16)
-            if tick_upper >= 2 ** 255:
-                tick_upper -= 2 ** 256
-            return (tick_lower, tick_upper, fee)
-        except (ValueError, IndexError):
-            return None
+        for attempt in range(3):
+            result = self._rpc_call("eth_call", [{"to": POSITION_MANAGER, "data": data}, "latest"])
+            if result and isinstance(result, str) and len(result) >= 2 + 32 * 12:
+                try:
+                    body = result[2:]
+                    # positions() returns: nonce, operator, token0, token1,
+                    # fee, tickLower, tickUpper, liquidity, ...
+                    # Each field is 32 bytes (64 hex chars) in ABI encoding.
+                    fee = int(body[256:320], 16)
+                    tick_lower = int(body[320:384], 16)
+                    if tick_lower >= 2 ** 255:
+                        tick_lower -= 2 ** 256
+                    tick_upper = int(body[384:448], 16)
+                    if tick_upper >= 2 ** 255:
+                        tick_upper -= 2 ** 256
+                    return (tick_lower, tick_upper, fee)
+                except (ValueError, IndexError):
+                    pass
+            if attempt < 2:
+                time.sleep(1.0)
+        _log_action("read_position_failed", extra=f"token_id={token_id}")
+        return None
 
     def _read_sqrt_price_x96(self, pool_address: str) -> Optional[int]:
-        """Read sqrtPriceX96 from pool slot0."""
-        result = self._rpc_call("eth_call", [{"to": pool_address, "data": "0x3850c7bd"}, "latest"])
-        if not result or not isinstance(result, str) or len(result) < 66:
-            return None
-        try:
-            return int(result[2:66], 16)
-        except (ValueError, IndexError):
-            return None
+        """Read sqrtPriceX96 from pool slot0 (with retry)."""
+        for attempt in range(3):
+            result = self._rpc_call("eth_call", [{"to": pool_address, "data": "0x3850c7bd"}, "latest"])
+            if result and isinstance(result, str) and len(result) >= 66:
+                try:
+                    val = int(result[2:66], 16)
+                    if val > 0:
+                        return val
+                except (ValueError, IndexError):
+                    pass
+            if attempt < 2:
+                time.sleep(1.0)
+        _log_action("read_sqrt_price_failed", extra=f"pool={pool_address}")
+        return None
 
 
     def close_position(self, position_id: str, account: str) -> List[str]:
