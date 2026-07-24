@@ -466,56 +466,17 @@ class EVMTransferDialog:
                 daemon=True,
             ).start()
 
-    def _wait_for_tx(self, tx_hash: str, timeout: int = 120):
-        """Wait for a transaction to be mined by polling for its receipt."""
-        deadline = time.time() + timeout
-        while time.time() < deadline:
-            try:
-                result = _rpc_call(HYPEREVM_RPC, "eth_getTransactionReceipt", [tx_hash])
-                if result and isinstance(result, dict) and result.get("status"):
-                    if result["status"] == "0x1":
-                        return result
-                    elif result["status"] == "0x0":
-                        raise RuntimeError(f"Transaction {tx_hash[:20]}... reverted")
-            except RuntimeError:
-                raise
-            except Exception:
-                pass
-            time.sleep(2.0)
-        return None
-
     def _do_evm_to_hl1(self, asset: str, amount_str: str):
         """Execute an EVM → HL1 transfer via the agent.
 
-        For HYPE: unwrap WHYPE → native HYPE, then send to 0x222...2222.
+        For HYPE: send native HYPE to 0x222...2222 (bridge to HL1).
         For USDC/UBTC: ERC-20 transfer to the token's system address.
         """
         try:
             if asset == "HYPE":
-                # HYPE on HyperEVM is held as WHYPE (ERC-20).
-                # 1. Unwrap WHYPE → native HYPE (WHYPE.withdraw(amount))
-                # 2. Send native HYPE to 0x222...2222 (bridge to HL1)
+                # Send native HYPE to the bridge address 0x222...2222.
+                # This transfers HYPE from HyperEVM to HyperCore (HL1) spot.
                 amount_wei = _to_wei(amount_str, 18)
-
-                # Step 1: Unwrap WHYPE
-                withdraw_data = "0x" + SELECTOR_WITHDRAW + _pad_uint256(amount_wei)[2:]
-                unwrap_result = _agent_call(
-                    self.agent_url,
-                    "broadcast_tx",
-                    account=self.account_name,
-                    to=WHYPE_EVM,
-                    data=withdraw_data,
-                    value="0x0",
-                    chain_id=999,
-                    rpc=HYPEREVM_RPC,
-                )
-                unwrap_tx = unwrap_result.get("tx_hash", "")
-                self._set_status(f"WHYPE unwrapped. Bridging to HL1...", "gray60")
-
-                # Wait for unwrap tx to be mined before sending native HYPE
-                self._wait_for_tx(unwrap_tx, timeout=60)
-
-                # Step 2: Send native HYPE to the bridge address
                 result = _agent_call(
                     self.agent_url,
                     "broadcast_tx",
