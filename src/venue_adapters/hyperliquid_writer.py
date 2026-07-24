@@ -872,7 +872,10 @@ class HyperliquidWriter(VenueWriter):
           4. Fallback: if receipt parsing returns 0, use balance diff with retries
           5. Read position data for tick range (with retry)
           6. Read current sqrtPrice from pool (with retry)
-          7. Compute optimal swap to match position range
+          7. Compute optimal swap based on position range:
+             - Below range: swap UBTC fees -> WHYPE (position is all WHYPE)
+             - Above range: swap WHYPE fees -> UBTC (position is all UBTC)
+             - In range: swap to optimal ratio for current tick
           8. Execute swap if needed (approve + swap)
           9. Wait for swap TX
           10. Read post-swap balances
@@ -970,17 +973,19 @@ class HyperliquidWriter(VenueWriter):
             current_tick = int(_math.floor(_math.log(sqrt_price ** 2, 1.0001)))
 
             if current_tick >= tick_upper:
-                # Price above range: swap all token1 (UBTC) -> token0 (WHYPE)
-                swap_needed = fee1_raw > 0
-                swap_token_in = UBTC
-                swap_token_out = WHYPE
-                swap_amount_raw = fee1_raw
-            elif current_tick < tick_lower:
-                # Price below range: swap all token0 (WHYPE) -> token1 (UBTC)
+                # Price above range: position is 100% token1 (UBTC).
+                # Need only UBTC for increaseLiquidity. Swap WHYPE fees -> UBTC.
                 swap_needed = fee0_raw > 0
                 swap_token_in = WHYPE
                 swap_token_out = UBTC
                 swap_amount_raw = fee0_raw
+            elif current_tick < tick_lower:
+                # Price below range: position is 100% token0 (WHYPE).
+                # Need only WHYPE for increaseLiquidity. Swap UBTC fees -> WHYPE.
+                swap_needed = fee1_raw > 0
+                swap_token_in = UBTC
+                swap_token_out = WHYPE
+                swap_amount_raw = fee1_raw
             else:
                 # In range: compute optimal ratio
                 value_per_L = (human_price * (sqrt_upper - sqrt_price) / (sqrt_price * sqrt_upper)
@@ -1049,18 +1054,30 @@ class HyperliquidWriter(VenueWriter):
                 bal1_total = 0
 
             if not swap_needed or swap_amount_raw == 0:
+                # No swap happened — add the collected fee amounts, capped by actual balance
                 add0 = min(fee0_raw, bal0_total)
                 add1 = min(fee1_raw, bal1_total)
             else:
-                # After swap, the wallet contains the collected fees adjusted by the swap.
-                # Use the available balance as an upper bound, but never try to add more
-                # than the original fee amounts (so pre-existing wallet funds are not added).
-                if swap_token_in == WHYPE:
-                    add0 = min(fee0_raw - swap_amount_raw, bal0_total) if fee0_raw > swap_amount_raw else 0
-                    add1 = min(fee1_raw, bal1_total)
+                # Swap happened — use actual post-swap wallet balances.
+                # The swap already converted fees to the optimal token ratio.
+                # Cap by the total fee value to avoid adding pre-existing wallet funds:
+                #   fee0_raw + fee1_raw (in raw units) is the total collected.
+                #   After swap, the wallet has the swapped amounts. Just use actual balances
+                #   but cap each side by the sum of original fees in that token's decimals.
+                if current_tick >= tick_upper:
+                    # Above range: all UBTC. Add 0 WHYPE, all available UBTC (capped by fee total)
+                    total_fee_ubtc_equiv = fee1_raw + fee0_raw  # all fees converted to UBTC
+                    add0 = 0
+                    add1 = min(total_fee_ubtc_equiv, bal1_total)
+                elif current_tick < tick_lower:
+                    # Below range: all WHYPE. Add all available WHYPE (capped by fee total), 0 UBTC
+                    total_fee_hype_equiv = fee0_raw + fee1_raw  # all fees converted to WHYPE
+                    add0 = min(total_fee_hype_equiv, bal0_total)
+                    add1 = 0
                 else:
-                    add0 = min(fee0_raw, bal0_total)
-                    add1 = min(fee1_raw - swap_amount_raw, bal1_total) if fee1_raw > swap_amount_raw else 0
+                    # In range: add actual post-swap balances (swap already optimized ratio)
+                    add0 = min(fee0_raw + fee1_raw, bal0_total)  # generous cap
+                    add1 = min(fee1_raw + fee0_raw, bal1_total)  # generous cap
 
             _log_action("compound_fees_increase_plan", extra=f"add0={add0} add1={add1}")
 

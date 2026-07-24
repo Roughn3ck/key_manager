@@ -4,7 +4,7 @@
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production-success)]()
 
-**Latest release: [v5.1.1 — Add/Remove Liquidity + Gas Fix + Fee Tracking](https://github.com/Roughn3ck/key_manager/releases/tag/v5.1.1)**
+**Latest release: [v5.1.2 — Vault Explore + Deposit + EVM Transfer + Balance Conversion](https://github.com/Roughn3ck/key_manager/releases/tag/v5.1.2)**
 
 ---
 
@@ -99,7 +99,7 @@ python3 src/key_manager_agent.py --vault key_vault.encrypted --serve --port 8842
 
 ColdStack speaks Uniswap V3 concentrated liquidity on HyperEVM. It reads and writes to the Project X PositionManager and SwapRouter contracts directly.
 
-### What works today (v5.1.1)
+### What works today (v5.1.2)
 
 | Operation | Status |
 |-----------|--------|
@@ -115,6 +115,10 @@ ColdStack speaks Uniswap V3 concentrated liquidity on HyperEVM. It reads and wri
 | Auto-Balance / Zap In (swap to match ratio) | ✅ |
 | Swap (exactInputSingle) | ✅ |
 | Edit Position (tick range, rebalance) | 🔜 v5.2 |
+| EVM ↔ HL1 Transfer (bridge assets) | ✅ |
+| Vault Explore + Deposit | ✅ |
+| HyperEVM balance fiat conversion (WHYPE, UBTC) | ✅ |
+| Close Position auto-refresh | ✅ |
 
 ### The Compound Fees Flow
 
@@ -197,6 +201,8 @@ python src/main.py derive-address --account "G5" --chain "EVM" --index 0
 src/
   gui_main_v5.py              Main GUI (6K+ lines)
   lp_liquidity_manager.py     Add/Remove/Edit liquidity dialogs
+  evm_transfer_dialog.py      EVM ↔ HL1 transfer dialog
+  vault_deposit_dialog.py     Vault deposit dialog
   key_manager_agent.py        Embedded signing agent
   vault_tracker.py            Hyperliquid vault positions
   lp_engine.py                LP position aggregation

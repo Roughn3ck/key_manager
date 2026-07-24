@@ -39,6 +39,8 @@ STABLECOINS = {"USDC", "USDT", "DAI", "FRAX", "USDe"}
 PEGGED_TOKENS = {
     "WETH": "ETH",
     "cbBTC": "BTC",
+    "WHYPE": "HYPE",
+    "UBTC": "BTC",
 }
 
 # Supported fiat currencies

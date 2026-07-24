@@ -5,7 +5,7 @@ ColdStack is a secure cryptocurrency key storage application with a GUI interfac
 It encrypts wallet data (24-word mnemonics, addresses, private keys) using AES-256-GCM with Argon2id key derivation.
 Designed for portable USB deployment alongside a local script-mode workflow.
 
-**Current production version: v5.1.1** (July 2026) — Add/Remove Liquidity UI, auto-balance (Zap In), gas price 6x boost, position decode fix, fee tracking, unstubbed HyperEVM swap, new `lp_liquidity_manager.py` module. v5.1: Hyperliquid Vault Tracking (HL1 Vaults tab), saved vault snapshots, wallet/account selector, LP fee reading via static `collect()` eth_call, HyperEVM ERC-20 support, Go Online toggle, wallet balances, CoinGecko prices. v4.2: Customizable RPC endpoints, Standard/Advanced mode, API key management.
+**Current production version: v5.1.2** (July 2026) — Vault Explore + Deposit, EVM ↔ HL1 Transfer dialog, HyperEVM balance fiat conversion (WHYPE, UBTC), close position auto-refresh, EIP-712 typed data signing. v5.1.1: Add/Remove Liquidity UI, auto-balance (Zap In), gas price 6x boost, position decode fix, fee tracking, unstubbed HyperEVM swap, new `lp_liquidity_manager.py` module. v5.1: Hyperliquid Vault Tracking (HL1 Vaults tab), saved vault snapshots, wallet/account selector, LP fee reading via static `collect()` eth_call, HyperEVM ERC-20 support, Go Online toggle, wallet balances, CoinGecko prices. v4.2: Customizable RPC endpoints, Standard/Advanced mode, API key management.
 
 **Next version: v5.2** — tick range editing, rebalancing, writer mainnet testing.
 
@@ -34,6 +34,7 @@ If the build fails, fix the error before considering the task complete. A stale 
 | Version | Description | Key Files |
 |---------|-------------|-----------|
 | v5.1.1 | Add/Remove Liquidity UI + gas 6x boost + position decode fix + fee tracking + swap unstub | `src/lp_liquidity_manager.py`, `src/gui_main_v5.py`, `src/venue_adapters/hyperliquid_writer.py`, `build_gui_v5.py` |
+| v5.1.2 | Vault Explore + Deposit + EVM Transfer + Balance Conversion | `src/evm_transfer_dialog.py`, `src/vault_deposit_dialog.py`, `src/gui_main_v5.py`, `src/price_engine.py`, `src/key_manager_agent.py`, `build_gui_v5.py` |
 | v5.1 | Hyperliquid Vaults + saved vault snapshots + LP fee fix + wallet selector | `src/gui_main_v5.py`, `src/vault_tracker.py`, `src/venue_adapters/hyperliquid_adapter.py`, `build_gui_v5.py` |
 | v5.0 | LP Engine + Hyperliquid Writer + LP Positions tab + CTkTabview | `src/gui_main_v5.py`, `src/venue_adapters/hyperliquid_writer.py`, `build_gui_v5.py` |
 | v4.2 | Customizable RPC endpoints + Standard/Advanced mode + API key management | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
@@ -71,7 +72,7 @@ key_manager/
 ├── key_manager_gui_v4.spec    # PyInstaller spec (name='coldstack')
 ├── coldstack.spec             # Duplicate spec (kept for compatibility)
 ├── USB_DEPLOYMENT/
-│   ├── coldstack.exe          # Current production EXE (v5.1.1 build — rebuild after source changes)
+│   ├── coldstack.exe          # Current production EXE (v5.1.2 build — rebuild after source changes)
 │   ├── launch.bat             # Launcher script
 │   └── README.md              # USB deployment readme
 ├── backups/                   # Previous version backups

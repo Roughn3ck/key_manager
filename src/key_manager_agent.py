@@ -857,6 +857,161 @@ class KeyManagerAgent:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    @staticmethod
+    def _encode_eip712_type(type_name: str, types: Dict[str, List[Dict[str, str]]]) -> str:
+        """Build the EIP-712 type string for a struct (e.g. 'SpotSend(...)' )."""
+        fields = types.get(type_name, [])
+        field_strs = [f"{field['type']} {field['name']}" for field in fields]
+        type_str = f"{type_name}({','.join(field_strs)})"
+
+        # Append referenced struct types in order of first appearance.
+        seen = set()
+
+        def _collect(struct_name: str):
+            for field in types.get(struct_name, []):
+                base_type = field["type"]
+                if base_type.endswith("[]"):
+                    base_type = base_type[:-2]
+                if base_type in types and base_type not in seen:
+                    seen.add(base_type)
+                    _collect(base_type)
+
+        _collect(type_name)
+        for dep in seen:
+            dep_fields = types.get(dep, [])
+            dep_strs = [f"{field['type']} {field['name']}" for field in dep_fields]
+            type_str += f"{dep}({','.join(dep_strs)})"
+        return type_str
+
+    @staticmethod
+    def _encode_eip712_value(value: Any, type_name: str,
+                              types: Dict[str, List[Dict[str, str]]]) -> bytes:
+        """Encode a single EIP-712 value as a 32-byte word."""
+        keccak = _get_keccak()
+
+        if type_name == "string":
+            h = keccak.new(digest_bits=256)
+            h.update(str(value).encode("utf-8"))
+            return h.digest()
+
+        if type_name == "bytes":
+            h = keccak.new(digest_bits=256)
+            if isinstance(value, str) and value.startswith("0x"):
+                h.update(bytes.fromhex(value[2:]))
+            elif isinstance(value, str):
+                h.update(value.encode("utf-8"))
+            elif isinstance(value, (bytes, bytearray)):
+                h.update(bytes(value))
+            return h.digest()
+
+        if type_name.startswith("bytes"):
+            size = int(type_name[5:]) if len(type_name) > 5 else 32
+            if isinstance(value, str) and value.startswith("0x"):
+                b = bytes.fromhex(value[2:])
+            elif isinstance(value, str):
+                b = value.encode("utf-8")
+            elif isinstance(value, (bytes, bytearray)):
+                b = bytes(value)
+            else:
+                b = b""
+            if len(b) != size:
+                raise ValueError(f"Invalid bytes{size} length: {len(b)}")
+            return b
+
+        if type_name == "address":
+            addr = str(value).lower()
+            if addr.startswith("0x"):
+                addr = addr[2:]
+            return b"\x00" * 12 + bytes.fromhex(addr)
+
+        if type_name == "bool":
+            return b"\x00" * 31 + bytes([1 if value else 0])
+
+        if type_name.startswith("uint"):
+            return int(value).to_bytes(32, "big")
+
+        if type_name.startswith("int"):
+            return int(value).to_bytes(32, "big", signed=True)
+
+        # Struct type
+        if type_name in types:
+            type_hash = keccak.new(digest_bits=256)
+            type_hash.update(KeyManagerAgent._encode_eip712_type(type_name, types).encode("utf-8"))
+            return type_hash.digest() + KeyManagerAgent._encode_eip712_data(type_name, value, types)
+
+        raise ValueError(f"Unsupported EIP-712 type: {type_name}")
+
+    @staticmethod
+    def _encode_eip712_data(type_name: str, message: Dict[str, Any],
+                            types: Dict[str, List[Dict[str, str]]]) -> bytes:
+        """Encode the data fields of a struct."""
+        encoded = b""
+        for field in types.get(type_name, []):
+            field_type = field["type"]
+            field_name = field["name"]
+            value = message.get(field_name)
+
+            if field_type.endswith("[]"):
+                base_type = field_type[:-2]
+                items = value if isinstance(value, list) else []
+                item_hashes = b"".join(
+                    KeyManagerAgent._encode_eip712_value(item, base_type, types)
+                    for item in items
+                )
+                keccak = _get_keccak()
+                h = keccak.new(digest_bits=256)
+                h.update(item_hashes)
+                encoded += h.digest()
+            else:
+                encoded += KeyManagerAgent._encode_eip712_value(value, field_type, types)
+
+        return encoded
+
+    def sign_typed_data(self, account: str, domain: Dict[str, Any],
+                        types: Dict[str, List[Dict[str, str]]],
+                        message: Dict[str, Any], chain: str = "EVM") -> dict:
+        """Sign EIP-712 typed data. Returns signature (r, s, v)."""
+        self._check_session()
+        try:
+            privkey = self._get_private_key(account, chain)
+            keccak = _get_keccak()
+
+            # Determine primary type (the non-EIP712Domain struct).
+            primary_candidates = [t for t in types if t != "EIP712Domain"]
+            if not primary_candidates:
+                raise ValueError("No primary type found in types")
+            primary_type = primary_candidates[0]
+
+            # Domain separator: keccak256(encodeType(EIP712Domain) + encodeData(domain))
+            domain_type_str = self._encode_eip712_type("EIP712Domain", types)
+            domain_type_hash = keccak.new(digest_bits=256)
+            domain_type_hash.update(domain_type_str.encode("utf-8"))
+
+            domain_data = self._encode_eip712_data("EIP712Domain", domain, types)
+            domain_sep = keccak.new(digest_bits=256)
+            domain_sep.update(domain_type_hash.digest() + domain_data)
+            domain_sep = domain_sep.digest()
+
+            # Struct hash: keccak256(encodeType(primaryType) + encodeData(message))
+            primary_type_str = self._encode_eip712_type(primary_type, types)
+            primary_type_hash = keccak.new(digest_bits=256)
+            primary_type_hash.update(primary_type_str.encode("utf-8"))
+
+            message_data = self._encode_eip712_data(primary_type, message, types)
+            struct_hash = keccak.new(digest_bits=256)
+            struct_hash.update(primary_type_hash.digest() + message_data)
+            struct_hash = struct_hash.digest()
+
+            # Final digest
+            digest = keccak.new(digest_bits=256)
+            digest.update(b"\x19\x01" + domain_sep + struct_hash)
+            digest = digest.digest()
+
+            r, s, v = _ecdsa_sign(digest, int(privkey, 16), chain_id=1, eip1559=True)
+            return {"status": "ok", "result": {"r": hex(r), "s": hex(s), "v": v + 27}}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
     def handle_command(self, cmd: dict) -> dict:
         """Route a command dict to the appropriate handler."""
         action = cmd.get("cmd")
@@ -900,6 +1055,14 @@ class KeyManagerAgent:
             )
         elif action == "sign_message":
             return self.sign_message(cmd["account"], cmd["message"], cmd.get("chain", "EVM"))
+        elif action == "sign_typed_data":
+            return self.sign_typed_data(
+                account=cmd["account"],
+                domain=cmd["domain"],
+                types=cmd["types"],
+                message=cmd["message"],
+                chain=cmd.get("chain", "EVM"),
+            )
         elif action == "lock":
             self.unlocked = False
             self.vault_data = {}

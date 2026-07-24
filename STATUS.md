@@ -1,3 +1,39 @@
+## v5.1.2 - Vault Explore + Deposit + EVM Transfer + Balance Conversion (July 2026)
+
+### New Features
+- **Vault Explore**: "Explore Vaults" button on HL1 Vaults tab opens https://app.hyperliquid.xyz/vaults in browser for vault research
+- **Vault Deposit**: Paste a vault address, deposit USDC from HL1 spot balance via CoreWriter contract (0x333...3333) — signed locally by embedded agent, no browser wallet needed
+- **EVM ↔ HL1 Transfer Dialog**: Bridge assets between HyperEVM and HyperCore (HL1) Spot balances. EVM→HL1 via ERC-20 transfer to system address; HL1→EVM via spotSend L1 action. Separate module (evm_transfer_dialog.py)
+- **HyperEVM Balance Fiat Conversion**: WHYPE and UBTC now show USD/fiat conversion (pegged to HYPE and BTC respectively)
+- **Close Position Auto-Refresh**: After closing an LP position, the position cards automatically refresh after 3 seconds
+- **Chain Display Fix**: HyperEVM balances display as "HyperEVM" instead of "Hyperliquid_evm"
+- **EIP-712 Typed Data Signing**: New `sign_typed_data` command in key_manager_agent for EIP-712 structured data signing (used by HL1→EVM transfers)
+
+### New Files
+- `src/evm_transfer_dialog.py` — Self-contained EVM ↔ HL1 transfer dialog
+- `src/vault_deposit_dialog.py` — Self-contained vault deposit dialog
+
+### Files Changed
+- `src/gui_main_v5.py` — Close position refresh, EVM↔HL1 button, vault explore + deposit bar, chain display fix
+- `src/price_engine.py` — WHYPE→HYPE, UBTC→BTC pegged token mappings
+- `src/key_manager_agent.py` — `sign_typed_data` command for EIP-712 signing
+- `src/lp_liquidity_manager.py` — Additional liquidity management updates
+- `src/venue_adapters/hyperliquid_writer.py` — Writer updates
+- `build_gui_v5.py` — Version strings v5.1.2, new hidden imports
+- `README.md` — Updated for v5.1.2
+- `STATUS.md` — v5.1.2 changelog
+
+### Security
+- Vault deposits signed locally by embedded key_manager_agent — higher security than browser wallet
+- EVM transfers signed by agent — no private keys exposed
+- All new modules are self-contained dialogs — no changes to existing signing paths
+
+### Verification
+- All source files pass `python -m py_compile`
+- EXE build pending
+
+---
+
 ## v5.1.1 - Add/Remove Liquidity + Gas Fix + Fee Tracking (July 2026)
 
 ### New Features
@@ -213,7 +249,7 @@
 
 **Project Location:** `B:\Github\key_manager\`
 **Last Updated:** 2026-07-21
-**Current Version:** v5.1.1 (Add/Remove Liquidity + Gas Fix + Fee Tracking)
+**Current Version:** v5.1.2 (Vault Explore + Deposit + EVM Transfer + Balance Conversion)
 
 ## Versioning
 
@@ -226,6 +262,7 @@
 | v4.1 | Price Feeds + Wallet Balances + Go Online | `src/gui_main_v4.py`, `build_gui_v4.py`, `src/balance_engine.py`, `src/price_engine.py` |
 | v4.2 | Customizable RPC + Standard/Advanced Mode | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
 | v5.1.1 | Add/Remove Liquidity + Gas Fix + Fee Tracking | `src/lp_liquidity_manager.py`, `src/gui_main_v5.py`, `src/venue_adapters/hyperliquid_writer.py`, `build_gui_v5.py` |
+| v5.1.2 | Vault Explore + Deposit + EVM Transfer + Balance Conversion | `src/evm_transfer_dialog.py`, `src/vault_deposit_dialog.py`, `src/gui_main_v5.py`, `src/price_engine.py`, `src/key_manager_agent.py`, `build_gui_v5.py` |
 
 ## Architecture
 
@@ -258,7 +295,7 @@ key_manager/
 | LP Engine / Adapter | Working v5.1 | HyperEVM + L1 positions; fee reading via static `collect()` eth_call |
 | Hyperliquid Writer | Working v5.0 | Signs via agent on localhost:8842 |
 | GUI v5.1 Source | Working | Wallet / HL1 Vaults / LP Positions tabs |
-| GUI EXE | Working v5.1 | 45.14 MB, 15/07/2026 — all network features + collect/withdraw fees confirmed |
+| GUI EXE | Working v5.1.2 | Build pending — vault explore, deposit, EVM transfer, balance conversion |
 | CLI (script mode) | Working | `python src/main.py` (CLI EXE deprecated) |
 | Headless Agent | Working | HTTP signing server on localhost:8842 |
 

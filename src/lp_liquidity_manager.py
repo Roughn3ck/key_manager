@@ -115,6 +115,38 @@ class AddLiquidityDialog:
         ctk.CTkLabel(self.win, text=fee_text,
                      font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", padx=20)
 
+        # -- Position ratio indicator --
+        holdings = self.position.deposit_amounts or {}
+        tokens = list(holdings.keys()) if holdings else ["HYPE", "BTC"]
+        # Compute the position's current value ratio
+        # Use price_engine to convert to USD for accurate ratio
+        usd_values = {}
+        for sym, amt in holdings.items():
+            if amt and self.price_engine:
+                fiat = self.price_engine.convert_balance_to_fiat(
+                    amt, "HYPE" if sym in ("HYPE", "WHYPE") else "BTC", currency="usd"
+                )
+                usd_values[sym] = fiat or 0
+            else:
+                usd_values[sym] = 0
+        total_usd = sum(usd_values.values())
+        if total_usd > 0:
+            ratio_parts = []
+            for sym in tokens:
+                pct = (usd_values.get(sym, 0) / total_usd) * 100
+                ratio_parts.append(f"{pct:.0f}% {sym}")
+            ratio_text = "Position Ratio: " + " / ".join(ratio_parts)
+        else:
+            # Fallback to raw amounts if no price data
+            total_raw = sum(holdings.values())
+            if total_raw > 0:
+                ratio_parts = [f"{(holdings[s] / total_raw) * 100:.0f}% {sym}" for sym in tokens]
+                ratio_text = "Position Ratio: " + " / ".join(ratio_parts)
+            else:
+                ratio_text = "Position Ratio: N/A"
+        ctk.CTkLabel(self.win, text=ratio_text,
+                     font=ctk.CTkFont(size=10), text_color="gray60").pack(anchor="w", padx=20, pady=(2, 0))
+
         # -- Token input boxes --
         # Determine token0/token1 from position deposit_amounts
         # deposit_amounts is a dict like {"HYPE": 71.1058, "BTC": 0.00401725}
@@ -188,8 +220,8 @@ class AddLiquidityDialog:
         self.comp_label.pack(anchor="w")
 
         # Bind entry changes to update composition
-        for entry in self.token_entries.values():
-            entry.bind("<KeyRelease>", lambda e: self._update_composition())
+        for sym, entry in self.token_entries.items():
+            entry.bind("<KeyRelease>", lambda e, s=sym: self._on_entry_edit(s))
 
         # -- Auto-balance (Zap In) toggle --
         self.auto_balance_var = ctk.BooleanVar(value=False)
@@ -248,16 +280,103 @@ class AddLiquidityDialog:
             pass
         return 0.0
 
+    def _compute_paired_amount(self, filled_sym: str, filled_amount: float) -> Optional[float]:
+        """Given one token amount, compute the paired token amount based on position ratio.
+
+        Uses the position's current holdings to determine the ratio.
+        Returns the paired amount in human-readable units, or None if ratio can't be computed.
+        """
+        holdings = self.position.deposit_amounts or {}
+        if not holdings or len(holdings) < 2:
+            return None
+
+        tokens = list(holdings.keys())
+        # Find the other token
+        other_sym = None
+        for t in tokens:
+            if t != filled_sym:
+                other_sym = t
+                break
+        if other_sym is None:
+            return None
+
+        # Compute USD value ratio
+        filled_usd = 0
+        other_usd = 0
+        if self.price_engine:
+            filled_key = "HYPE" if filled_sym in ("HYPE", "WHYPE") else "BTC"
+            other_key = "HYPE" if other_sym in ("HYPE", "WHYPE") else "BTC"
+            filled_usd = self.price_engine.convert_balance_to_fiat(filled_amount, filled_key, currency="usd") or 0
+            other_holding = holdings.get(other_sym, 0)
+            other_usd = self.price_engine.convert_balance_to_fiat(other_holding, other_key, currency="usd") or 0
+            filled_holding = holdings.get(filled_sym, 0)
+            filled_holding_usd = self.price_engine.convert_balance_to_fiat(filled_holding, filled_key, currency="usd") or 0
+
+        if filled_usd <= 0 or other_usd <= 0 or filled_holding_usd <= 0:
+            return None
+
+        # Ratio: if position is 95% HYPE / 5% BTC
+        # User fills HYPE = X (USD value = X_usd)
+        # Required BTC USD value = X_usd * (other_pct / filled_pct)
+        # Required BTC amount = required_btc_usd / btc_price
+        total_usd = filled_holding_usd + other_usd
+        filled_pct = filled_holding_usd / total_usd  # e.g., 0.95
+        other_pct = other_usd / total_usd            # e.g., 0.05
+
+        required_other_usd = filled_usd * (other_pct / filled_pct)
+
+        # Convert back to token amount
+        other_key = "HYPE" if other_sym in ("HYPE", "WHYPE") else "BTC"
+        other_price = self.price_engine.get_price(other_key, "usd") if hasattr(self.price_engine, 'get_price') else None
+        if other_price and other_price > 0:
+            return required_other_usd / other_price
+        # Fallback: use the holding ratio directly
+        if filled_holding_usd > 0 and other_usd > 0:
+            ratio = holdings.get(other_sym, 0) / holdings.get(filled_sym, 1)
+            return filled_amount * ratio
+        return None
+
     def _fill_percent(self, symbol: str, pct: int):
-        """Fill entry with pct% of wallet balance."""
+        """Fill entry with pct% of wallet balance, then auto-fill the paired token."""
         balance = self._get_wallet_balance(symbol)
         amount = balance * pct / 100
         self.token_entries[symbol].delete(0, "end")
         self.token_entries[symbol].insert(0, f"{amount:.8f}".rstrip('0').rstrip('.'))
+
+        # Auto-calculate paired token amount based on position ratio
+        if not self.auto_balance_var.get():
+            paired_amount = self._compute_paired_amount(symbol, amount)
+            if paired_amount is not None and paired_amount > 0:
+                # Find the other token symbol
+                tokens = list(self.token_entries.keys())
+                other_sym = None
+                for t in tokens:
+                    if t != symbol:
+                        other_sym = t
+                        break
+                if other_sym:
+                    other_balance = self._get_wallet_balance(other_sym)
+                    self.token_entries[other_sym].delete(0, "end")
+                    if paired_amount <= other_balance:
+                        self.token_entries[other_sym].insert(0, f"{paired_amount:.8f}".rstrip('0').rstrip('.'))
+                        # Sufficient — reset text color
+                        self.token_entries[other_sym].configure(text_color="white")
+                    else:
+                        # Not enough balance — fill what we have and warn
+                        self.token_entries[other_sym].insert(0, f"{other_balance:.8f}".rstrip('0').rstrip('.'))
+                        # Mark the insufficient token entry in red
+                        self.token_entries[other_sym].configure(text_color="#ff6b6b")
+                        # Show warning
+                        self.comp_label.configure(
+                            text=f"\u26a0 Insufficient {other_sym} balance for full ratio. "
+                                 f"Need {paired_amount:.8f}, have {other_balance:.8f}. "
+                                 f"Toggle Auto-Balance (Zap In) to swap excess {symbol} \u2192 {other_sym}.",
+                            text_color="#ffd43b")
+
         self._update_composition()
 
     def _update_composition(self):
-        """Update the composition bar and total deposit as user types."""
+        """Update the composition bar, total deposit, and ratio match indicator."""
         tokens = list(self.token_entries.keys())
         amounts = []
         for sym in tokens:
@@ -268,16 +387,45 @@ class AddLiquidityDialog:
             amounts.append(val)
 
         total = sum(amounts)
+
+        # Compute entered ratio
         if total > 0:
-            # Update bar
             pct0 = amounts[0] / total
             self.comp_bar.set(pct0)
-            # Label
-            pct_text = f"{pct0*100:.0f}% {tokens[0]} / {(1-pct0)*100:.0f}% {tokens[1]}"
-            self.comp_label.configure(text=pct_text)
+            entered_text = f"{pct0*100:.0f}% {tokens[0]} / {(1-pct0)*100:.0f}% {tokens[1]}"
         else:
             self.comp_bar.set(0)
-            self.comp_label.configure(text="")
+            entered_text = ""
+
+        # Compute target ratio from position holdings (in USD)
+        holdings = self.position.deposit_amounts or {}
+        if holdings and self.price_engine:
+            usd_vals = {}
+            for sym, amt in holdings.items():
+                key = "HYPE" if sym in ("HYPE", "WHYPE") else "BTC"
+                usd_vals[sym] = self.price_engine.convert_balance_to_fiat(amt, key, currency="usd") or 0
+            total_holding_usd = sum(usd_vals.values())
+            if total_holding_usd > 0:
+                target_parts = []
+                for sym in tokens:
+                    pct = (usd_vals.get(sym, 0) / total_holding_usd) * 100
+                    target_parts.append(f"{pct:.0f}% {sym}")
+                target_text = " / ".join(target_parts)
+            else:
+                target_text = "N/A"
+        else:
+            target_text = "N/A"
+
+        # Combined label: show entered ratio + target ratio
+        if total > 0 and target_text != "N/A":
+            match = "\u2713" if self._ratios_match(amounts, holdings) else "\u26a0"
+            self.comp_label.configure(
+                text=f"Entered: {entered_text}  {match}  Target: {target_text}",
+                text_color="gray60")
+        elif total > 0:
+            self.comp_label.configure(text=entered_text, text_color="gray60")
+        else:
+            self.comp_label.configure(text=f"Target: {target_text}", text_color="gray50")
 
         # Update total deposit in USD
         usd_total = 0.0
@@ -299,6 +447,53 @@ class AddLiquidityDialog:
         else:
             self.submit_btn.configure(state="disabled",
                                        text="ENTER AMOUNT")
+
+    def _ratios_match(self, amounts, holdings, tolerance=0.05):
+        """Check if entered amounts roughly match the position's holding ratio.
+
+        tolerance: 5% deviation allowed (user doesn't need exact match).
+        """
+        if len(amounts) < 2 or not holdings or len(holdings) < 2:
+            return True  # Don't warn if we can't compute
+
+        tokens = list(self.token_entries.keys())
+        # Compute USD values of entered amounts
+        entered_usd = []
+        for sym, amt in zip(tokens, amounts):
+            if amt <= 0:
+                return False
+            key = "HYPE" if sym in ("HYPE", "WHYPE") else "BTC"
+            usd = self.price_engine.convert_balance_to_fiat(amt, key, currency="usd") or 0
+            entered_usd.append(usd)
+
+        total_entered = sum(entered_usd)
+        if total_entered <= 0:
+            return True
+
+        # Compute holding USD values
+        holding_usd = []
+        for sym in tokens:
+            amt = holdings.get(sym, 0)
+            key = "HYPE" if sym in ("HYPE", "WHYPE") else "BTC"
+            usd = self.price_engine.convert_balance_to_fiat(amt, key, currency="usd") or 0
+            holding_usd.append(usd)
+
+        total_holding = sum(holding_usd)
+        if total_holding <= 0:
+            return True
+
+        # Compare ratios
+        for i in range(len(entered_usd)):
+            entered_pct = entered_usd[i] / total_entered
+            holding_pct = holding_usd[i] / total_holding
+            if abs(entered_pct - holding_pct) > tolerance:
+                return False
+        return True
+
+    def _on_entry_edit(self, sym):
+        """Reset warning state when user manually edits an entry."""
+        self.token_entries[sym].configure(text_color="white")
+        self._update_composition()
 
     def _on_auto_balance_toggle(self):
         """When auto-balance is toggled, update UI hints."""

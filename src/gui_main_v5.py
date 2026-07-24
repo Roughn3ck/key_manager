@@ -2,7 +2,7 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.1.1 (July 2026) - LP Liquidity Manager + Gas Price Fix + Fee Tracking
+Version: v5.1.2 (July 2026) - Vault Explore + Deposit + EVM Transfer + Balance Conversion
 """
 import sys
 import os
@@ -409,7 +409,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v5.1.1 - ColdStack | Add/Remove Liquidity + Gas Fix + Fee Tracking",
+            text="v5.1.2 - ColdStack | Vault Explore + Deposit + EVM Transfer",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )
@@ -941,7 +941,7 @@ class ColdStackGUI:
                 release_url = data.get("html_url", "https://github.com/Roughn3ck/key_manager/releases")
                 release_name = data.get("name", "Latest Release")
 
-                current_version = "5.1"
+                current_version = "5.1.2"
                 latest_version = latest_tag.lstrip("v")
 
                 # Simple version comparison (handles major.minor[.patch])
@@ -1269,6 +1269,33 @@ class ColdStackGUI:
             hover_color=("#c82333", "#a71d2a")
         )
         delete_btn.pack(pady=2)
+
+        # EVM ↔ HL1 transfer button (only for Hyperliquid addresses)
+        chain_str = (address_data.get("chain", "") + " " + address_data.get("coin", "")).lower()
+        if "hype" in chain_str or "hyperliquid" in chain_str:
+            ctk.CTkButton(
+                button_frame,
+                text="EVM \u2194 HL1",
+                width=80, height=28,
+                font=ctk.CTkFont(size=10),
+                fg_color=("#0d6efd", "#0b5ed7"),
+                command=lambda addr=address_data["address"], acct=account_name: self._open_evm_transfer(addr, acct)
+            ).pack(pady=2)
+
+    def _get_agent_url(self) -> str:
+        """Return the key_manager_agent HTTP endpoint."""
+        return "http://127.0.0.1:8842"
+
+    def _open_evm_transfer(self, wallet_address, account_name):
+        """Open the EVM ↔ HL1 transfer dialog."""
+        from evm_transfer_dialog import EVMTransferDialog
+        EVMTransferDialog(
+            root=self.root,
+            agent_url=self._get_agent_url(),
+            account_name=account_name,
+            wallet_address=wallet_address,
+            show_notification=self.show_notification,
+        )
 
     def confirm_delete_address(self, account_name, addr_index):
         """Show a confirmation dialog before deleting an address."""
@@ -3434,6 +3461,10 @@ class ColdStackGUI:
                         # Use "HL1" for Hyperliquid L1 spot balances
                         if chain_name == "hyperliquid_l1":
                             chain_display = "HL1"
+                        elif chain_name == "hyperliquid_evm":
+                            chain_display = "HyperEVM"
+                        elif chain_name == "hyperliquid":
+                            chain_display = "HyperEVM"
                         else:
                             chain_display = chain_name.capitalize() if chain_name else ""
 
@@ -3522,6 +3553,10 @@ class ColdStackGUI:
                 # Use "HL1" for Hyperliquid L1 spot balances
                 if chain_name == "hyperliquid_l1":
                     chain_display = "HL1"
+                elif chain_name == "hyperliquid_evm":
+                    chain_display = "HyperEVM"
+                elif chain_name == "hyperliquid":
+                    chain_display = "HyperEVM"
                 else:
                     chain_display = chain_name.capitalize() if chain_name else ""
 
@@ -5469,7 +5504,9 @@ class ColdStackGUI:
                 tx_hashes = writer.close_position(position.position_id, account_name)
                 if tx_hashes:
                     self.root.after(0, lambda: self.show_notification(
-                        f"Position closed. {len(tx_hashes)} TXs submitted. First: {tx_hashes[0][:20]}..."))
+                        f"Position closed. {len(tx_hashes)} TXs submitted. Refreshing positions..."))
+                    time.sleep(3)
+                    self.root.after(0, lambda: self._lp_do_fetch())
                 else:
                     self.root.after(0, lambda: self.show_notification(
                         "Close position: no transactions submitted", error=True))
@@ -5538,6 +5575,14 @@ class ColdStackGUI:
         vault_refresh_btn.pack(side="right")
         self._vault_widgets["refresh_btn"] = vault_refresh_btn
 
+        ctk.CTkButton(
+            header_frame, text="Explore Vaults", width=120, height=28,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=("#6f42c1", "#5a32a3"),
+            hover_color=("#5a32a3", "#42288a"),
+            command=self._vault_explore,
+        ).pack(side="right", padx=(5, 0))
+
         # Wallet selector bar: Address or Account mode
         wallet_bar = ctk.CTkFrame(section, fg_color="transparent")
         wallet_bar.pack(fill="x", padx=10, pady=(2, 5))
@@ -5572,6 +5617,25 @@ class ColdStackGUI:
 
         # Pack the appropriate widget based on current mode
         self._vault_apply_selector_mode()
+
+        # Deposit to Vault bar
+        deposit_bar = ctk.CTkFrame(section, fg_color="transparent")
+        deposit_bar.pack(fill="x", padx=10, pady=(2, 5))
+
+        self._vault_widgets["vault_addr_entry"] = ctk.CTkEntry(
+            deposit_bar, width=320,
+            placeholder_text="Paste vault address (0x...)",
+            font=ctk.CTkFont(size=11),
+        )
+
+        ctk.CTkButton(
+            deposit_bar, text="Deposit to Vault", width=130, height=28,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=("#20c997", "#1aa179"),
+            hover_color=("#1aa179", "#158f63"),
+            command=self._vault_deposit_dialog,
+        ).pack(side="right")
+        self._vault_widgets["vault_addr_entry"].pack(side="left", fill="x", expand=True, padx=(0, 5))
 
         # Offline banner
         self._vault_widgets["offline_banner"] = ctk.CTkLabel(
@@ -5685,6 +5749,78 @@ class ColdStackGUI:
             chain = addr.get("chain", "").lower()
             if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
                 return addr.get("address", "")
+        return ""
+
+    def _vault_explore(self):
+        """Open the Hyperliquid vaults page in the user's default browser."""
+        import webbrowser
+        webbrowser.open("https://app.hyperliquid.xyz/vaults")
+
+    def _vault_deposit_dialog(self):
+        """Open a deposit dialog for the vault address in the entry."""
+        if not self.online_mode:
+            self.show_notification("Offline - enable Online Mode in Settings", error=True)
+            return
+        entry = self._vault_widgets.get("vault_addr_entry")
+        if not entry:
+            return
+        vault_address = entry.get().strip()
+        if not vault_address or not vault_address.startswith("0x") or len(vault_address) != 42:
+            self.show_notification("Enter a valid vault address (0x...)", error=True)
+            return
+        # Resolve the current wallet address and account name
+        wallet_address = self._vault_get_current_wallet_address()
+        if not wallet_address:
+            self.show_notification("Select or enter a wallet address first", error=True)
+            return
+        account_name = self._vault_get_current_account_name()
+        if not account_name:
+            self.show_notification("Could not resolve vault account for this address", error=True)
+            return
+        # Open the deposit dialog
+        from vault_deposit_dialog import VaultDepositDialog
+        VaultDepositDialog(
+            root=self.root,
+            agent_url=self._get_agent_url(),
+            account_name=account_name,
+            wallet_address=wallet_address,
+            vault_address=vault_address,
+            show_notification=self.show_notification,
+        )
+
+    def _vault_get_current_wallet_address(self):
+        """Get the wallet address currently shown in the vault tab."""
+        entry = self._vault_widgets.get("address_entry")
+        if entry:
+            addr = entry.get().strip()
+            if addr:
+                return addr
+        # Try resolving from account dropdown
+        selector = self._vault_widgets.get("selector_menu")
+        if selector and selector.get() == "Account":
+            account_menu = self._vault_widgets.get("account_menu")
+            if account_menu:
+                acct = account_menu.get()
+                if acct and acct != "(no accounts)":
+                    return self._vault_resolve_account_address(acct)
+        return ""
+
+    def _vault_get_current_account_name(self):
+        """Get the vault account name for the current wallet."""
+        selector = self._vault_widgets.get("selector_menu")
+        if selector and selector.get() == "Account":
+            account_menu = self._vault_widgets.get("account_menu")
+            if account_menu:
+                acct = account_menu.get()
+                if acct and acct != "(no accounts)":
+                    return acct
+        # Try to find account name from address
+        addr = self._vault_get_current_wallet_address()
+        if addr and self.key_manager:
+            for acct_name, acct_data in self.key_manager.address_db.get("accounts", {}).items():
+                for a in acct_data.get("addresses", []):
+                    if a.get("address", "").lower() == addr.lower():
+                        return acct_name
         return ""
 
     def _vault_restore_state(self):
