@@ -38,7 +38,16 @@ TOKEN_DECIMALS = {
     "UBTC": 8,
 }
 
+# WHYPE is the ERC-20 wrapped HYPE on HyperEVM.
+# Users hold HYPE as WHYPE on HyperEVM; native gas HYPE is just for gas.
+# For balance display and transfers, "HYPE" on the EVM side maps to WHYPE.
+WHYPE_EVM = "0x5555555555555555555555555555555555555555"
+
+# ERC-20 withdraw selector (WHYPE.withdraw(uint256) — unwrap WHYPE to native HYPE)
+SELECTOR_WITHDRAW = "0x2e1a7d4d"
+
 EVM_TOKEN_ADDRESSES = {
+    "HYPE": WHYPE_EVM,  # HYPE on HyperEVM is held as WHYPE (ERC-20)
     "USDC": USDC_EVM,
     "UBTC": UBTC_EVM,
 }
@@ -366,16 +375,9 @@ class EVMTransferDialog:
         def _do_fetch():
             try:
                 balances = {}
-                # EVM balances
-                try:
-                    result = _rpc_call(HYPEREVM_RPC, "eth_getBalance", [self.wallet_address, "latest"])
-                    if result and "result" in result:
-                        wei = int(result["result"], 16)
-                        balances["evm_HYPE"] = wei / 1e18
-                except Exception as e:
-                    balances["evm_HYPE"] = None
-                    print(f"[evm_transfer] EVM HYPE balance error: {e}")
-
+                # EVM balances — all assets are ERC-20 tokens on HyperEVM.
+                # HYPE on HyperEVM is held as WHYPE (wrapped), not native gas.
+                # Native gas HYPE is only used for paying gas fees.
                 for symbol, contract in EVM_TOKEN_ADDRESSES.items():
                     try:
                         padded = _pad_address(self.wallet_address)[2:]
@@ -402,12 +404,15 @@ class EVMTransferDialog:
                         coin = b.get("coin", "")
                         total = b.get("total", "0")
                         hold = b.get("hold", "0")
-                        if coin in TOKEN_DECIMALS:
-                            try:
-                                available = float(total) - float(hold)
+                        # Store all HL1 spot balances; the asset dropdown
+                        # shows supported ones (HYPE, USDC, UBTC) and the
+                        # MAX label looks up by coin name.
+                        try:
+                            available = float(total) - float(hold)
+                            if available > 0:
                                 balances[f"hl1_{coin}"] = available
-                            except (ValueError, TypeError):
-                                balances[f"hl1_{coin}"] = None
+                        except (ValueError, TypeError):
+                            pass
                 except Exception as e:
                     print(f"[evm_transfer] HL1 balance error: {e}")
 
@@ -461,11 +466,56 @@ class EVMTransferDialog:
                 daemon=True,
             ).start()
 
+    def _wait_for_tx(self, tx_hash: str, timeout: int = 120):
+        """Wait for a transaction to be mined by polling for its receipt."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            try:
+                result = _rpc_call(HYPEREVM_RPC, "eth_getTransactionReceipt", [tx_hash])
+                if result and isinstance(result, dict) and result.get("status"):
+                    if result["status"] == "0x1":
+                        return result
+                    elif result["status"] == "0x0":
+                        raise RuntimeError(f"Transaction {tx_hash[:20]}... reverted")
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+            time.sleep(2.0)
+        return None
+
     def _do_evm_to_hl1(self, asset: str, amount_str: str):
-        """Execute an EVM → HL1 transfer via the agent."""
+        """Execute an EVM → HL1 transfer via the agent.
+
+        For HYPE: unwrap WHYPE → native HYPE, then send to 0x222...2222.
+        For USDC/UBTC: ERC-20 transfer to the token's system address.
+        """
         try:
             if asset == "HYPE":
+                # HYPE on HyperEVM is held as WHYPE (ERC-20).
+                # 1. Unwrap WHYPE → native HYPE (WHYPE.withdraw(amount))
+                # 2. Send native HYPE to 0x222...2222 (bridge to HL1)
                 amount_wei = _to_wei(amount_str, 18)
+
+                # Step 1: Unwrap WHYPE
+                withdraw_data = "0x" + SELECTOR_WITHDRAW + _pad_uint256(amount_wei)[2:]
+                unwrap_result = _agent_call(
+                    self.agent_url,
+                    "broadcast_tx",
+                    account=self.account_name,
+                    to=WHYPE_EVM,
+                    data=withdraw_data,
+                    value="0x0",
+                    chain_id=999,
+                    rpc=HYPEREVM_RPC,
+                )
+                unwrap_tx = unwrap_result.get("tx_hash", "")
+                self._set_status(f"WHYPE unwrapped. Bridging to HL1...", "gray60")
+
+                # Wait for unwrap tx to be mined before sending native HYPE
+                self._wait_for_tx(unwrap_tx, timeout=60)
+
+                # Step 2: Send native HYPE to the bridge address
                 result = _agent_call(
                     self.agent_url,
                     "broadcast_tx",
