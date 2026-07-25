@@ -2,7 +2,7 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.1.2 (July 2026) - Vault Explore + Deposit + EVM Transfer + Balance Conversion
+Version: v5.1.3 (July 2026) - Swap Module + Wallet Card Redesign
 """
 import sys
 import os
@@ -409,7 +409,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v5.1.2 - ColdStack | Vault Explore + Deposit + EVM Transfer",
+            text="v5.1.3 - ColdStack | Swap Module + Wallet Card Redesign",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )
@@ -941,7 +941,7 @@ class ColdStackGUI:
                 release_url = data.get("html_url", "https://github.com/Roughn3ck/key_manager/releases")
                 release_name = data.get("name", "Latest Release")
 
-                current_version = "5.1.2"
+                current_version = "5.1.3"
                 latest_version = latest_tag.lstrip("v")
 
                 # Simple version comparison (handles major.minor[.patch])
@@ -1198,14 +1198,30 @@ class ColdStackGUI:
         )
         line1_label.pack(anchor="w")
 
-        # Line 2: Address
+        # Line 2: Address with inline copy icon
+        address_row = ctk.CTkFrame(info_frame, fg_color="transparent")
+        address_row.pack(anchor="w", pady=(2, 0))
+
         address_label = ctk.CTkLabel(
-            info_frame,
+            address_row,
             text=address_data.get("address", ""),
             font=ctk.CTkFont(size=11),
             wraplength=400
         )
-        address_label.pack(anchor="w", pady=(2, 0))
+        address_label.pack(side="left")
+
+        copy_icon = ctk.CTkLabel(
+            address_row,
+            text="\u2398",  # ⧉ copy icon
+            font=ctk.CTkFont(size=12),
+            text_color="gray60",
+            cursor="hand2",
+            width=20,
+        )
+        copy_icon.pack(side="left", padx=(4, 0))
+        copy_icon.bind("<Button-1>", lambda e, a=address_data["address"]: self.copy_to_clipboard(a))
+        copy_icon.bind("<Enter>", lambda e: copy_icon.configure(text_color="gray80"))
+        copy_icon.bind("<Leave>", lambda e: copy_icon.configure(text_color="gray60"))
 
         # Line 3: Balance (hidden by default, shown after fetch)
         balance_label = ctk.CTkLabel(
@@ -1231,9 +1247,17 @@ class ColdStackGUI:
             )
             notes_label.pack(anchor="w", pady=(2, 0))
 
-        # Buttons: Check Balance | Copy | Delete
+        # Buttons: Check Balance | Swap | Remove
         button_frame = ctk.CTkFrame(card, fg_color="transparent")
         button_frame.pack(side="right", padx=10, pady=6)
+
+        chain = address_data.get("chain", "")
+        coin = address_data.get("coin", "")
+        chain_str_check = (chain + " " + coin).lower()
+        balance_supported = is_balance_supported(chain) or is_balance_supported(coin) or is_balance_supported(chain + " " + coin)
+        swap_supported = ("hype" in chain_str_check or "hyperliquid" in chain_str_check or
+                          "evm" in chain_str_check or "btc" in chain_str_check or
+                          "eth" in chain_str_check or "sol" in chain_str_check)
 
         check_btn = ctk.CTkButton(
             button_frame,
@@ -1241,72 +1265,63 @@ class ColdStackGUI:
             command=lambda a=address_data, l=balance_label: self.check_single_balance(a, l),
             width=100,
             height=28,
-            font=ctk.CTkFont(size=11)
+            font=ctk.CTkFont(size=11),
+            fg_color=("#2b6cb0", "#2c5282"),
+            hover_color=("#3182ce", "#4299e1")
         )
-        chain = address_data.get("chain", "")
-        coin = address_data.get("coin", "")
-        balance_supported = is_balance_supported(chain) or is_balance_supported(coin) or is_balance_supported(chain + " " + coin)
         if not self.online_mode or not balance_supported:
             check_btn.configure(state="disabled")
         check_btn.pack(pady=2)
 
-        copy_btn = ctk.CTkButton(
-            button_frame,
-            text="Copy",
-            command=lambda a=address_data["address"]: self.copy_to_clipboard(a),
-            width=80,
-            height=28
-        )
-        copy_btn.pack(pady=2)
+        if swap_supported and self.online_mode:
+            ctk.CTkButton(
+                button_frame,
+                text="Swap",
+                width=100,
+                height=28,
+                font=ctk.CTkFont(size=11),
+                fg_color=("#6b46c1", "#553c9a"),
+                hover_color=("#805ad5", "#6b46c1"),
+                command=lambda addr=address_data["address"], acct=account_name: self._open_swap_dialog(addr, acct)
+            ).pack(pady=2)
 
         delete_btn = ctk.CTkButton(
             button_frame,
-            text="Delete",
+            text="Remove",
             command=lambda idx=addr_index, acct=account_name: self.confirm_delete_address(acct, idx),
-            width=80,
+            width=100,
             height=28,
-            fg_color=("#dc3545", "#c82333"),
-            hover_color=("#c82333", "#a71d2a")
+            fg_color=("#c53030", "#9b2c2c"),
+            hover_color=("#e53e3e", "#c53030")
         )
         delete_btn.pack(pady=2)
-
-        # EVM ↔ HL1 transfer button (only for Hyperliquid addresses)
-        chain_str = (address_data.get("chain", "") + " " + address_data.get("coin", "")).lower()
-        if "hype" in chain_str or "hyperliquid" in chain_str:
-            ctk.CTkButton(
-                button_frame,
-                text="EVM \u2194 HL1",
-                width=80, height=28,
-                font=ctk.CTkFont(size=10),
-                fg_color=("#0d6efd", "#0b5ed7"),
-                command=lambda addr=address_data["address"], acct=account_name: self._open_evm_transfer(addr, acct)
-            ).pack(pady=2)
 
     def _get_agent_url(self) -> str:
         """Return the key_manager_agent HTTP endpoint."""
         return "http://127.0.0.1:8842"
 
-    def _open_evm_transfer(self, wallet_address, account_name):
-        """Open the EVM ↔ HL1 transfer dialog."""
-        from evm_transfer_dialog import EVMTransferDialog
-        EVMTransferDialog(
+    def _open_swap_dialog(self, wallet_address, account_name):
+        """Open the swap dialog."""
+        from swap_dialog import SwapDialog
+        SwapDialog(
             root=self.root,
             agent_url=self._get_agent_url(),
             account_name=account_name,
             wallet_address=wallet_address,
             show_notification=self.show_notification,
+            price_engine=self.price_engine,
         )
 
     def confirm_delete_address(self, account_name, addr_index):
-        """Show a confirmation dialog before deleting an address."""
+        """Show a confirmation dialog before removing an address."""
         dialog = ctk.CTkToplevel(self.root)
-        dialog.title("Delete Address")
+        dialog.title("Remove Address")
         dialog.geometry("400x180")
         dialog.transient(self.root)
         dialog.grab_set()
         self._center_dialog(dialog)
 
-        ctk.CTkLabel(dialog, text="Delete this address?",
+        ctk.CTkLabel(dialog, text="Remove this address?",
                      font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
         ctk.CTkLabel(dialog, text="This action cannot be undone.",
                      font=ctk.CTkFont(size=12), text_color="orange").pack(pady=(0, 10))
@@ -1314,14 +1329,14 @@ class ColdStackGUI:
         def do_delete():
             try:
                 if self.key_manager.delete_address(account_name, addr_index, self.current_password):
-                    self.show_notification("Address deleted")
+                    self.show_notification("Address removed")
                     dialog.destroy()
                     self.refresh_left_panel()
                     # Refresh the current view if still viewing this account
                     if self.current_account == account_name:
                         self.select_account(self.current_pool or "Unassigned", account_name)
                 else:
-                    self.show_notification("Failed to delete address", error=True)
+                    self.show_notification("Failed to remove address", error=True)
                     dialog.destroy()
             except Exception as e:
                 self.show_notification(f"Error: {e}", error=True)
@@ -1329,8 +1344,9 @@ class ColdStackGUI:
 
         btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
         btn_frame.pack(pady=15)
-        ctk.CTkButton(btn_frame, text="Delete", command=do_delete, width=100,
-                      fg_color=("#dc3545", "#c82333")).pack(side="left", padx=10)
+        ctk.CTkButton(btn_frame, text="Remove", command=do_delete, width=100,
+                      fg_color=("#c53030", "#9b2c2c"),
+                      hover_color=("#e53e3e", "#c53030")).pack(side="left", padx=10)
         ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy, width=100,
                       fg_color="gray30").pack(side="left", padx=10)
 

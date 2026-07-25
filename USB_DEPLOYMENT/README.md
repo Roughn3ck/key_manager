@@ -4,7 +4,7 @@
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production-success)]()
 
-**Latest release: [v5.1.2 — Vault Explore + Deposit + EVM Transfer + Balance Conversion](https://github.com/Roughn3ck/key_manager/releases/tag/v5.1.2)**
+**Latest release: [v5.1.3 — Swap Module + Wallet Card Redesign](https://github.com/Roughn3ck/key_manager/releases/tag/v5.1.3)**
 
 ---
 
@@ -99,7 +99,7 @@ python3 src/key_manager_agent.py --vault key_vault.encrypted --serve --port 8842
 
 ColdStack speaks Uniswap V3 concentrated liquidity on HyperEVM. It reads and writes to the Project X PositionManager and SwapRouter contracts directly.
 
-### What works today (v5.1.2)
+### What works today (v5.1.3)
 
 | Operation | Status |
 |-----------|--------|

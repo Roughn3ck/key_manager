@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PyInstaller build script for ColdStack GUI v5.1.2.
+PyInstaller build script for ColdStack GUI v5.1.3.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v5.1.2 (July 2026) - Vault Explore + Deposit + EVM Transfer + Balance Conversion
+Version: v5.1.3 (July 2026) - Swap Module + Wallet Card Redesign
 Builds: src/gui_main_v5.py
 Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
 
@@ -12,7 +12,7 @@ Changes from build_gui_v4.py:
   2. New hidden imports: lp_engine, venue_adapters, venue_adapters.hyperliquid_adapter,
      venue_adapters.venue_writer, venue_adapters.hyperliquid_writer, price_engine
   3. Backup previous EXE as coldstack_v4_2.exe (fixes known backup naming issue)
-  4. Version strings updated to v5.1.2
+  4. Version strings updated to v5.1.3
 
 WARNING: After ANY source change, rebuild: python build_gui_v5.py
 """
@@ -34,7 +34,7 @@ def clean_build_dirs():
 
 def build_gui_exe():
     """Run PyInstaller to build the ColdStack v5.1.2 EXE."""
-    print("Building ColdStack v5.1.2 executable...")
+    print("Building ColdStack v5.1.3 executable...")
 
     project_dir = Path(__file__).parent.resolve()
 
@@ -91,6 +91,8 @@ def build_gui_exe():
         # --- v5.1.2 EVM Transfer + Vault Deposit dialogs ---
         '--hidden-import=evm_transfer_dialog',
         '--hidden-import=vault_deposit_dialog',
+        # --- v5.1.3 Swap dialog ---
+        '--hidden-import=swap_dialog',
         # --- v5.1 LP Engine hidden imports ---
         '--hidden-import=lp_engine',
         '--hidden-import=price_engine',
@@ -164,7 +166,7 @@ def copy_to_usb_deployment():
         # Backup the previous production EXE using the version it was built from.
         # Bump this string whenever the shipped version changes so the backup name
         # matches the last stable build.
-        PREVIOUS_VERSION_TAG = "v5_1_1"  # v5.1.1 is the previous production build
+        PREVIOUS_VERSION_TAG = "v5_1_2"  # v5.1.2 is the previous production build
         backup_path = backups_dir / f'coldstack_{PREVIOUS_VERSION_TAG}.exe'
         print(f"Backing up previous EXE to {backup_path}...")
         shutil.copy2(target_path, backup_path)
@@ -187,7 +189,7 @@ echo ========================================
 echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting ColdStack v5.1.2...
+echo Starting ColdStack v5.1.3...
 echo.
 coldstack.exe
 pause
@@ -246,8 +248,8 @@ def main():
     print(f"Working directory: {os.getcwd()}")
 
     print("=" * 60)
-    print("ColdStack v5.1.2 - Portable EXE Builder")
-    print("Vault Explore + Deposit + EVM Transfer + Balance Conversion")
+    print("ColdStack v5.1.3 - Portable EXE Builder")
+    print("Swap Module + Wallet Card Redesign")
     print("=" * 60)
 
     if not check_dependencies():

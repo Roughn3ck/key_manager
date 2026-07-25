@@ -1,3 +1,35 @@
+## v5.1.3 - Swap Module + Wallet Card Redesign (July 2026)
+
+### New Features
+- **Swap Dialog**: New `src/swap_dialog.py` module for token swaps on HyperEVM
+  - Swap between HYPE, WHYPE, USDC, UBTC via Uniswap V3 SwapRouter
+  - Wrap/unwrap WHYPE ↔ HYPE natively
+  - Auto pool selection (prefers lowest fee tier)
+  - Price quote from pool slot0
+  - Slippage protection (default 1%, configurable)
+  - Gas estimate display
+  - Bridge tab: EVM ↔ HL1 transfers (reuses evm_transfer_dialog logic)
+- **Wallet Card Redesign**:
+  - Copy moved to inline icon (⧉) next to address text
+  - "Delete" renamed to "Remove"
+  - "EVM ↔ HL1" button removed from address cards (moved into Swap dialog Bridge tab)
+  - New "Swap" button on supported chains
+  - Uniform button widths (all 100px)
+  - Improved hover states and colors
+- **Unwrap WHYPE**: Part of the swap module — swap WHYPE → HYPE calls WHYPE.withdraw()
+
+### New Files
+- `src/swap_dialog.py` — Self-contained swap dialog module
+
+### Files Changed
+- `src/gui_main_v5.py` — Address card redesign, swap button, removed EVM↔HL1 button
+- `build_gui_v5.py` — Version strings v5.1.3, swap_dialog hidden import
+- `README.md` — Updated for v5.1.3
+- `STATUS.md` — v5.1.3 changelog
+- `.clinerules` — Version update
+
+---
+
 ## v5.1.2 - Vault Explore + Deposit + EVM Transfer + Balance Conversion (July 2026)
 
 ### New Features
@@ -248,8 +280,8 @@
 - CLI commands: `derive-address`, `generate-mnemonic`, `validate-mnemonic`
 
 **Project Location:** `B:\Github\key_manager\`
-**Last Updated:** 2026-07-21
-**Current Version:** v5.1.2 (Vault Explore + Deposit + EVM Transfer + Balance Conversion)
+**Last Updated:** 2026-07-25
+**Current Version:** v5.1.3 (Swap Module + Wallet Card Redesign)
 
 ## Versioning
 
@@ -263,6 +295,7 @@
 | v4.2 | Customizable RPC + Standard/Advanced Mode | `src/rpc_config.py`, `rpc_endpoints.json`, `src/balance_engine.py` (updated), `src/gui_main_v4.py` (updated) |
 | v5.1.1 | Add/Remove Liquidity + Gas Fix + Fee Tracking | `src/lp_liquidity_manager.py`, `src/gui_main_v5.py`, `src/venue_adapters/hyperliquid_writer.py`, `build_gui_v5.py` |
 | v5.1.2 | Vault Explore + Deposit + EVM Transfer + Balance Conversion | `src/evm_transfer_dialog.py`, `src/vault_deposit_dialog.py`, `src/gui_main_v5.py`, `src/price_engine.py`, `src/key_manager_agent.py`, `build_gui_v5.py` |
+| v5.1.3 | Swap Module + Wallet Card Redesign | `src/swap_dialog.py`, `src/gui_main_v5.py`, `build_gui_v5.py` |
 
 ## Architecture
 
@@ -295,12 +328,12 @@ key_manager/
 | LP Engine / Adapter | Working v5.1 | HyperEVM + L1 positions; fee reading via static `collect()` eth_call |
 | Hyperliquid Writer | Working v5.0 | Signs via agent on localhost:8842 |
 | GUI v5.1 Source | Working | Wallet / HL1 Vaults / LP Positions tabs |
-| GUI EXE | Working v5.1.2 | Build pending — vault explore, deposit, EVM transfer, balance conversion |
+| GUI EXE | Working v5.1.3 | Swap module + wallet card redesign build complete |
 | CLI (script mode) | Working | `python src/main.py` (CLI EXE deprecated) |
 | Headless Agent | Working | HTTP signing server on localhost:8842 |
 
 ---
-*Status report updated July 15, 2026. v5.1 build refreshed — LP Scan Wallet / auto-detect / saved-pools / card-reformat / withdraw-fees fixes included, full HTTPS/SSL stack bundled, all network features working.*
+*Status report updated July 25, 2026. v5.1.3 build refreshed — swap dialog, wallet card redesign, full HTTPS/SSL stack bundled, all network features working.*
 
 ## v5.1 LP Fee Issue (Resolved July 8, 2026)
 
