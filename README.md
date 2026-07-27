@@ -4,7 +4,7 @@
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production-success)]()
 
-**Latest release: [v5.1.3 — Swap Module + Wallet Card Redesign](https://github.com/Roughn3ck/key_manager/releases/tag/v5.1.3)**
+**Latest release: [v5.1.4 — gui_main_v5.py Carve-Off (Pre-v5.2 Refactor)](https://github.com/Roughn3ck/key_manager/releases/tag/v5.1.4)**
 
 ---
 
@@ -99,7 +99,7 @@ python3 src/key_manager_agent.py --vault key_vault.encrypted --serve --port 8842
 
 ColdStack speaks Uniswap V3 concentrated liquidity on HyperEVM. It reads and writes to the Project X PositionManager and SwapRouter contracts directly.
 
-### What works today (v5.1.3)
+### What works today (v5.1.4)
 
 | Operation | Status |
 |-----------|--------|
@@ -199,10 +199,16 @@ python src/main.py derive-address --account "G5" --chain "EVM" --index 0
 
 ```
 src/
-  gui_main_v5.py              Main GUI (6K+ lines)
+  gui_main_v5.py              Main GUI (~2,600 lines, core wallet only)
+  settings_dialog.py          Settings dialog (online/currency/RPC/API keys)
+  account_dialogs.py          Account management dialogs
+  lp_tab.py                   LP Positions tab
+  vault_tab.py                HL1 Vaults tab
+  chain_options.py            Shared chain option constants
   lp_liquidity_manager.py     Add/Remove/Edit liquidity dialogs
   evm_transfer_dialog.py      EVM ↔ HL1 transfer dialog
   vault_deposit_dialog.py     Vault deposit dialog
+  swap_dialog.py              Token swap dialog
   key_manager_agent.py        Embedded signing agent
   vault_tracker.py            Hyperliquid vault positions
   lp_engine.py                LP position aggregation

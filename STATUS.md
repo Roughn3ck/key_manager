@@ -1,3 +1,29 @@
+## v5.1.4 - gui_main_v5.py Carve-Off (Pre-v5.2 Refactor) (July 2026)
+
+### Summary
+Pure refactor: no functional changes. The monolithic `src/gui_main_v5.py` (6,424 lines) was carved into four independent modules, leaving the core wallet GUI at **2,602 lines**.
+
+### New Modules
+- `src/settings_dialog.py` — Settings dialog (Go Online, currency, Standard/Advanced mode, RPC endpoints, API keys)
+- `src/account_dialogs.py` — Account management dialogs (add/delete account, add address/mnemonic/private key, derivation, import, init vault, change password, confirm address removal)
+- `src/vault_tab.py` — HL1 Vaults tab implementation (`VaultTab` class)
+- `src/lp_tab.py` — LP Positions tab implementation (`LPTab` class)
+- `src/chain_options.py` — Shared `CHAIN_OPTIONS` and `DERIVATION_CHAINS` lists (breaks circular import between GUI and account dialogs)
+
+### Files Changed
+- `src/gui_main_v5.py` — Reduced from 6,424 to 2,602 lines; now contains core wallet GUI only. Delegates to extracted modules.
+- `build_gui_v5.py` — Version strings v5.1.4; added hidden imports for `settings_dialog`, `account_dialogs`, `vault_tab`, `lp_tab`, `chain_options`; previous-version backup tag bumped to v5_1_3.
+- `README.md` — Updated version and architecture section.
+- `STATUS.md` — v5.1.4 changelog.
+- `AGENTS.md` — Updated version and module layout.
+
+### Verification
+- All modified/new source files pass `python -m py_compile`
+- `src/gui_main_v5.py`: 2,602 lines
+- EXE rebuilt with `python build_gui_v5.py`
+
+---
+
 ## v5.1.3 - Swap Module + Wallet Card Redesign (July 2026)
 
 ### New Features

@@ -4,9 +4,9 @@ Forge's project rules for working on ColdStack. Read this file at the start of e
 
 ## What This Is
 
-ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.1.1.
+ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.1.4.
 
-Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.1.3.
+Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.1.4.
 
 ## Commands
 
@@ -71,7 +71,12 @@ The vault schema is additive-only and versioned via a `schema_version` field. Ol
 `key_vault.encrypted` (AES-256-GCM, Argon2id KDF: 64MB/3 iterations/4 lanes) holds everything. It is co-located with the app: project root in script mode, `os.path.dirname(sys.executable)` when frozen (`PortableKeyManager` resolves this via `base_dir`). After unlock, `KeyManager.address_db` holds the decrypted in-memory tree `{ version, pools, accounts, mnemonics, private_keys }`. The master password lives in memory only during the active session — never written to disk, cleared on lock/auto-lock (5-min timeout, optional "Do not autolock" checkbox).
 
 ### Module layout
-- `gui_main_v5.py` — CustomTkinter dark-theme GUI. Primary interface. CTkTabview with Wallet / HL1 Vaults / LP Positions tabs.
+- `gui_main_v5.py` — CustomTkinter dark-theme GUI. Primary interface. Core wallet view only (~2,600 lines). CTkTabview with Wallet / HL1 Vaults / LP Positions tabs; tab bodies live in dedicated modules below.
+- `settings_dialog.py` (v5.1.4 NEW) — Settings dialog: Go Online toggle, display currency, Standard/Advanced mode switching, RPC endpoint editor, API keys. Carved out of `gui_main_v5.py` to keep the main GUI focused.
+- `account_dialogs.py` (v5.1.4 NEW) — Account management dialogs: add/delete account, add address/mnemonic/private key, derivation, derive-all-chains, import CSV/Excel, initialize vault, change password, confirm address removal.
+- `vault_tab.py` (v5.1.4 NEW) — `VaultTab` class containing the HL1 Vaults tab UI, fetch/render, saved vault CRUD, and deposit/explore actions.
+- `lp_tab.py` (v5.1.4 NEW) — `LPTab` class containing the LP Positions tab UI, scan/fetch, position card rendering, save/remove pool, and fee/collect/compound/close dialogs.
+- `chain_options.py` (v5.1.4 NEW) — Shared `CHAIN_OPTIONS` and `DERIVATION_CHAINS` constants used by the GUI and account dialogs.
 - `crypto_engine.py` — AES-256-GCM + Argon2id (shared, unchanged since v1).
 - `derivation_engine.py` — BIP39 → address/key derivation for 7 chains (EVM, BTC Taproot/SegWit/Legacy, SOL, DASH, SUI).
 - `main.py` — Click-based CLI (script mode only).
@@ -82,7 +87,7 @@ The vault schema is additive-only and versioned via a `schema_version` field. Ol
 - `lp_engine.py` — LP position aggregation facade (`LPPosition` dataclass, `VenueAdapter` ABC, `StrategyEngine`, `LPEngine`). Read-only.
 - `venue_adapters/` — One adapter per venue, auto-registered on import (`__init__.py`). `hyperliquid_adapter.py` (read: HyperEVM NFT Position Manager + L1 perp/spot), `hyperliquid_writer.py` (write: wrap/unwrap/approve/open/increase/decrease/collect/close/rebalance, signs via agent on :8842), `venue_writer.py` (writer ABC).
 - `vault_tracker.py` — Read-only Hyperliquid vault positions via `/info` API.
-- `saved_pools.py` — Saved pools CRUD inside the encrypted vault (`address_db["saved_pools"]`); stores public identifiers (address, token ID, venue, pool, pair) only — no private keys. Lets LP scans skip the expensive token-ID scan.
+- `saved_pools.py` — Saved pools CRUD inside the encrypted vault (`address_db["saved_pools"]”); stores public identifiers (address, token ID, venue, pool, pair) only — no private keys. Lets LP scans skip the expensive token-ID scan.
 - `lp_liquidity_manager.py` (v5.1.1 NEW) — Add/Remove/Edit liquidity dialogs. Separated from `gui_main_v5.py` for maintainability. Contains `AddLiquidityDialog` (with auto-balance/Zap In), `RemoveLiquidityDialog` (with percentage slider), and `EditPositionDialog` (stub for v5.2).
 - `build_gui_v5.py` — PyInstaller build script (entry point + all hidden imports; every new src module that the GUI imports must be added here as a `--hidden-import` or the frozen EXE will fail to import it at runtime). **Critical:** the full HTTPS/SSL stack must be included (`ssl`, `_ssl`, `http.client`, `socket`, `_socket`, `urllib`, `urllib.request`, `urllib.error` + `--collect-submodules=urllib`) or the EXE will fail on all `https://` URLs.
 
