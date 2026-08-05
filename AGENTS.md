@@ -4,9 +4,9 @@ Forge's project rules for working on ColdStack. Read this file at the start of e
 
 ## What This Is
 
-ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.1.4.
+ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.2.1.
 
-Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.1.4.
+Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.2.1.
 
 ## Commands
 
@@ -85,7 +85,7 @@ The vault schema is additive-only and versioned via a `schema_version` field. Ol
 - `price_engine.py` — CoinGecko prices, 60s in-memory cache, never persisted.
 - `rpc_config.py` + `rpc_endpoints.json` — User-editable public RPC endpoints (fallback to hardcoded defaults if missing/malformed). API keys are NOT in this JSON — they live in the encrypted vault `config.api_keys` and are injected at runtime.
 - `lp_engine.py` — LP position aggregation facade (`LPPosition` dataclass, `VenueAdapter` ABC, `StrategyEngine`, `LPEngine`). Read-only.
-- `venue_adapters/` — One adapter per venue, auto-registered on import (`__init__.py`). `hyperliquid_adapter.py` (read: HyperEVM NFT Position Manager + L1 perp/spot), `hyperliquid_writer.py` (write: wrap/unwrap/approve/open/increase/decrease/collect/close/rebalance, signs via agent on :8842), `venue_writer.py` (writer ABC).
+  - `venue_adapters/` — One adapter per venue, auto-registered on import (`__init__.py`). `hyperliquid_adapter.py` (read: HyperEVM NFT Position Manager + L1 perp/spot), `hyperliquid_writer.py` (write: wrap/unwrap/approve/open/increase/decrease/collect/close/rebalance, signs via agent on :8842), `krystal_adapter.py` (read skeleton: BSC / PancakeSwap V3 via direct RPC reads, multichain), `venue_writer.py` (writer ABC).
 - `vault_tracker.py` — Read-only Hyperliquid vault positions via `/info` API.
 - `saved_pools.py` — Saved pools CRUD inside the encrypted vault (`address_db["saved_pools"]”); stores public identifiers (address, token ID, venue, pool, pair) only — no private keys. Lets LP scans skip the expensive token-ID scan.
 - `lp_liquidity_manager.py` (v5.1.1 NEW) — Add/Remove/Edit liquidity dialogs. Separated from `gui_main_v5.py` for maintainability. Contains `AddLiquidityDialog` (with auto-balance/Zap In), `RemoveLiquidityDialog` (with percentage slider), and `EditPositionDialog` (stub for v5.2).

@@ -4,7 +4,7 @@
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production-success)]()
 
-**Latest release: [v5.1.4 — gui_main_v5.py Carve-Off (Pre-v5.2 Refactor)](https://github.com/Roughn3ck/key_manager/releases/tag/v5.1.4)**
+**Latest release: [v5.2.1 — Krystal Skeleton + Light/Dark Mode](https://github.com/Roughn3ck/key_manager/releases/tag/v5.2.1)**
 
 ---
 
@@ -28,7 +28,7 @@ No browser. No browser extension. No cloud. Your keys never leave your machine.
 - CoinGecko price feeds with multi-currency display (USD, AUD, CAD, EUR, CHF)
 - Hyperliquid vault tracking (deposits, APR, P&L)
 
-**3. LP Position Management** — Full concentrated liquidity management for HyperEVM.
+**3. LP Position Management** — Concentrated liquidity management for HyperEVM, with Krystal venue adapter skeleton in place for v5.2 multi-venue expansion.
 - Position cards with health status, range, fees, PnL, APR, days active
 - Add Liquidity (+) with auto-balance "Zap In" — swap excess token to match position ratio
 - Remove Liquidity (−) with percentage slider and estimated output
@@ -148,7 +148,7 @@ Three on-chain transactions, each confirmed independently. Gas is paid in WHYPE 
 
 | Component | Technology |
 |-----------|-----------|
-| GUI | CustomTkinter (dark theme) |
+| GUI | CustomTkinter (light/dark/system themes) |
 | Encryption | AES-256-GCM + Argon2id (cryptography library) |
 | Build | PyInstaller (onefile EXE, ~50MB) |
 | Python | 3.14 (GUI/EXE), 3.12 (headless agent) |
@@ -159,13 +159,15 @@ Three on-chain transactions, each confirmed independently. Gas is paid in WHYPE 
 
 ## Roadmap
 
-### v5.2 — Edit Position
-- Tick range editing (narrow/widen the range)
+### v5.2 — Multi-Venue LP Aggregation (in progress)
+- Krystal skeleton adapter (BSC / PancakeSwap V3 via direct RPC reads)
+- Light/Dark/System appearance mode toggle
+- Edit Position: tick range editing (narrow/widen the range)
 - Rebalance flow (close → swap → reopen at new range)
 - Slippage protection (amountOutMinimum > 0)
 
-### v5.3+ — Multi-Venue
-- Krystal API integration
+### v5.3+ — More Venues
+- Krystal API / full PancakeSwap V3 reads
 - Orca, Raydium, Cetus (Solana DEXs)
 - Cross-chain LP position aggregation
 
@@ -219,6 +221,7 @@ src/
   venue_adapters/
     hyperliquid_adapter.py    Read adapter (positions, fees, balances)
     hyperliquid_writer.py     Write adapter (collect, swap, increase, close)
+    krystal_adapter.py        Krystal skeleton adapter (BSC, ETH, ARB, SOL)
     venue_writer.py           Abstract base + dataclasses
 ```
 

@@ -1232,7 +1232,10 @@ class HyperliquidWriter(VenueWriter):
             account: The vault account name.
 
         Returns:
-            A list of transaction hashes [decrease_tx, collect_tx].
+            A list of transaction hashes.
+            - [decrease_tx, collect_tx] on full success
+            - [decrease_tx] if decrease succeeded but collect failed (partial close)
+            - [collect_tx] if liquidity was already 0 (just fees to collect)
         """
         token_id = self._parse_token_id(position_id)
         if token_id is None:
@@ -1255,14 +1258,25 @@ class HyperliquidWriter(VenueWriter):
         ))
 
         # 2. Collect all tokens (fees + withdrawn liquidity)
-        collect_tx = self.collect_fees(CollectFeesParams(
-            account=account, position_id=position_id
-        ))
-
-        _log_action("close_position",
-                     extra=f"token_id={token_id} "
-                           f"decrease={decrease_tx} collect={collect_tx}")
-        return [decrease_tx, collect_tx]
+        # If this fails after decreaseLiquidity succeeded, the position is
+        # half-closed — liquidity removed but funds still owed by the NFT.
+        # Return partial result so the caller knows to retry collect separately.
+        try:
+            collect_tx = self.collect_fees(CollectFeesParams(
+                account=account, position_id=position_id
+            ))
+            _log_action("close_position",
+                         extra=f"token_id={token_id} "
+                               f"decrease={decrease_tx} collect={collect_tx}")
+            return [decrease_tx, collect_tx]
+        except Exception as e:
+            _log_action("close_position_partial",
+                         extra=f"token_id={token_id} decrease={decrease_tx} "
+                               f"collect_failed={e}")
+            print(f"[close_position] WARNING: decreaseLiquidity succeeded (tx={decrease_tx}) "
+                  f"but collect failed: {e}. Liquidity removed but funds still in position. "
+                  f"Retry 'Collect Fees' to withdraw remaining funds.")
+            return [decrease_tx]
 
     def rebalance(self, params: RebalanceParams) -> List[str]:
         """Full rebalance flow: close -> optional swap -> open.

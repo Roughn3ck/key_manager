@@ -284,7 +284,8 @@ KeyManager = PortableKeyManager
 
 
 # Configure CustomTkinter appearance
-ctk.set_appearance_mode("dark")
+# Appearance mode is now user-selectable (v5.2.1) — loaded from vault config.
+# Default to "dark" for first launch / existing users before this feature.
 ctk.set_default_color_theme("dark-blue")
 
 
@@ -295,6 +296,7 @@ class ColdStackGUI:
     # Future adapters: add entries here (friendly_name -> adapter_key).
     LP_PLATFORM_MAP = {
         "HyperEVM (Project X)": "hyperliquid",
+        "Krystal (BSC)": "krystal",
     }
     # Reverse map for converting adapter keys to friendly display names.
     LP_PLATFORM_MAP_reverse = {v: k for k, v in LP_PLATFORM_MAP.items()}
@@ -320,6 +322,8 @@ class ColdStackGUI:
 
         # v4.2: Standard/Advanced mode + customizable RPC + API keys
         self.app_mode = "standard"
+        # v5.2.1: Appearance mode (light/dark/system)
+        self.appearance_mode = "dark"
         self.api_keys: Dict[str, str] = {}
         self.rpc_config: Optional[Dict[str, Dict[str, Any]]] = None
 
@@ -384,7 +388,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v5.1.3 - ColdStack | Swap Module + Wallet Card Redesign",
+            text="v5.2.1 - ColdStack | Krystal Skeleton + Light/Dark Mode",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )
@@ -922,7 +926,7 @@ class ColdStackGUI:
                 release_url = data.get("html_url", "https://github.com/Roughn3ck/key_manager/releases")
                 release_name = data.get("name", "Latest Release")
 
-                current_version = "5.1.3"
+                current_version = "5.2.1"
                 latest_version = latest_tag.lstrip("v")
 
                 # Simple version comparison (handles major.minor[.patch])
@@ -2012,6 +2016,9 @@ class ColdStackGUI:
         self.display_currency = config.get("display_currency", "none")
         # v4.2: New config fields (backward-compatible defaults)
         self.app_mode = config.get("app_mode", "standard")
+        # v5.2.1: Appearance mode (light/dark/system) — defaults to dark for existing users
+        self.appearance_mode = config.get("appearance_mode", "dark")
+        ctk.set_appearance_mode(self.appearance_mode)
         self.api_keys = config.get("api_keys", {})
         if not isinstance(self.api_keys, dict):
             self.api_keys = {}
@@ -2034,6 +2041,8 @@ class ColdStackGUI:
         # v4.2: Save new config fields
         cfg["schema_version"] = 2
         cfg["app_mode"] = self.app_mode
+        # v5.2.1: Appearance mode
+        cfg["appearance_mode"] = self.appearance_mode
         cfg["api_keys"] = self.api_keys
         # v5.1: Vault tab selector state
         cfg["vault_selector_mode"] = self.vault_selector_mode

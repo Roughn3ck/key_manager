@@ -687,11 +687,10 @@ class KeyManagerAgent:
 
                 # HyperEVM mempool bug: previous failed broadcasts can leave ghost txs
                 # in the mempool. eth_gasPrice returns a value too low to replace them.
-                # Multiply gas_price by 3x to ensure replacement of any ghost tx.
-                # This also helps with the misleading "nonce too high" error which is
-                # actually a gas-price-too-low-to-replace error.
-                gas_price = int(gas_price * 6)
-                print(f"[sign_tx] HyperEVM gas_price after 6x boost: {gas_price} wei ({gas_price / 1e9:.4f} Gwei)")
+                # Apply 3x boost to base gas price to clear ghost txs.
+                # Further escalation happens in broadcast_tx on retry (3x -> 4x -> 5x).
+                gas_price = int(gas_price * 3)
+                print(f"[sign_tx] HyperEVM gas_price after 3x boost: {gas_price} wei ({gas_price / 1e9:.4f} Gwei)")
 
                 signed_hex = sign_legacy_tx(
                     to=to,
@@ -784,17 +783,27 @@ class KeyManagerAgent:
             except Exception as broadcast_err:
                 err_msg = str(broadcast_err)
                 if "nonce too high" in err_msg.lower() and rpc:
-                    # HyperEVM bug: the tx may have entered the mempool despite
-                    # the error. Wait and retry with fresh nonce + boosted gas.
-                    print(f"[broadcast_tx] nonce too high, retrying after 3s...")
+                    # HyperEVM bug: "nonce too high" is actually a gas-price-too-low
+                    # error. The tx may have entered the mempool despite the error.
+                    # Escalate gas price and retry with fresh nonce.
+                    print(f"[broadcast_tx] nonce too high, escalating gas (attempt 2/3)...")
                     time.sleep(3)
                     sender = sign_result["result"]["from"]
                     fresh_nonce = get_nonce(rpc, sender)
                     print(f"[broadcast_tx] fresh nonce: {fresh_nonce}")
+
+                    # Escalate: fetch fresh base gas price, pass 1.33x base to sign_tx.
+                    # sign_tx will apply its own 3x boost -> 4x base total.
+                    gas_info = get_gas_price(rpc)
+                    retry_base = int(gas_info["gasPrice"])
+                    retry_gas_price = int(retry_base * 4 / 3)  # 1.33x base -> 3x inside sign_tx = 4x total
+                    print(f"[broadcast_tx] retry gas_price input: {retry_gas_price} wei "
+                          f"(will be 3x boosted in sign_tx -> ~{retry_gas_price * 3 / 1e9:.4f} Gwei)")
+
                     retry_sign = self.sign_tx(
                         account=account, to=to, data=data, value=value,
                         chain_id=chain_id, rpc=rpc, chain=chain,
-                        gas_limit=gas_limit, gas_price=gas_price,
+                        gas_limit=gas_limit, gas_price=retry_gas_price,
                         max_fee_per_gas=max_fee_per_gas,
                         max_priority_fee_per_gas=max_priority_fee_per_gas,
                         nonce=fresh_nonce,
@@ -812,7 +821,41 @@ class KeyManagerAgent:
                             # mempool and got mined. We don't have its tx hash.
                             return {"status": "error",
                                     "error": f"Nonce conflict -- a previous tx may have succeeded. Check on-chain. ({retry_msg})"}
-                        raise
+                        elif "nonce too high" in retry_msg.lower():
+                            # Second retry: escalate gas further (5x base total)
+                            print(f"[broadcast_tx] still nonce too high, escalating gas (attempt 3/3)...")
+                            time.sleep(3)
+                            fresh_nonce2 = get_nonce(rpc, sender)
+                            print(f"[broadcast_tx] second retry fresh nonce: {fresh_nonce2}")
+
+                            gas_info2 = get_gas_price(rpc)
+                            retry_base2 = int(gas_info2["gasPrice"])
+                            retry_gas_price2 = int(retry_base2 * 5 / 3)  # 1.67x base -> 3x inside sign_tx = 5x total
+                            print(f"[broadcast_tx] second retry gas_price input: {retry_gas_price2} wei "
+                                  f"(will be 3x boosted in sign_tx -> ~{retry_gas_price2 * 3 / 1e9:.4f} Gwei)")
+
+                            retry_sign2 = self.sign_tx(
+                                account=account, to=to, data=data, value=value,
+                                chain_id=chain_id, rpc=rpc, chain=chain,
+                                gas_limit=gas_limit, gas_price=retry_gas_price2,
+                                max_fee_per_gas=max_fee_per_gas,
+                                max_priority_fee_per_gas=max_priority_fee_per_gas,
+                                nonce=fresh_nonce2,
+                            )
+                            if retry_sign2["status"] != "ok":
+                                return retry_sign2
+                            signed_tx2 = retry_sign2["result"]["signed_tx"]
+                            sign_result = retry_sign2
+                            try:
+                                tx_hash = broadcast_raw_tx(rpc, signed_tx2)
+                            except Exception as retry_err2:
+                                err2_msg = str(retry_err2)
+                                if "nonce too low" in err2_msg.lower():
+                                    return {"status": "error",
+                                            "error": f"Nonce conflict after 3 attempts -- a previous tx likely succeeded. Check on-chain. ({err2_msg})"}
+                                raise
+                        else:
+                            raise
                 elif "nonce too low" in err_msg.lower():
                     # A previous tx already used this nonce. The tx may have succeeded.
                     return {"status": "error",

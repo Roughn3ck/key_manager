@@ -36,9 +36,9 @@ DEFAULT_ENDPOINTS: Dict[str, Dict[str, Any]] = {
         "fallback": "https://base.llamarpc.com",
     },
     "bsc": {
-        "url": "https://bsc-dataseed.binance.org",
+        "url": "https://bsc-dataseed.binance.org/",
         "auth": None,
-        "fallback": "https://bsc-dataseed1.binance.org",
+        "fallback": "https://rpc.ankr.com/bsc",
     },
     "polygon": {
         "url": "https://polygon-rpc.com",

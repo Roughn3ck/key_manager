@@ -26,24 +26,33 @@ def _center_dialog(gui, dialog: tk.Toplevel) -> None:
 
 
 def _style_combobox(style_name: str = "Dark.TCombobox") -> None:
-    """Apply a dark theme to ttk Combobox widgets."""
+    """Apply theme to ttk Combobox widgets — adapts to current appearance mode."""
+    mode = ctk.get_appearance_mode().lower()
+    if mode == "light":
+        bg = "#f0f0f0"
+        fg = "#1a1a1a"
+        arrow = "#333333"
+    else:
+        bg = "#2b2b2b"
+        fg = "white"
+        arrow = "white"
     style = ttk.Style()
     style.theme_use("default")
     style.configure(
         style_name,
-        fieldbackground="#2b2b2b",
-        background="#2b2b2b",
-        foreground="white",
-        arrowcolor="white",
+        fieldbackground=bg,
+        background=bg,
+        foreground=fg,
+        arrowcolor=arrow,
         borderwidth=1,
         relief="flat",
         padding=3,
     )
     style.map(
         style_name,
-        fieldbackground=[("readonly", "#2b2b2b")],
-        selectbackground=[("readonly", "#2b2b2b")],
-        selectforeground=[("readonly", "white")],
+        fieldbackground=[("readonly", bg)],
+        selectbackground=[("readonly", bg)],
+        selectforeground=[("readonly", fg)],
     )
 
 
@@ -91,6 +100,26 @@ def open_settings_dialog(gui) -> None:
     if gui.online_mode:
         online_switch.select()
     online_switch.pack(anchor="w")
+
+    # --- Appearance mode (v5.2.1) — both modes ---
+    appearance_frame = ctk.CTkFrame(form, fg_color="transparent")
+    appearance_frame.pack(fill="x", pady=(0, 15))
+
+    ctk.CTkLabel(appearance_frame, text="Appearance",
+                 font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
+    ctk.CTkLabel(appearance_frame,
+        text="Switch between light and dark interface.",
+        font=ctk.CTkFont(size=10), text_color="gray60").pack(anchor="w", pady=(2, 5))
+
+    appearance_var = ctk.StringVar(value=gui.appearance_mode.capitalize())
+
+    appearance_seg = ctk.CTkSegmentedButton(
+        appearance_frame,
+        values=["Dark", "Light", "System"],
+        variable=appearance_var,
+        command=lambda v: ctk.set_appearance_mode(v.lower()),
+    )
+    appearance_seg.pack(anchor="w", pady=(0, 5))
 
     # --- Display currency selection (both modes) ---
     currency_frame = ctk.CTkFrame(form, fg_color="transparent")
@@ -285,6 +314,9 @@ def open_settings_dialog(gui) -> None:
             if curr_var.get() == label:
                 gui.display_currency = val
                 break
+
+        # v5.2.1: Save appearance mode
+        gui.appearance_mode = appearance_var.get().lower()
 
         # v4.2: If advanced mode, save RPC URLs and API keys
         if gui.app_mode == "advanced":

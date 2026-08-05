@@ -1,3 +1,44 @@
+## v5.2.1 - Krystal Skeleton + Light/Dark Mode (August 2026)
+
+### Summary
+First v5.2 milestone: added a skeleton adapter for Krystal (multi-chain LP aggregator) and a user-selectable light/dark/system appearance mode. Version string updated to v5.2.1.
+
+### New Features
+- **Krystal Venue Adapter Skeleton** (`src/venue_adapters/krystal_adapter.py`)
+  - Registers with the LP engine as venue key `krystal`
+  - Declares support for `bsc`, `ethereum`, `arbitrum`, `solana`
+  - Detects 42-char EVM addresses with `krystal`, `bsc`, or `pancakeswap` chain hints
+  - Read implementation stubbed — raises `NotImplementedError` with guidance until Prompt 2 research fills in PancakeSwap V3 contract addresses
+- **BNB Chain RPC Configuration** (`src/rpc_config.py`)
+  - Default BSC endpoint updated to `https://bsc-dataseed.binance.org/`
+  - Fallback set to `https://rpc.ankr.com/bsc`
+- **Light/Dark/System Appearance Mode** (`src/settings_dialog.py`, `src/gui_main_v5.py`)
+  - User-selectable mode in Settings (between Go Online and Default Currency)
+  - Live switching via `ctk.set_appearance_mode()`
+  - Persisted in encrypted vault config (`appearance_mode`)
+  - Defaults to `dark` for existing users / first launch
+  - `ttk.Combobox` styling now adapts to light/dark mode
+
+### Files Changed
+- `src/venue_adapters/krystal_adapter.py` — NEW skeleton adapter
+- `src/venue_adapters/__init__.py` — Added `KrystalAdapter` import
+- `src/rpc_config.py` — Added/updated BSC endpoint and fallback
+- `src/gui_main_v5.py` — Removed hardcoded dark mode; added `appearance_mode` init/load/save; unlock screen version string v5.2.1; update checker version 5.2.1
+- `src/settings_dialog.py` — Mode-aware `_style_combobox()`, new Appearance section, save appearance mode
+- `README.md` — v5.2.1 release notes, Krystal adapter, light/dark/system theme
+- `STATUS.md` — v5.2.1 changelog
+- `AGENTS.md` — Module layout updated with Krystal adapter
+
+### Verification
+- `python -m py_compile src/gui_main_v5.py` passes
+- `python -m py_compile src/settings_dialog.py` passes
+- `python -m py_compile src/venue_adapters/krystal_adapter.py` passes
+- `python -m py_compile src/rpc_config.py` passes
+- Adapter discovery returns `['hyperliquid', 'krystal']`
+- `src/gui_main_v5.py`: ~2,610 lines
+
+---
+
 ## v5.1.4 - gui_main_v5.py Carve-Off (Pre-v5.2 Refactor) (July 2026)
 
 ### Summary
@@ -306,8 +347,8 @@ Pure refactor: no functional changes. The monolithic `src/gui_main_v5.py` (6,424
 - CLI commands: `derive-address`, `generate-mnemonic`, `validate-mnemonic`
 
 **Project Location:** `B:\Github\key_manager\`
-**Last Updated:** 2026-07-25
-**Current Version:** v5.1.3 (Swap Module + Wallet Card Redesign)
+**Last Updated:** 2026-08-06
+**Current Version:** v5.2.1 (Krystal Skeleton + Light/Dark Mode)
 
 ## Versioning
 
@@ -322,6 +363,7 @@ Pure refactor: no functional changes. The monolithic `src/gui_main_v5.py` (6,424
 | v5.1.1 | Add/Remove Liquidity + Gas Fix + Fee Tracking | `src/lp_liquidity_manager.py`, `src/gui_main_v5.py`, `src/venue_adapters/hyperliquid_writer.py`, `build_gui_v5.py` |
 | v5.1.2 | Vault Explore + Deposit + EVM Transfer + Balance Conversion | `src/evm_transfer_dialog.py`, `src/vault_deposit_dialog.py`, `src/gui_main_v5.py`, `src/price_engine.py`, `src/key_manager_agent.py`, `build_gui_v5.py` |
 | v5.1.3 | Swap Module + Wallet Card Redesign | `src/swap_dialog.py`, `src/gui_main_v5.py`, `build_gui_v5.py` |
+| v5.2.1 | Krystal Skeleton + Light/Dark Mode | `src/venue_adapters/krystal_adapter.py`, `src/settings_dialog.py`, `src/gui_main_v5.py`, `src/rpc_config.py` |
 
 ## Architecture
 
@@ -354,7 +396,7 @@ key_manager/
 | LP Engine / Adapter | Working v5.1 | HyperEVM + L1 positions; fee reading via static `collect()` eth_call |
 | Hyperliquid Writer | Working v5.0 | Signs via agent on localhost:8842 |
 | GUI v5.1 Source | Working | Wallet / HL1 Vaults / LP Positions tabs |
-| GUI EXE | Working v5.1.3 | Swap module + wallet card redesign build complete |
+| GUI EXE | Working v5.2.1 | Krystal skeleton + light/dark mode |
 | CLI (script mode) | Working | `python src/main.py` (CLI EXE deprecated) |
 | Headless Agent | Working | HTTP signing server on localhost:8842 |
 

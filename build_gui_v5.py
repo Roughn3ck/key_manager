@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
-PyInstaller build script for ColdStack GUI v5.1.4.
+PyInstaller build script for ColdStack GUI v5.2.1.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v5.1.4 (July 2026) - gui_main_v5.py Carve-Off (Pre-v5.2 Refactor)
+Version: v5.2.1 (August 2026) - Krystal Skeleton + Light/Dark Mode
 Builds: src/gui_main_v5.py
 Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
 
 Changes from build_gui_v5.py:
   1. Entry point: src/gui_main_v5.py
   2. New hidden imports: settings_dialog, account_dialogs, lp_tab, vault_tab, chain_options
-  3. Version strings updated to v5.1.4
+  3. Version strings updated to v5.2.1
+  4. Krystal adapter skeleton + BSC RPC configuration
 
 WARNING: After ANY source change, rebuild: python build_gui_v5.py
 """
@@ -32,7 +33,7 @@ def clean_build_dirs():
 
 def build_gui_exe():
     """Run PyInstaller to build the ColdStack v5.1.4 EXE."""
-    print("Building ColdStack v5.1.4 executable...")
+    print("Building ColdStack v5.2.1 executable...")
 
     project_dir = Path(__file__).parent.resolve()
 
@@ -170,7 +171,7 @@ def copy_to_usb_deployment():
         # Backup the previous production EXE using the version it was built from.
         # Bump this string whenever the shipped version changes so the backup name
         # matches the last stable build.
-        PREVIOUS_VERSION_TAG = "v5_1_3"  # v5.1.3 is the previous production build
+        PREVIOUS_VERSION_TAG = "v5_1_4"  # v5.1.4 is the previous production build
         backup_path = backups_dir / f'coldstack_{PREVIOUS_VERSION_TAG}.exe'
         print(f"Backing up previous EXE to {backup_path}...")
         shutil.copy2(target_path, backup_path)
@@ -193,7 +194,7 @@ echo ========================================
 echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting ColdStack v5.1.4...
+echo Starting ColdStack v5.2.1...
 echo.
 coldstack.exe
 pause
@@ -252,8 +253,8 @@ def main():
     print(f"Working directory: {os.getcwd()}")
 
     print("=" * 60)
-    print("ColdStack v5.1.4 - Portable EXE Builder")
-    print("gui_main_v5.py Carve-Off (Pre-v5.2 Refactor)")
+    print("ColdStack v5.2.1 - Portable EXE Builder")
+    print("Krystal Skeleton + Light/Dark Mode")
     print("=" * 60)
 
     if not check_dependencies():

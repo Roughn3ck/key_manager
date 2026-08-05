@@ -34,6 +34,9 @@ POSITION_MANAGER = "0xead19ae861c29bbb2101e834922b2feee69b9091"
 EIP712_CHAIN_ID = 0x66eee  # 421483
 
 # Known pools (verified on-chain)
+# Keys MUST be ordered by token address (token0 < token1 by address) to match _best_pool()'s address-sort lookup
+# Address order: USDC (0xb883) < WHYPE (0x5555) < UBTC (0x9fdb)
+# Wait: 0x5555 < 0x9fdb < 0xb883 — so WHYPE < UBTC < USDC by address
 KNOWN_POOLS = {
     ("WHYPE", "USDC", 500):   "0x264a1f3b9eb574a3e7be869ac415dc5430dcf571",
     ("WHYPE", "USDC", 3000):  "0xe712d505572b3f84c1b4deb99e1beab9dd0e23c9",
@@ -171,8 +174,41 @@ def _system_address_for_token(symbol: str) -> Optional[str]:
 
 
 def _best_pool(token_in: str, token_out: str) -> Tuple[Optional[str], Optional[int]]:
-    """Pick the lowest-fee known pool for a token pair."""
-    t0, t1 = sorted([token_in, token_out])
+    """Pick the lowest-fee known pool with active liquidity for a token pair.
+
+    Tries each fee tier in order and returns the first pool that has non-zero
+    liquidity (verified via on-chain slot0 read). This avoids selecting dead
+    or empty pools that would cause swaps to revert.
+    """
+    addr_in = TOKEN_ADDRESSES.get(token_in, "").lower()
+    addr_out = TOKEN_ADDRESSES.get(token_out, "").lower()
+    if addr_in and addr_out:
+        t0, t1 = (token_in, token_out) if addr_in < addr_out else (token_out, token_in)
+    else:
+        t0, t1 = sorted([token_in, token_out])
+
+    for fee in (500, 3000, 10000):
+        key = (t0, t1, fee)
+        if key not in KNOWN_POOLS:
+            continue
+        pool_addr = KNOWN_POOLS[key]
+        # Verify pool has liquidity by reading slot0.liquidity
+        try:
+            result = _rpc_call(
+                HYPEREVM_RPC,
+                "eth_call",
+                [{"to": pool_addr, "data": SELECTOR_SLOT0}, "latest"],
+            )
+            if result and "result" in result:
+                body = result["result"][2:]
+                if len(body) >= 128:
+                    # liquidity is the third word (bytes 128-192)
+                    liquidity = int(body[128:192], 16)
+                    if liquidity > 0:
+                        return pool_addr, fee
+        except Exception:
+            continue
+    # Fallback: return first known pool even if we couldn't verify liquidity
     for fee in (500, 3000, 10000):
         key = (t0, t1, fee)
         if key in KNOWN_POOLS:
@@ -196,40 +232,83 @@ def _route_swap(token_in: str, token_out: str, amount: Decimal) -> str:
 
 
 def _get_swap_quote(token_in: str, token_out: str, amount_in: float,
-                    fee: Optional[int] = None) -> Optional[float]:
-    """Estimate swap output amount via read-only pool price query."""
+                    fee: Optional[int] = None,
+                    from_address: Optional[str] = None) -> Optional[float]:
+    """Estimate swap output by simulating exactInputSingle via eth_call.
+
+    Uses a read-only eth_call to the SwapRouter to get the actual swap output.
+    This is more accurate than reading slot0 price because it accounts for
+    pool liquidity, price impact, and fee tier — and returns None if the
+    pool can't handle the swap (reverts).
+
+    Args:
+        from_address: The wallet address to use as 'from' in the eth_call.
+            The SwapRouter checks the caller has token balance and allowance,
+            so this must be set to the actual wallet address for the
+            simulation to succeed.
+    """
     try:
         if fee is None:
             pool, fee = _best_pool(token_in, token_out)
+            if pool is None:
+                return None
         else:
-            t0, t1 = sorted([token_in, token_out])
-            pool = KNOWN_POOLS.get((t0, t1, fee))
-        if not pool:
-            return None
+            # Find pool for specific fee tier
+            addr_in = TOKEN_ADDRESSES.get(token_in, "").lower()
+            addr_out = TOKEN_ADDRESSES.get(token_out, "").lower()
+            if addr_in and addr_out:
+                t0_name, t1_name = (token_in, token_out) if addr_in < addr_out else (token_out, token_in)
+            else:
+                t0_name, t1_name = sorted([token_in, token_out])
+            pool = KNOWN_POOLS.get((t0_name, t1_name, fee))
+            if not pool:
+                return None
 
-        result = _rpc_call(
-            HYPEREVM_RPC,
-            "eth_call",
-            [{"to": pool, "data": SELECTOR_SLOT0}, "latest"],
-        )
-        if not result or "result" not in result:
+        # Get token addresses
+        addr_token_in = TOKEN_ADDRESSES.get(token_in)
+        addr_token_out = TOKEN_ADDRESSES.get(token_out)
+        if not addr_token_in or not addr_token_out:
             return None
-        body = result["result"][2:]
-        if len(body) < 64:
-            return None
-        sqrt_price_x96 = int(body[0:64], 16)
-        price_ratio = (sqrt_price_x96 / (2 ** 96)) ** 2
 
         decimals_in = TOKEN_DECIMALS.get(token_in, 18)
         decimals_out = TOKEN_DECIMALS.get(token_out, 18)
-        token0, token1 = sorted([token_in, token_out])
-        if token_in == token0:
-            raw_out = amount_in * price_ratio * (10 ** decimals_out) / (10 ** decimals_in)
-        else:
-            raw_out = amount_in / price_ratio * (10 ** decimals_out) / (10 ** decimals_in)
+        amount_in_raw = int(amount_in * (10 ** decimals_in))
+        deadline = int(time.time()) + 300
 
-        fee_fraction = fee / 1_000_000
-        return raw_out * (1 - fee_fraction)
+        # Simulate exactInputSingle via eth_call (read-only)
+        # Selector: 0x414bf389
+        # Params: tokenIn, tokenOut, fee, recipient, deadline, amountIn, amountOutMin, sqrtPriceLimitX96
+        call_data = (
+            SELECTOR_EXACT_INPUT_SINGLE
+            + _pad_address(addr_token_in)[2:]
+            + _pad_address(addr_token_out)[2:]
+            + _pad_uint256(fee)[2:]
+            + _pad_address("0x0000000000000000000000000000000000000000")[2:]  # recipient (doesn't matter for eth_call)
+            + _pad_uint256(deadline)[2:]
+            + _pad_uint256(amount_in_raw)[2:]
+            + _pad_uint256(0)[2:]  # amountOutMin = 0 for simulation
+            + _pad_uint256(0)[2:]  # sqrtPriceLimitX96 = 0
+        )
+
+        call_params = {"to": SWAP_ROUTER, "data": call_data}
+        if from_address:
+            call_params["from"] = from_address
+        result = _rpc_call(
+            HYPEREVM_RPC,
+            "eth_call",
+            [call_params, "latest"],
+        )
+
+        if not result or "error" in result:
+            return None  # Pool can't handle this swap (reverts)
+
+        body = result.get("result", "")[2:]
+        if len(body) < 64:
+            return None
+
+        amount_out_raw = int(body[0:64], 16)
+        amount_out_human = amount_out_raw / (10 ** decimals_out)
+        return amount_out_human
     except Exception:
         return None
 
@@ -451,6 +530,18 @@ class SwapDialog:
         )
         self.swap_btn.pack(pady=(15, 10))
 
+        self.close_btn_swap = ctk.CTkButton(
+            self.swap_frame,
+            text="Close",
+            width=380,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color=("gray30", "gray25"),
+            hover_color=("gray40", "gray35"),
+            command=self.close,
+        )
+        self.close_btn_swap.pack(pady=(0, 10))
+
         # --- Bridge UI ---
         self.bridge_frame = ctk.CTkFrame(self.dialog, fg_color="transparent")
         # Initially hidden
@@ -519,6 +610,18 @@ class SwapDialog:
             command=self._on_bridge_transfer,
         )
         self.transfer_btn.pack(pady=(20, 10))
+
+        self.close_btn_bridge = ctk.CTkButton(
+            self.bridge_frame,
+            text="Close",
+            width=380,
+            height=32,
+            font=ctk.CTkFont(size=12),
+            fg_color=("gray30", "gray25"),
+            hover_color=("gray40", "gray35"),
+            command=self.close,
+        )
+        self.close_btn_bridge.pack(pady=(0, 10))
 
         # Status label (shared)
         self.status_label = ctk.CTkLabel(
@@ -621,26 +724,53 @@ class SwapDialog:
             self.quote_label.configure(text="Expected: --")
             return
 
+        # Fetch current gas price for cost estimation
+        try:
+            gas_price_result = _rpc_call(HYPEREVM_RPC, "eth_gasPrice", [])
+            base_gas_price = int(gas_price_result["result"], 16)  # wei
+            boosted_gas_price = int(base_gas_price * 6)  # match ColdStack's 6x HyperEVM boost
+            gas_price_gwei = boosted_gas_price / 1e9
+        except Exception:
+            gas_price_gwei = 0.6  # fallback: 0.6 Gwei (6x of 0.1 Gwei base)
+
         route = _route_swap(token_in, token_out, amount_dec)
         if route == "wrap":
             estimated = float(amount_dec)
             fee = 0.0
-            gas_text = "Gas: ~28,000"
+            gas_limit = 28000
+            gas_text = f"Gas: ~{gas_limit:,} ({gas_limit * gas_price_gwei / 1e9:.6f} HYPE @ {gas_price_gwei:.1f} Gwei)"
         elif route == "unwrap":
             estimated = float(amount_dec)
             fee = 0.0
-            gas_text = "Gas: ~28,000"
+            gas_limit = 28000
+            gas_text = f"Gas: ~{gas_limit:,} ({gas_limit * gas_price_gwei / 1e9:.6f} HYPE @ {gas_price_gwei:.1f} Gwei)"
         elif route in ("direct_swap", "wrap_and_swap", "swap_and_unwrap"):
             swap_token_in = "WHYPE" if token_in == "HYPE" else token_in
             swap_token_out = "WHYPE" if token_out == "HYPE" else token_out
             pool, fee_tier = _best_pool(swap_token_in, swap_token_out)
             if pool:
                 fee = fee_tier / 10_000  # convert bps to percent for display
-                estimated = _get_swap_quote(swap_token_in, swap_token_out, float(amount_dec), fee_tier)
+                estimated = _get_swap_quote(swap_token_in, swap_token_out, float(amount_dec), fee_tier, from_address=self.wallet_address)
+                if estimated is None:
+                    # Best pool's fee tier didn't work — try others
+                    for alt_fee in (500, 3000, 10000):
+                        if alt_fee == fee_tier:
+                            continue
+                        estimated = _get_swap_quote(swap_token_in, swap_token_out, float(amount_dec), alt_fee, from_address=self.wallet_address)
+                        if estimated is not None and estimated > 0:
+                            fee = alt_fee / 10_000
+                            break
             else:
                 fee = None
                 estimated = None
-            gas_text = "Gas: ~150,000"
+            # Multi-step routes use more gas
+            if route == "direct_swap":
+                gas_limit = 150000
+            elif route == "wrap_and_swap":
+                gas_limit = 178000  # wrap (28k) + approve + swap (150k)
+            elif route == "swap_and_unwrap":
+                gas_limit = 178000  # swap (150k) + unwrap (28k)
+            gas_text = f"Gas: ~{gas_limit:,} ({gas_limit * gas_price_gwei / 1e9:.6f} HYPE @ {gas_price_gwei:.1f} Gwei)"
         else:
             estimated = None
             fee = None
@@ -658,6 +788,35 @@ class SwapDialog:
             self.fee_label.configure(text=f"Fee: {fee:.2f}%  ·  {gas_text}")
         else:
             self.fee_label.configure(text=f"Fee: --  ·  {gas_text}")
+
+    def _read_token_balance(self, symbol: str) -> Optional[float]:
+        """Read a single token balance synchronously via RPC. Returns None on error."""
+        try:
+            if symbol == "HYPE":
+                result = _rpc_call(
+                    HYPEREVM_RPC,
+                    "eth_getBalance",
+                    [self.wallet_address, "latest"],
+                )
+                if result and "result" in result:
+                    return int(result["result"], 16) / 1e18
+            else:
+                contract = TOKEN_ADDRESSES.get(symbol)
+                if not contract:
+                    return None
+                padded = _pad_address(self.wallet_address)[2:]
+                call_data = SELECTOR_BALANCE_OF + padded
+                result = _rpc_call(
+                    HYPEREVM_RPC,
+                    "eth_call",
+                    [{"to": contract, "data": call_data}, "latest"],
+                )
+                if result and "result" in result:
+                    decimals = TOKEN_DECIMALS.get(symbol, 18)
+                    return int(result["result"], 16) / (10 ** decimals)
+        except Exception as e:
+            print(f"[swap_dialog] _read_token_balance({symbol}) error: {e}")
+        return None
 
     def _fetch_balances(self):
         """Query EVM and HL1 balances in a background thread."""
@@ -782,8 +941,22 @@ class SwapDialog:
                 self._do_wrap(amount_str)
                 self._do_direct_swap("WHYPE", token_out, amount_str)
             elif route == "swap_and_unwrap":
+                # Step 1: Swap token_in → WHYPE
                 self._do_direct_swap(token_in, "WHYPE", amount_str)
-                self._do_unwrap(amount_str)
+                # Wait for swap tx to be mined so WHYPE is in the wallet
+                self._set_status("Swap submitted, waiting for confirmation before unwrap...", "gray60")
+                time.sleep(8)
+                # Step 2: Read actual WHYPE balance and unwrap ALL of it
+                # The swap output differs from the input amount — use the real balance
+                whype_balance = self._read_token_balance("WHYPE")
+                if whype_balance and whype_balance > 0:
+                    whype_str = f"{whype_balance:.18f}"
+                    self._do_unwrap(whype_str)
+                else:
+                    raise RuntimeError(
+                        "Swap succeeded but WHYPE balance is 0 — cannot unwrap. "
+                        "The swap tx may not be mined yet. Try unwrapping manually."
+                    )
             else:
                 raise RuntimeError("Unsupported swap route")
 
@@ -796,10 +969,11 @@ class SwapDialog:
             )
             self._fetch_balances()
         except Exception as e:
-            self._set_status(f"Swap failed: {e}", "#ff6b6b")
+            err_msg = str(e)
+            self._set_status(f"Swap failed: {err_msg}", "#ff6b6b")
             self.dialog.after(
                 0,
-                lambda: self.show_notification(f"Swap failed: {e}", error=True),
+                lambda: self.show_notification(f"Swap failed: {err_msg}", error=True),
             )
         finally:
             self.dialog.after(0, lambda: self.swap_btn.configure(state="normal"))
@@ -817,6 +991,7 @@ class SwapDialog:
             chain="EVM",
             chain_id=999,
             rpc=HYPEREVM_RPC,
+            gas_limit=50000,  # HYPE→WHYPE wrap needs ~28k, pad to 50k
         )
         return result.get("tx_hash", "")
 
@@ -834,6 +1009,7 @@ class SwapDialog:
             chain="EVM",
             chain_id=999,
             rpc=HYPEREVM_RPC,
+            gas_limit=50000,  # WHYPE withdraw needs ~28k, pad to 50k
         )
         return result.get("tx_hash", "")
 
@@ -864,34 +1040,60 @@ class SwapDialog:
             chain="EVM",
             chain_id=999,
             rpc=HYPEREVM_RPC,
+            gas_limit=60000,  # ERC-20 approve needs ~46k, pad to 60k
         )
         return result.get("tx_hash", "")
 
     def _do_direct_swap(self, token_in: str, token_out: str, amount_str: str) -> str:
-        """Execute a direct pool swap via SwapRouter.exactInputSingle."""
-        pool, fee = _best_pool(token_in, token_out)
-        if not pool:
-            raise RuntimeError(f"No pool found for {token_in}/{token_out}")
+        """Execute a direct pool swap via SwapRouter.exactInputSingle.
 
+        Tries fee tiers from lowest to highest, using the first pool that
+        produces a valid quote and executes without reverting.
+        """
         decimals_in = TOKEN_DECIMALS.get(token_in, 18)
+        decimals_out = TOKEN_DECIMALS.get(token_out, 18)
         amount_raw = _to_wei(amount_str, decimals_in)
 
+        # Get token addresses for pool lookup
+        addr_in = TOKEN_ADDRESSES.get(token_in, "").lower()
+        addr_out = TOKEN_ADDRESSES.get(token_out, "").lower()
+        if addr_in and addr_out:
+            t0_name, t1_name = (token_in, token_out) if addr_in < addr_out else (token_out, token_in)
+        else:
+            t0_name, t1_name = sorted([token_in, token_out])
+
+        # Try each fee tier — use the first one that gives a valid quote
+        chosen_fee = None
+        quote = None
+        for fee in (500, 3000, 10000):
+            if (t0_name, t1_name, fee) not in KNOWN_POOLS:
+                continue
+            candidate_quote = _get_swap_quote(token_in, token_out, float(amount_str), fee, from_address=self.wallet_address)
+            if candidate_quote is not None and candidate_quote > 0:
+                chosen_fee = fee
+                quote = candidate_quote
+                break
+
+        if chosen_fee is None:
+            raise RuntimeError(f"No working pool found for {token_in}/{token_out} (all fee tiers revert or have no liquidity)")
+
         # Approve router if needed
-        self._do_approve(TOKEN_ADDRESSES[token_in], SWAP_ROUTER, amount_raw)
+        approve_tx = self._do_approve(TOKEN_ADDRESSES[token_in], SWAP_ROUTER, amount_raw)
+        if approve_tx:
+            # Wait for approve tx to be mined before proceeding with swap
+            import time as _time
+            _time.sleep(5)
 
         # Compute slippage-protected minimum output
-        quote = _get_swap_quote(token_in, token_out, float(amount_str), fee)
-        if quote is None:
-            quote = 0.0
         slippage = self.slippage_pct / 100.0
-        amount_out_min = int(quote * (1 - slippage) * (10 ** TOKEN_DECIMALS.get(token_out, 18)))
+        amount_out_min = int(quote * (1 - slippage) * (10 ** decimals_out))
 
         deadline = int(time.time()) + 300
         data = (
             SELECTOR_EXACT_INPUT_SINGLE
             + _pad_address(TOKEN_ADDRESSES[token_in])[2:]
             + _pad_address(TOKEN_ADDRESSES[token_out])[2:]
-            + _pad_uint256(fee)[2:]
+            + _pad_uint256(chosen_fee)[2:]
             + _pad_address(self.wallet_address)[2:]
             + _pad_uint256(deadline)[2:]
             + _pad_uint256(amount_raw)[2:]
@@ -909,6 +1111,7 @@ class SwapDialog:
             chain="EVM",
             chain_id=999,
             rpc=HYPEREVM_RPC,
+            gas_limit=300000,
         )
         return result.get("tx_hash", "")
 
@@ -1047,10 +1250,11 @@ class SwapDialog:
             )
             self._fetch_balances()
         except Exception as e:
-            self._set_status(f"Transfer failed: {e}", "#ff6b6b")
+            err_msg = str(e)
+            self._set_status(f"Transfer failed: {err_msg}", "#ff6b6b")
             self.dialog.after(
                 0,
-                lambda: self.show_notification(f"EVM\u2192HL1 transfer failed: {e}", error=True),
+                lambda: self.show_notification(f"EVM\u2192HL1 transfer failed: {err_msg}", error=True),
             )
         finally:
             self.dialog.after(0, lambda: self.transfer_btn.configure(state="normal"))
@@ -1138,10 +1342,11 @@ class SwapDialog:
             )
             self._fetch_balances()
         except Exception as e:
-            self._set_status(f"Transfer failed: {e}", "#ff6b6b")
+            err_msg = str(e)
+            self._set_status(f"Transfer failed: {err_msg}", "#ff6b6b")
             self.dialog.after(
                 0,
-                lambda: self.show_notification(f"HL1\u2192EVM transfer failed: {e}", error=True),
+                lambda: self.show_notification(f"HL1\u2192EVM transfer failed: {err_msg}", error=True),
             )
         finally:
             self.dialog.after(0, lambda: self.transfer_btn.configure(state="normal"))
