@@ -14,6 +14,15 @@ import customtkinter as ctk
 from price_engine import DISPLAY_CURRENCY_OPTIONS
 from rpc_config import load_rpc_config, save_rpc_config, get_default_for_chain
 
+# base_dir is the app's runtime directory (EXE dir or project root).
+# Computed independently to avoid circular imports with gui_main_v5.py.
+import os
+import sys
+if getattr(sys, "frozen", False):
+    base_dir = os.path.dirname(sys.executable)
+else:
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
 
 def _center_dialog(gui, dialog: tk.Toplevel) -> None:
     """Center a dialog over the main window."""
@@ -26,34 +35,9 @@ def _center_dialog(gui, dialog: tk.Toplevel) -> None:
 
 
 def _style_combobox(style_name: str = "Dark.TCombobox") -> None:
-    """Apply theme to ttk Combobox widgets — adapts to current appearance mode."""
-    mode = ctk.get_appearance_mode().lower()
-    if mode == "light":
-        bg = "#f0f0f0"
-        fg = "#1a1a1a"
-        arrow = "#333333"
-    else:
-        bg = "#2b2b2b"
-        fg = "white"
-        arrow = "white"
-    style = ttk.Style()
-    style.theme_use("default")
-    style.configure(
-        style_name,
-        fieldbackground=bg,
-        background=bg,
-        foreground=fg,
-        arrowcolor=arrow,
-        borderwidth=1,
-        relief="flat",
-        padding=3,
-    )
-    style.map(
-        style_name,
-        fieldbackground=[("readonly", bg)],
-        selectbackground=[("readonly", bg)],
-        selectforeground=[("readonly", fg)],
-    )
+    """Apply theme to ttk Combobox widgets (delegates to appearance module)."""
+    from appearance import style_combobox as _style
+    _style(style_name)
 
 
 def open_settings_dialog(gui) -> None:
@@ -108,16 +92,22 @@ def open_settings_dialog(gui) -> None:
     ctk.CTkLabel(appearance_frame, text="Appearance",
                  font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
     ctk.CTkLabel(appearance_frame,
-        text="Switch between light and dark interface.",
+        text="Switch between light and dark interface.\n"
+             "Changes apply on next launch — restart ColdStack after saving.",
         font=ctk.CTkFont(size=10), text_color="gray60").pack(anchor="w", pady=(2, 5))
 
     appearance_var = ctk.StringVar(value=gui.appearance_mode.capitalize())
+    _original_appearance = gui.appearance_mode
+
+    def _on_appearance_selected(value):
+        """Update the variable when a segment is clicked — do NOT switch theme live."""
+        appearance_var.set(value)
 
     appearance_seg = ctk.CTkSegmentedButton(
         appearance_frame,
         values=["Dark", "Light", "System"],
         variable=appearance_var,
-        command=lambda v: ctk.set_appearance_mode(v.lower()),
+        command=_on_appearance_selected,
     )
     appearance_seg.pack(anchor="w", pady=(0, 5))
 
@@ -168,7 +158,7 @@ def open_settings_dialog(gui) -> None:
         rpc_list_frame.pack(fill="x", pady=(0, 5))
 
         if gui.rpc_config is None:
-            gui.rpc_config = load_rpc_config(gui.base_dir)
+            gui.rpc_config = load_rpc_config(base_dir)
 
         for chain_id in sorted(gui.rpc_config.keys()):
             entry = gui.rpc_config[chain_id]
@@ -309,41 +299,54 @@ def open_settings_dialog(gui) -> None:
     status_label.pack()
 
     def do_save():
-        # Save currency
-        for label, val in DISPLAY_CURRENCY_OPTIONS:
-            if curr_var.get() == label:
-                gui.display_currency = val
-                break
+        try:
+            # v5.2.1: Save appearance mode FIRST
+            gui.appearance_mode = appearance_var.get().lower()
 
-        # v5.2.1: Save appearance mode
-        gui.appearance_mode = appearance_var.get().lower()
+            # Save currency
+            for label, val in DISPLAY_CURRENCY_OPTIONS:
+                if curr_var.get() == label:
+                    gui.display_currency = val
+                    break
 
-        # v4.2: If advanced mode, save RPC URLs and API keys
-        if gui.app_mode == "advanced":
-            # Update rpc_config with edited URLs
-            if gui.rpc_config is None:
-                gui.rpc_config = load_rpc_config(gui.base_dir)
-            for chain_id, url_var in rpc_url_vars.items():
-                if chain_id in gui.rpc_config:
-                    gui.rpc_config[chain_id]["url"] = url_var.get()
+            # v4.2: If advanced mode, save RPC URLs and API keys
+            if gui.app_mode == "advanced":
+                if gui.rpc_config is None:
+                    gui.rpc_config = load_rpc_config(base_dir)
+                for chain_id, url_var in rpc_url_vars.items():
+                    if chain_id in gui.rpc_config:
+                        gui.rpc_config[chain_id]["url"] = url_var.get()
+                save_rpc_config(gui.rpc_config, base_dir)
+                for provider, key_var in api_key_vars.items():
+                    gui.api_keys[provider] = key_var.get()
+                gui._rebuild_balance_engine()
 
-            # Save RPC config to file
-            save_rpc_config(gui.rpc_config, gui.base_dir)
+            gui._save_vault_config()
+            gui._update_online_indicator()
+        except Exception as e:
+            print(f"[settings] Error saving: {e}")
+        finally:
+            # ALWAYS destroy the dialog, even on error
+            try:
+                dialog.destroy()
+            except Exception:
+                pass
 
-            # Save API keys to vault
-            for provider, key_var in api_key_vars.items():
-                gui.api_keys[provider] = key_var.get()
+        # v5.2.1: If appearance mode changed, notify user to restart
+        # (show AFTER dialog is destroyed so it's not blocked)
+        if gui.appearance_mode != _original_appearance:
+            messagebox.showinfo(
+                "Appearance Changed",
+                "Appearance mode has been saved.\n\n"
+                "Please restart ColdStack for the new theme to take effect.",
+            )
 
-            # Rebuild balance engine with new config
-            gui._rebuild_balance_engine()
-
-        gui._save_vault_config()
-        gui._update_online_indicator()
-        gui.show_notification("Settings saved")
-        dialog.destroy()
-        # Re-render current account view to update Check Balance button states
-        if gui.current_account:
-            gui.select_account(gui.current_pool or "Unassigned", gui.current_account)
+        try:
+            gui.show_notification("Settings saved")
+            if gui.current_account:
+                gui.select_account(gui.current_pool or "Unassigned", gui.current_account)
+        except Exception:
+            pass
 
     btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
     btn_frame.pack(pady=10)

@@ -135,7 +135,7 @@ class LPTab:
         self._lp_widgets["offline_banner"] = ctk.CTkLabel(
             root,
             text="🔒 Offline -- Enable Online Mode in Settings to fetch LP positions",
-            font=ctk.CTkFont(size=11), text_color="gray50",
+            font=ctk.CTkFont(size=11), text_color=("#666666", "gray50"),
         )
         if not self.gui.online_mode:
             self._lp_widgets["offline_banner"].pack(fill="x", pady=(0, 10))
@@ -147,7 +147,7 @@ class LPTab:
 
         # Status label
         status_label = ctk.CTkLabel(
-            root, text="", font=ctk.CTkFont(size=11), text_color="gray50",
+            root, text="", font=ctk.CTkFont(size=11), text_color=("#666666", "gray50"),
         )
         status_label.pack(fill="x", pady=(5, 0))
         self._lp_widgets["status_label"] = status_label
@@ -872,7 +872,7 @@ class LPTab:
                 unique_positions.append(pos)
         if not unique_positions:
             ctk.CTkLabel(scroll, text=f"No LP positions found for {address}",
-                         font=ctk.CTkFont(size=13), text_color="gray60").pack(pady=20)
+                         font=ctk.CTkFont(size=13), text_color=("#555555", "gray60")).pack(pady=20)
         else:
             for pos in unique_positions:
                 self._lp_initialize_tracking(pos, address)
@@ -957,7 +957,7 @@ class LPTab:
             range_parts.append(f"Current: {position.current_price:g}")
         if range_parts:
             ctk.CTkLabel(range_frame, text="  ·  ".join(range_parts),
-                         font=ctk.CTkFont(size=11), text_color="gray70").pack(side="left", anchor="w")
+                         font=ctk.CTkFont(size=11), text_color=("#444444", "gray70")).pack(side="left", anchor="w")
         if position.position_in_range_pct is not None:
             pct = position.position_in_range_pct
             in_range = 0 <= pct <= 100
@@ -968,7 +968,7 @@ class LPTab:
                          text_color=pct_color).pack(side="left", anchor="w")
         elif position.range_low is not None:
             ctk.CTkLabel(range_frame, text="  ·  ? Not fetched",
-                         font=ctk.CTkFont(size=11), text_color="gray50").pack(side="left", anchor="w")
+                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(side="left", anchor="w")
 
         # v5.1: Position range slider with marker
         if position.range_low is not None and position.range_high is not None:
@@ -1024,7 +1024,7 @@ class LPTab:
 
         if line3_gray_parts:
             ctk.CTkLabel(line3_frame, text="  ·  ".join(line3_gray_parts),
-                         font=ctk.CTkFont(size=11), text_color="gray70").pack(side="left", anchor="w")
+                         font=ctk.CTkFont(size=11), text_color=("#444444", "gray70")).pack(side="left", anchor="w")
 
         # Value — green and bold, after Holdings, before Suggestion
         if position.current_value_usd is not None:
@@ -1067,11 +1067,11 @@ class LPTab:
         if position.suggested_action:
             ctk.CTkLabel(line3_frame, text=f"  ·  Suggestion: {position.suggested_action}",
                          font=ctk.CTkFont(size=11, weight="bold"),
-                         text_color="#ffd43b").pack(side="left", anchor="w")
+                         text_color=("#fd7e14", "#ffd43b")).pack(side="left", anchor="w")
 
         if position.error:
             ctk.CTkLabel(info, text=f"Note: {position.error}",
-                         font=ctk.CTkFont(size=10), text_color="gray50").pack(anchor="w", pady=(2, 0))
+                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
 
         button_frame = ctk.CTkFrame(card, fg_color="transparent")
         button_frame.pack(side="right", padx=10, pady=8)
@@ -1196,11 +1196,11 @@ class LPTab:
             ctk.CTkLabel(info, text=header_text,
                          font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
             ctk.CTkLabel(info, text=f"ID: hyperevm:{tid}",
-                         font=ctk.CTkFont(size=10), text_color="gray50").pack(anchor="w", pady=(2, 0))
+                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
             ctk.CTkLabel(info, text="Platform: HyperEVM (Project X)",
-                         font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", pady=(2, 0))
+                         font=ctk.CTkFont(size=11), text_color=("#444444", "gray70")).pack(anchor="w", pady=(2, 0))
             ctk.CTkLabel(info, text="Fetching live data...",
-                         font=ctk.CTkFont(size=11), text_color="gray50").pack(anchor="w", pady=(2, 0))
+                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
 
             button_frame = ctk.CTkFrame(card, fg_color="transparent")
             button_frame.pack(side="right", padx=10, pady=8)
@@ -1267,18 +1267,18 @@ class LPTab:
                          font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
             if pool_address:
                 ctk.CTkLabel(info, text=f"Pool: {pool_address[:20]}...",
-                             font=ctk.CTkFont(size=10), text_color="gray50").pack(anchor="w", pady=(2, 0))
+                             font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
             ctk.CTkLabel(info, text="Range: Not fetched · Current: Not fetched",
-                         font=ctk.CTkFont(size=11), text_color="gray50").pack(anchor="w", pady=(2, 0))
+                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
             ctk.CTkLabel(info, text="Fees: Not fetched · Value: Not fetched · Holdings: Not fetched",
-                         font=ctk.CTkFont(size=11), text_color="gray50").pack(anchor="w", pady=(2, 0))
+                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
             wallet_display = (
                 f"Wallet: {wallet_address[:10]}...{wallet_address[-6:]}"
                 if len(wallet_address) > 16
                 else f"Wallet: {wallet_address}"
             )
             ctk.CTkLabel(info, text=wallet_display,
-                         font=ctk.CTkFont(size=10), text_color="gray50").pack(anchor="w", pady=(2, 0))
+                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
 
             button_frame = ctk.CTkFrame(card, fg_color="transparent")
             button_frame.pack(side="right", padx=10, pady=8)
@@ -1343,7 +1343,7 @@ class LPTab:
             remaining = len(cards)
             if scroll and not scroll.winfo_children():
                 ctk.CTkLabel(scroll, text="No LP positions found",
-                             font=ctk.CTkFont(size=13), text_color="gray60").pack(pady=20)
+                             font=ctk.CTkFont(size=13), text_color=("#555555", "gray60")).pack(pady=20)
             if status:
                 status.configure(text=f"Last check: {remaining} position(s)")
         else:

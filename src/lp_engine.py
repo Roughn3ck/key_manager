@@ -298,6 +298,10 @@ class LPEngine:
         self.strategy_engine = StrategyEngine()
         self._writers: Dict[str, Any] = {}
 
+    def list_venues(self) -> List[str]:
+        """Return all registered venue keys (delegates to module-level list_venues)."""
+        return list_venues()
+
     def _require_online(self):
         if not self.online_mode:
             raise OfflineError("Online mode is disabled. Enable Go Online to fetch LP positions.")

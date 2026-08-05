@@ -88,6 +88,7 @@ import time
 import json
 from pathlib import Path
 from typing import Dict, List, Optional, Any
+import atexit
 import pyperclip
 import queue
 
@@ -99,6 +100,8 @@ from derivation_engine import DerivationEngine
 from balance_engine import BalanceEngine, is_balance_supported
 from price_engine import PriceEngine, DISPLAY_CURRENCY_OPTIONS
 from rpc_config import load_rpc_config, save_rpc_config, get_default_endpoints, get_default_for_chain
+# v5.2.1: Appearance mode management (carved out of gui_main_v5.py)
+from appearance import load_appearance_mode, save_appearance_mode, style_combobox
 # v5.0: LP Engine imports
 from lp_engine import LPEngine, OfflineError
 from saved_pools import migrate_saved_pools_json
@@ -284,8 +287,12 @@ KeyManager = PortableKeyManager
 
 
 # Configure CustomTkinter appearance
-# Appearance mode is now user-selectable (v5.2.1) — loaded from vault config.
-# Default to "dark" for first launch / existing users before this feature.
+# v5.2.1: Apply saved appearance mode BEFORE any widgets are created.
+# This reads from a plaintext JSON file (not the encrypted vault) so it
+# works before login. The vault config still stores the preference too,
+# but this file is the authoritative source at startup.
+_startup_appearance = load_appearance_mode()
+ctk.set_appearance_mode(_startup_appearance)
 ctk.set_default_color_theme("dark-blue")
 
 
@@ -305,6 +312,8 @@ class ColdStackGUI:
         self.root = ctk.CTk()
         self.root.title("ColdStack - Secure Crypto Key Vault")
         self.root.geometry("1200x800")
+        # v5.2.1: Handle window close event — clean up session file
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
         # Initialize components
         self.crypto = CryptoEngine()
@@ -322,8 +331,8 @@ class ColdStackGUI:
 
         # v4.2: Standard/Advanced mode + customizable RPC + API keys
         self.app_mode = "standard"
-        # v5.2.1: Appearance mode (light/dark/system)
-        self.appearance_mode = "dark"
+        # v5.2.1: Appearance mode (light/dark/system) — loaded at startup
+        self.appearance_mode = _startup_appearance
         self.api_keys: Dict[str, str] = {}
         self.rpc_config: Optional[Dict[str, Dict[str, Any]]] = None
 
@@ -1336,13 +1345,13 @@ class ColdStackGUI:
             self._notification_label.configure(
                 text=f"\u2717 {message}",
                 text_color="#ff6b6b",
-                fg_color="#3a1a1a"
+                fg_color=("#3a1a1a", "#3a1a1a")
             )
         else:
             self._notification_label.configure(
                 text=f"\u2713 {message}",
                 text_color="#51cf94",
-                fg_color="#1a3a2a"
+                fg_color=("#1a3a2a", "#1a3a2a")
             )
 
         # Place notification at bottom center, above status bar
@@ -1356,7 +1365,7 @@ class ColdStackGUI:
                 text="\u2715",
                 font=ctk.CTkFont(size=14, weight="bold"),
                 text_color="#ff6b6b",
-                fg_color="#3a1a1a",
+                fg_color=("#3a1a1a", "#3a1a1a"),
                 corner_radius=8,
                 width=30,
                 height=30,
@@ -1900,31 +1909,8 @@ class ColdStackGUI:
         return sorted(all_accounts)
 
     def _style_combobox(self, style_name="Dark.TCombobox"):
-        """Apply dark-theme styling to a ttk Combobox with a readable font size.
-
-        Returns the style object so the caller can use it.
-        """
-        import tkinter.ttk as ttk
-        style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
-        style.configure(style_name,
-                        fieldbackground="#2b2b2b",
-                        background="#3b3b3b",
-                        foreground="#dce4ee",
-                        arrowcolor="#dce4ee",
-                        bordercolor="#565b73",
-                        lightcolor="#565b73",
-                        darkcolor="#565b73",
-                        font=("Segoe UI", 13),
-                        padding=6)
-        style.map(style_name,
-                  fieldbackground=[("readonly", "#2b2b2b")],
-                  foreground=[("readonly", "#dce4ee")],
-                  background=[("active", "#4a4f63")])
-        return style
+        """Apply theme-aware styling to a ttk Combobox (delegates to appearance module)."""
+        style_combobox(style_name)
 
     def refresh_left_panel(self):
         """Rebuild the scrollable account list in the left panel from vault data."""
@@ -1954,6 +1940,7 @@ class ColdStackGUI:
                     command=lambda p=pool_name, a=account: self.select_account(p, a),
                     width=220, height=35, corner_radius=10,
                     fg_color="transparent",
+                    text_color=("#1a1a1a", "#dce4ee"),
                     hover_color=("gray70", "gray30"),
                     border_width=1,
                     border_color=("gray60", "gray40")
@@ -1981,6 +1968,7 @@ class ColdStackGUI:
                     command=lambda a=account: self.select_account("Unassigned", a),
                     width=220, height=35, corner_radius=10,
                     fg_color="transparent",
+                    text_color=("#1a1a1a", "#dce4ee"),
                     hover_color=("gray70", "gray30"),
                     border_width=1,
                     border_color=("gray60", "gray40")
@@ -2016,9 +2004,15 @@ class ColdStackGUI:
         self.display_currency = config.get("display_currency", "none")
         # v4.2: New config fields (backward-compatible defaults)
         self.app_mode = config.get("app_mode", "standard")
-        # v5.2.1: Appearance mode (light/dark/system) — defaults to dark for existing users
-        self.appearance_mode = config.get("appearance_mode", "dark")
-        ctk.set_appearance_mode(self.appearance_mode)
+        # v5.2.1: Appearance mode — sync vault config with startup file
+        vault_mode = config.get("appearance_mode", _startup_appearance)
+        # The plaintext file is authoritative at startup; sync vault to match
+        self.appearance_mode = _startup_appearance
+        if vault_mode != _startup_appearance:
+            # Vault was out of sync — update it
+            cfg = self.key_manager.address_db.setdefault("config", {})
+            cfg["appearance_mode"] = _startup_appearance
+            self.key_manager.save_encrypted_data(self.current_password)
         self.api_keys = config.get("api_keys", {})
         if not isinstance(self.api_keys, dict):
             self.api_keys = {}
@@ -2043,6 +2037,8 @@ class ColdStackGUI:
         cfg["app_mode"] = self.app_mode
         # v5.2.1: Appearance mode
         cfg["appearance_mode"] = self.appearance_mode
+        # v5.2.1: Also write to plaintext file for next startup
+        save_appearance_mode(self.appearance_mode)
         cfg["api_keys"] = self.api_keys
         # v5.1: Vault tab selector state
         cfg["vault_selector_mode"] = self.vault_selector_mode
@@ -2335,6 +2331,33 @@ class ColdStackGUI:
 
     # --- End v4.0 methods ---
 
+    def _on_close(self):
+        """Handle window close event — ensure session file is cleaned up.
+
+        This fires when the user closes the window via X button, Alt+F4,
+        or any OS-level window close action. Without this, the
+        .key_manager_session file (containing the base64-encoded password)
+        would persist on disk.
+        """
+        try:
+            # Stop the embedded agent server first (frees the port)
+            self._stop_embedded_agent()
+        except Exception:
+            pass
+
+        try:
+            # Delete the session file if it exists
+            if self.key_manager:
+                self.key_manager.end_session()
+        except Exception:
+            pass
+
+        # Destroy the root window and exit
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
     def lock_session(self):
         """Lock the session and return to login screen."""
         # v4.0: Reset online mode state
@@ -2596,6 +2619,7 @@ class ColdStackGUI:
     def show_import_dialog(self):
         """Delegate to account_dialogs."""
         return show_import_dialog(self)
+
     def run(self):
         """Run the GUI application."""
         self.root.mainloop()
@@ -2604,6 +2628,16 @@ class ColdStackGUI:
 def main():
     """Main entry point for ColdStack GUI application."""
     app = ColdStackGUI()
+
+    # v5.2.1: atexit fallback — delete session file if WM_DELETE_WINDOW didn't fire
+    def _cleanup_session():
+        try:
+            if app.key_manager:
+                app.key_manager.end_session()
+        except Exception:
+            pass
+    atexit.register(_cleanup_session)
+
     app.run()
 
 

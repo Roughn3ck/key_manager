@@ -98,6 +98,8 @@ def build_gui_exe():
         '--hidden-import=vault_tab',
         '--hidden-import=lp_tab',
         '--hidden-import=chain_options',
+        # --- v5.2.1 Appearance module ---
+        '--hidden-import=appearance',
         # --- v5.1 LP Engine hidden imports ---
         '--hidden-import=lp_engine',
         '--hidden-import=price_engine',
@@ -271,3 +273,9 @@ def main():
 
 if __name__ == '__main__':
     sys.exit(main())
+
+
+# Build timestamp (auto-updated on each run — compare this to the EXE's
+# file modification time to verify the EXE matches the current source code.
+# If the EXE is older than this timestamp, rebuild: python build_gui_v5.py)
+# BUILD: 2026-08-06 09:10 AEST

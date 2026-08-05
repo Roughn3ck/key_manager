@@ -109,7 +109,7 @@ class VaultTab:
         self._vault_widgets["offline_banner"] = ctk.CTkLabel(
             section,
             text="\U0001F512 Offline -- Enable Online Mode in Settings to fetch Hyperliquid vaults",
-            font=ctk.CTkFont(size=11), text_color="gray50",
+            font=ctk.CTkFont(size=11), text_color=("#666666", "gray50"),
         )
         if not self.gui.online_mode:
             self._vault_widgets["offline_banner"].pack(fill="x", padx=10, pady=(0, 5))
@@ -121,7 +121,7 @@ class VaultTab:
 
         # Status label
         vault_status = ctk.CTkLabel(
-            section, text="", font=ctk.CTkFont(size=11), text_color="gray50",
+            section, text="", font=ctk.CTkFont(size=11), text_color=("#666666", "gray50"),
         )
         vault_status.pack(fill="x", padx=10, pady=(0, 8))
         self._vault_widgets["status_label"] = vault_status
@@ -497,7 +497,7 @@ class VaultTab:
         if position.vault_address:
             ctk.CTkLabel(
                 info, text=position.vault_address,
-                font=ctk.CTkFont(size=10), text_color="gray50",
+                font=ctk.CTkFont(size=10), text_color=("#666666", "gray50"),
             ).pack(anchor="w", pady=(2, 0))
 
         # Metrics line: APR · TVL · Vault age · Deposit age
@@ -527,7 +527,7 @@ class VaultTab:
         if metric_parts:
             ctk.CTkLabel(
                 info, text="  \u00b7  ".join(metric_parts),
-                font=ctk.CTkFont(size=11), text_color="gray70",
+                font=ctk.CTkFont(size=11), text_color=("#444444", "gray70"),
             ).pack(anchor="w", pady=(2, 0))
 
         # Deposited + Current value
@@ -539,7 +539,7 @@ class VaultTab:
         if value_parts:
             ctk.CTkLabel(
                 info, text="  \u00b7  ".join(value_parts),
-                font=ctk.CTkFont(size=11), text_color="gray70",
+                font=ctk.CTkFont(size=11), text_color=("#444444", "gray70"),
             ).pack(anchor="w", pady=(2, 0))
 
         # P&L (APR moved to metrics line above)
@@ -553,7 +553,7 @@ class VaultTab:
         if pnl_parts:
             ctk.CTkLabel(
                 info, text="  \u00b7  ".join(pnl_parts),
-                font=ctk.CTkFont(size=11), text_color="gray70",
+                font=ctk.CTkFont(size=11), text_color=("#444444", "gray70"),
             ).pack(anchor="w", pady=(2, 0))
 
         # Shares + Share price
@@ -565,7 +565,7 @@ class VaultTab:
         if share_parts:
             ctk.CTkLabel(
                 info, text="  \u00b7  ".join(share_parts),
-                font=ctk.CTkFont(size=11), text_color="gray70",
+                font=ctk.CTkFont(size=11), text_color=("#444444", "gray70"),
             ).pack(anchor="w", pady=(2, 0))
 
         # Error note
@@ -852,5 +852,5 @@ class VaultTab:
             ctk.CTkLabel(
                 scroll,
                 text="No saved vaults. Enter a wallet address and click Refresh Vaults to fetch.",
-                font=ctk.CTkFont(size=13), text_color="gray60",
+                font=ctk.CTkFont(size=13), text_color=("#555555", "gray60"),
             ).pack(pady=20)
