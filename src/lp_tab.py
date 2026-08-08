@@ -77,6 +77,14 @@ class LPTab:
         refresh_btn.pack(side="right")
         self._lp_widgets["refresh_btn"] = refresh_btn
 
+        include_closed_var = ctk.CTkCheckBox(
+            wallet_bar, text="Include closed",
+            font=ctk.CTkFont(size=11),
+            checkbox_width=16, checkbox_height=16,
+        )
+        include_closed_var.pack(side="right", padx=(5, 0))
+        self._lp_widgets["include_closed_var"] = include_closed_var
+
         # -- Row 2: Single position fetch (NEW) --
         pos_bar = ctk.CTkFrame(root, fg_color="transparent")
         pos_bar.pack(fill="x", pady=(0, 10))
@@ -369,6 +377,9 @@ class LPTab:
                     self._lp_update_saved_pools_count(addr)
         # Auto-load saved pool placeholders (all wallets, not filtered)
         self._lp_render_all_saved_placeholders()
+        # Auto-fetch all saved pools in background (works even without a wallet address in the entry)
+        if self.gui.online_mode:
+            self._lp_auto_fetch_all_saved()
         # Ensure Scan Wallet / Fetch Position buttons are enabled after restore
         refresh_btn = self._lp_widgets.get("refresh_btn")
         if refresh_btn and self.gui.online_mode:
@@ -479,6 +490,81 @@ class LPTab:
         # Fetch saved positions in background (fast — 1-4 seconds)
         self._lp_fetch_saved_only(address)
 
+    def _lp_auto_fetch_all_saved(self):
+        """Auto-fetch ALL saved pools on tab open / restore.
+
+        Works without a wallet address in the entry by using each saved
+        pool's stored wallet_address. Fetches all saved pools across all
+        wallets and venues in a single background thread.
+        """
+        if not self.gui.lp_engine or not self.gui.online_mode:
+            return
+        if not self.gui.key_manager:
+            return
+        all_saved = load_saved_pools(self.gui.key_manager.address_db)
+        if not all_saved:
+            return
+
+        from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
+        from venue_adapters.bsc_adapter import BSCAdapter
+
+        hype_adapter = HyperliquidAdapter()
+        bsc_adapter = BSCAdapter()
+
+        def _auto_fetch_thread():
+            positions = []
+            for entry in all_saved:
+                tid = entry.get("token_id")
+                venue = entry.get("venue", "HyperEVM")
+                wallet = entry.get("wallet_address", "")
+                if not tid:
+                    continue
+                if venue == "HyperEVM":
+                    try:
+                        pos = hype_adapter.fetch_evm_position_by_token_id(
+                            tid, self.gui.price_engine, wallet_address=wallet
+                        )
+                        if pos and not pos.error:
+                            positions.append(pos)
+                    except Exception:
+                        pass
+                elif venue in ("BSC", "bsc"):
+                    try:
+                        pos = bsc_adapter._fetch_position_by_token_id(
+                            tid, self.gui.price_engine, wallet_address=wallet
+                        )
+                        if pos and not pos.error:
+                            positions.append(pos)
+                    except Exception:
+                        pass
+            self.gui.root.after(0, lambda: self._lp_on_loaded_all_saved(positions))
+
+        threading.Thread(target=_auto_fetch_thread, daemon=True).start()
+
+    def _lp_on_loaded_all_saved(self, positions):
+        """Render auto-fetched saved pools, preserving any wallet address context."""
+        if not positions:
+            return
+        # Use the first position's wallet to update the saved-pools counter
+        scroll = self._lp_widgets.get("scroll")
+        if scroll:
+            for widget in scroll.winfo_children():
+                widget.destroy()
+        # Deduplicate
+        seen = set()
+        unique = []
+        for pos in positions:
+            key = f"{pos.venue}:{pos.position_id}"
+            if key not in seen:
+                seen.add(key)
+                unique.append(pos)
+        for pos in unique:
+            self._lp_render_card(pos)
+        status = self._lp_widgets.get("status_label")
+        if status:
+            status.configure(text=f"Last check: {len(unique)} saved position(s) auto-loaded")
+        self._lp_update_button_states()
+
     def _lp_maybe_auto_fetch(self):
         """If online and not yet auto-fetched, schedule a fetch."""
         if self.gui.online_mode and not self._lp_auto_fetched:
@@ -570,16 +656,27 @@ class LPTab:
             for entry in saved:
                 tid = entry.get("token_id")
                 venue = entry.get("venue", "HyperEVM")
-                if not tid or venue != "HyperEVM":
+                if not tid:
                     continue
-                try:
-                    pos = adapter.fetch_evm_position_by_token_id(
-                        tid, self.gui.price_engine, wallet_address=address
-                    )
-                    if pos and not pos.error:
-                        positions.append(pos)
-                except Exception:
-                    pass
+                if venue == "HyperEVM":
+                    try:
+                        pos = adapter.fetch_evm_position_by_token_id(
+                            tid, self.gui.price_engine, wallet_address=address
+                        )
+                        if pos and not pos.error:
+                            positions.append(pos)
+                    except Exception:
+                        pass
+                elif venue in ("BSC", "bsc"):
+                    try:
+                        from venue_adapters.bsc_adapter import BSCAdapter
+                        pos = BSCAdapter()._fetch_position_by_token_id(
+                            tid, self.gui.price_engine, wallet_address=address
+                        )
+                        if pos and not pos.error:
+                            positions.append(pos)
+                    except Exception:
+                        pass
             self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address))
 
         threading.Thread(target=_fast_thread, daemon=True).start()
@@ -596,25 +693,46 @@ class LPTab:
                 text="Fetching positions — scanning HyperEVM. This may take up to 6 minutes. Please be patient."
             )
 
+        include_closed = self._lp_widgets.get("include_closed_var")
+        include_closed = include_closed.get() if include_closed else False
+
         def _fetch_thread():
             try:
-                positions = self.gui.lp_engine.fetch_all_positions(address)
+                positions = self.gui.lp_engine.fetch_all_positions(
+                    address, include_closed=include_closed
+                )
                 # v5.1: Merge saved pools for this wallet (fast token-ID lookup)
                 saved = load_saved_pools(self.gui.key_manager.address_db, wallet_address=address)
                 print(f"[saved_pools] loaded {len(saved)} saved pools for {address}")
                 if saved:
                     from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
-                    adapter = HyperliquidAdapter()
+                    hype_adapter = HyperliquidAdapter()
+                    from venue_adapters.bsc_adapter import BSCAdapter
+                    k_adapter = BSCAdapter()
                     for entry in saved:
                         tid = entry.get("token_id")
                         venue = entry.get("venue", "HyperEVM")
-                        if tid and venue == "HyperEVM":
+                        if not tid:
+                            continue
+                        if venue == "HyperEVM":
                             # Skip if already in scanned positions
                             pid = f"hyperevm:{tid}"
                             if any(p.position_id == pid for p in positions):
                                 continue
                             try:
-                                pos = adapter.fetch_evm_position_by_token_id(tid, self.gui.price_engine)
+                                pos = hype_adapter.fetch_evm_position_by_token_id(tid, self.gui.price_engine)
+                                if pos and not pos.error:
+                                    positions.append(pos)
+                            except Exception:
+                                pass
+                        elif venue in ("BSC", "bsc"):
+                            pid = f"bsc:{tid}"
+                            if any(p.position_id == pid for p in positions):
+                                continue
+                            try:
+                                pos = k_adapter._fetch_position_by_token_id(
+                                    tid, self.gui.price_engine, wallet_address=address
+                                )
                                 if pos and not pos.error:
                                     positions.append(pos)
                             except Exception:
@@ -666,24 +784,45 @@ class LPTab:
         if status:
             status.configure(text=f"Fetching positions on {venue_key}...")
 
+        include_closed = self._lp_widgets.get("include_closed_var")
+        include_closed = include_closed.get() if include_closed else False
+
         def _fetch_thread():
             try:
                 # Use fetch_all_positions with venue_key filter
-                positions = self.gui.lp_engine.fetch_all_positions(address, venue_key=venue_key)
+                positions = self.gui.lp_engine.fetch_all_positions(
+                    address, venue_key=venue_key, include_closed=include_closed
+                )
                 # Merge saved pools for this wallet
                 saved = load_saved_pools(self.gui.key_manager.address_db, wallet_address=address)
                 if saved:
                     from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
-                    adapter = HyperliquidAdapter()
+                    from venue_adapters.bsc_adapter import BSCAdapter
+                    hype_adapter = HyperliquidAdapter()
+                    k_adapter = BSCAdapter()
                     for entry in saved:
                         tid = entry.get("token_id")
                         venue = entry.get("venue", "HyperEVM")
-                        if tid and venue == "HyperEVM":
+                        if not tid:
+                            continue
+                        if venue == "HyperEVM":
                             pid = f"hyperevm:{tid}"
                             if any(p.position_id == pid for p in positions):
                                 continue
                             try:
-                                pos = adapter.fetch_evm_position_by_token_id(tid, self.gui.price_engine)
+                                pos = hype_adapter.fetch_evm_position_by_token_id(tid, self.gui.price_engine)
+                                if pos and not pos.error:
+                                    positions.append(pos)
+                            except Exception:
+                                pass
+                        elif venue in ("BSC", "bsc"):
+                            pid = f"bsc:{tid}"
+                            if any(p.position_id == pid for p in positions):
+                                continue
+                            try:
+                                pos = k_adapter._fetch_position_by_token_id(
+                                    tid, self.gui.price_engine, wallet_address=address
+                                )
                                 if pos and not pos.error:
                                     positions.append(pos)
                             except Exception:
@@ -844,13 +983,18 @@ class LPTab:
             adapter_key = venue_key.lower()
             if adapter_key in ("hyperevm", "hyperliquid"):
                 adapter_key = "hyperliquid"
+            elif adapter_key in ("bsc", "krystal"):
+                adapter_key = "bsc"
             friendly = self.gui.LP_PLATFORM_MAP_reverse.get(adapter_key, venue_key)
             platform_menu.set(friendly)
-        # Fetch by token ID
+        # Fetch by token ID (strip venue prefix if present)
         pos_entry = self._lp_widgets.get("position_entry")
         if pos_entry:
             pos_entry.delete(0, "end")
-            pos_entry.insert(0, str(saved_pos.position_id))
+            raw_id = str(saved_pos.position_id)
+            if ":" in raw_id:
+                raw_id = raw_id.split(":", 1)[1]
+            pos_entry.insert(0, raw_id)
         self._lp_do_fetch_single()
 
     def _lp_on_loaded(self, positions, address):
@@ -1006,6 +1150,13 @@ class LPTab:
             if token_fees:
                 fee_str += f" ({token_fees})"
             line3_gray_parts.append(fee_str)
+        elif position.fees_earned:
+            # Show token-denominated fees even when USD value is 0 or unavailable
+            token_fees = " · ".join(
+                f"{amt:g} {sym}" for sym, amt in position.fees_earned.items() if amt
+            )
+            if token_fees:
+                line3_gray_parts.append(f"Fees: {token_fees}")
         if position.pnl_usd is not None:
             sign = "+" if position.pnl_usd >= 0 else ""
             pnl_str = f"PnL: {sign}{self.gui._format_currency(position.pnl_usd)}"
@@ -1073,64 +1224,86 @@ class LPTab:
             ctk.CTkLabel(info, text=f"Note: {position.error}",
                          font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
 
+        # Compact action buttons — single row, small icons
         button_frame = ctk.CTkFrame(card, fg_color="transparent")
-        button_frame.pack(side="right", padx=10, pady=8)
+        button_frame.pack(side="right", padx=8, pady=8)
+
+        # Row 1: Collect + Compound + Close (action buttons)
+        action_row = ctk.CTkFrame(button_frame, fg_color="transparent")
+        action_row.pack(fill="x")
+
+        status_label = self._lp_widgets.get("status_label")
+        can_manage_lp = position.position_id and (
+            position.position_id.startswith("hyperevm:") or position.position_id.startswith("bsc:")
+        )
+
+        if can_manage_lp:
+            collect_btn = ctk.CTkButton(action_row, text="💰 Collect", width=75, height=24,
+                              font=ctk.CTkFont(size=9, weight="bold"),
+                              fg_color=("#fd7e14", "#dc6602"),
+                              command=lambda pos=position: self._lp_collect_fees_dialog(pos))
+            collect_btn.pack(side="left", padx=1)
+            if status_label:
+                _lp_tooltip(collect_btn, status_label, "Collect Fees")
+
+            compound_btn = ctk.CTkButton(action_row, text="🔄 Compound", width=85, height=24,
+                              font=ctk.CTkFont(size=9, weight="bold"),
+                              fg_color=("#20c997", "#1aa179"),
+                              command=lambda pos=position: self._lp_compound_fees_dialog(pos))
+            compound_btn.pack(side="left", padx=1)
+            if status_label:
+                _lp_tooltip(compound_btn, status_label, "Compound Fees")
+
+            close_btn = ctk.CTkButton(action_row, text="✕ Close", width=65, height=24,
+                              font=ctk.CTkFont(size=9, weight="bold"),
+                              fg_color=("#6f42c1", "#5a32a3"),
+                              hover_color=("#5a32a3", "#42288a"),
+                              command=lambda pos=position: self._lp_close_position_dialog(pos))
+            close_btn.pack(side="left", padx=1)
+            if status_label:
+                _lp_tooltip(close_btn, status_label, "Close Position")
+
+        # Row 2: Copy + Save/Remove (utility buttons)
+        util_row = ctk.CTkFrame(button_frame, fg_color="transparent")
+        util_row.pack(fill="x", pady=(2, 0))
 
         if position.position_id:
-            ctk.CTkButton(button_frame, text="Copy", width=80, height=26,
-                          font=ctk.CTkFont(size=10),
-                          command=lambda pid=position.position_id: self.gui.copy_to_clipboard(pid)
-                          ).pack(pady=2)
+            copy_btn = ctk.CTkButton(util_row, text="📋 Copy", width=65, height=22,
+                              font=ctk.CTkFont(size=9),
+                              fg_color="gray40",
+                              command=lambda pid=position.position_id: self.gui.copy_to_clipboard(pid))
+            copy_btn.pack(side="left", padx=1)
 
-        if position.position_id and position.position_id.startswith("hyperevm:"):
-            ctk.CTkButton(button_frame, text="Compound Fees", width=110, height=26,
-                          font=ctk.CTkFont(size=10),
-                          fg_color=("#20c997", "#1aa179"),
-                          command=lambda pos=position: self._lp_compound_fees_dialog(pos)
-                          ).pack(pady=2)
-
-        if position.position_id:
-            ctk.CTkButton(button_frame, text="Collect Fees", width=100, height=26,
-                          font=ctk.CTkFont(size=10),
-                          fg_color=("#fd7e14", "#dc6602"),
-                          command=lambda pos=position: self._lp_collect_fees_dialog(pos)
-                          ).pack(pady=2)
-
-        if position.position_id and position.position_id.startswith("hyperevm:"):
-            ctk.CTkButton(button_frame, text="Close Position", width=100, height=26,
-                          font=ctk.CTkFont(size=10),
-                          fg_color=("#6f42c1", "#5a32a3"),
-                          hover_color=("#5a32a3", "#42288a"),
-                          command=lambda pos=position: self._lp_close_position_dialog(pos)
-                          ).pack(pady=2)
-
-        # v5.1: Save Pool / Remove Pool button — checks if pool is already saved
-        if position.position_id and position.position_id.startswith("hyperevm:"):
+        if can_manage_lp:
             try:
                 _token_id = int(position.position_id.split(":", 1)[1])
             except (ValueError, IndexError):
                 _token_id = 0
             _venue = position.venue or "HyperEVM"
             if _token_id and is_pool_saved(self.gui.key_manager.address_db, _token_id, _venue):
-                ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
-                              font=ctk.CTkFont(size=10),
-                              fg_color=("#dc3545", "#c82333"),
-                              hover_color=("#c82333", "#a71d2a"),
-                              command=lambda pos=position: self._lp_remove_pool(pos)
-                              ).pack(pady=2)
+                remove_btn = ctk.CTkButton(util_row, text="✕ Remove", width=70, height=22,
+                                  font=ctk.CTkFont(size=9),
+                                  fg_color=("#dc3545", "#c82333"),
+                                  hover_color=("#c82333", "#a71d2a"),
+                                  command=lambda pos=position: self._lp_remove_pool(pos))
+                remove_btn.pack(side="left", padx=1)
             else:
-                ctk.CTkButton(button_frame, text="Save Pool", width=80, height=26,
-                              font=ctk.CTkFont(size=10),
-                              fg_color=("#0d6efd", "#0b5ed7"),
-                              command=lambda pos=position: self._lp_save_pool(pos)
-                              ).pack(pady=2)
+                save_btn = ctk.CTkButton(util_row, text="★ Save", width=60, height=22,
+                                  font=ctk.CTkFont(size=9),
+                                  fg_color=("#0d6efd", "#0b5ed7"),
+                                  command=lambda pos=position: self._lp_save_pool(pos))
+                save_btn.pack(side="left", padx=1)
 
     def _lp_save_pool(self, position):
         """Save the current position's public identifiers to saved_pools.json."""
-        if not position.position_id or not position.position_id.startswith("hyperevm:"):
-            self.gui.show_notification("Only HyperEVM positions can be saved")
+        if not position.position_id:
             return
-        # Extract token_id from "hyperevm:<token_id>"
+        if not (
+            position.position_id.startswith("hyperevm:") or position.position_id.startswith("bsc:")
+        ):
+            self.gui.show_notification("Only HyperEVM and BSC positions can be saved")
+            return
+        # Extract token_id from "<prefix>:<token_id>"
         try:
             token_id = int(position.position_id.split(":", 1)[1])
         except (ValueError, IndexError):
@@ -1186,6 +1359,7 @@ class LPTab:
             pair = entry.get("pair", "Unknown Pair")
             if not tid:
                 continue
+            prefix = "hyperevm" if venue == "HyperEVM" else "bsc"
             # Placeholder card
             card = ctk.CTkFrame(scroll, corner_radius=10)
             card.pack(fill="x", pady=5, padx=5)
@@ -1195,9 +1369,10 @@ class LPTab:
             header_text = f"\u23F3 {pair}  \u00b7  {venue}"
             ctk.CTkLabel(info, text=header_text,
                          font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
-            ctk.CTkLabel(info, text=f"ID: hyperevm:{tid}",
+            ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
                          font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-            ctk.CTkLabel(info, text="Platform: HyperEVM (Project X)",
+            platform_label = "Platform: HyperEVM (Project X)" if venue == "HyperEVM" else "Platform: BSC (BNB Chain)"
+            ctk.CTkLabel(info, text=platform_label,
                          font=ctk.CTkFont(size=11), text_color=("#444444", "gray70")).pack(anchor="w", pady=(2, 0))
             ctk.CTkLabel(info, text="Fetching live data...",
                          font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
@@ -1208,12 +1383,12 @@ class LPTab:
             # Remove Pool button on placeholder (same logic as live cards)
             class _PlaceholderPos:
                 def __init__(self, position_id, pair, venue):
-                    self.gui.position_id = position_id
-                    self.gui.pair = pair
-                    self.gui.venue = venue
-                    self.gui.pool_id = ""
+                    self.position_id = position_id
+                    self.pair = pair
+                    self.venue = venue
+                    self.pool_id = ""
 
-            ph_pos = _PlaceholderPos(f"hyperevm:{tid}", pair, venue)
+            ph_pos = _PlaceholderPos(f"{prefix}:{tid}", pair, venue)
             ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
                           font=ctk.CTkFont(size=10),
                           fg_color=("#dc3545", "#c82333"),
@@ -1243,11 +1418,11 @@ class LPTab:
 
         class _SavedPos:
             def __init__(self, position_id, pair, venue, pool_id, wallet_address):
-                self.gui.position_id = position_id
-                self.gui.pair = pair
-                self.gui.venue = venue
-                self.gui.pool_id = pool_id
-                self.gui.wallet_address = wallet_address
+                self.position_id = position_id
+                self.pair = pair
+                self.venue = venue
+                self.pool_id = pool_id
+                self.wallet_address = wallet_address
 
         for entry in all_saved:
             tid = entry.get("token_id")
@@ -1257,12 +1432,13 @@ class LPTab:
             wallet_address = entry.get("wallet_address", "")
             if not tid:
                 continue
+            prefix = "hyperevm" if venue == "HyperEVM" else "bsc"
             card = ctk.CTkFrame(scroll, corner_radius=10)
             card.pack(fill="x", pady=5, padx=5)
             info = ctk.CTkFrame(card, fg_color="transparent")
             info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
 
-            header_text = f"⏳ {pair}  ·  {venue}  ·  ID: hyperevm:{tid}"
+            header_text = f"⏳ {pair}  ·  {venue}  ·  ID: {prefix}:{tid}"
             ctk.CTkLabel(info, text=header_text,
                          font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
             if pool_address:
@@ -1283,7 +1459,7 @@ class LPTab:
             button_frame = ctk.CTkFrame(card, fg_color="transparent")
             button_frame.pack(side="right", padx=10, pady=8)
 
-            saved_pos = _SavedPos(f"hyperevm:{tid}", pair, venue, pool_address, wallet_address)
+            saved_pos = _SavedPos(f"{prefix}:{tid}", pair, venue, pool_address, wallet_address)
             ctk.CTkButton(button_frame, text="Fetch", width=70, height=26,
                           font=ctk.CTkFont(size=10),
                           command=lambda pos=saved_pos: self._lp_fetch_saved_single(pos)
@@ -1305,12 +1481,15 @@ class LPTab:
         """Remove a saved pool from the encrypted vault.
 
         Args:
-            position: Object with position_id ("hyperevm:<token_id>"), venue, pair.
+            position: Object with position_id ("hyperevm:<token_id>" or
+                "bsc:<token_id>"), venue, pair.
             card_frame: Optional card widget to destroy directly (used by
                 placeholder cards that are not tracked in position_cards).
         """
-        if not position.position_id or not position.position_id.startswith("hyperevm:"):
-            self.gui.show_notification("Only HyperEVM positions can be removed")
+        if not position.position_id or not (
+            position.position_id.startswith("hyperevm:") or position.position_id.startswith("bsc:")
+        ):
+            self.gui.show_notification("Only HyperEVM and BSC positions can be removed")
             return
         try:
             token_id = int(position.position_id.split(":", 1)[1])
@@ -1331,9 +1510,12 @@ class LPTab:
             if card_frame:
                 card_frame.destroy()
             else:
-                card_key = f"{venue}:hyperevm:{token_id}"
+                position_prefix = "bsc" if position.position_id.startswith("bsc:") else "hyperevm"
+                card_key = f"{venue}:{position_prefix}:{token_id}"
                 cards = self._lp_widgets.get("position_cards", {})
                 card_frame = cards.pop(card_key, None)
+                if not card_frame:
+                    card_frame = cards.pop(f"{venue}:hyperevm:{token_id}", None)
                 if card_frame:
                     card_frame.destroy()
             self._lp_update_saved_pools_count(addr)
@@ -1370,11 +1552,10 @@ class LPTab:
         """Refresh just the fee display for a single LP position after collect/compound.
 
         Re-reads the position data from the adapter and updates the card in-place,
-        without triggering a full wallet rescan. If the re-read fails, falls back to
-        updating the fee display to $0.00 (since fees were just collected).
+        without triggering a full wallet rescan.
 
         Args:
-            position_id: The position ID (e.g., 'hyperevm:512359')
+            position_id: The position ID (e.g., 'hyperevm:512359' or 'bsc:2242261')
             wallet_address: The wallet address for fee reading
         """
         if not self.gui.lp_engine or not self.gui.online_mode:
@@ -1382,41 +1563,37 @@ class LPTab:
 
         def _refresh_thread():
             try:
-                # Parse the token ID from the position_id
-                from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
-                adapter = HyperliquidAdapter()
-
-                # Extract numeric token ID from position_id
                 raw_id = position_id
-                if raw_id.startswith("hyperevm:"):
+                if ":" in raw_id:
                     raw_id = raw_id.split(":", 1)[1]
                 numeric_tid = int(raw_id)
 
-                # Load saved-pool tracking data so the refreshed position includes
-                # cumulative fees, APR, and PnL.
-                tracking = get_position_tracking(self.gui.key_manager.address_db, numeric_tid, "HyperEVM")
-
-                # Re-read the position data (includes fresh fee reading)
-                fresh_pos = adapter.fetch_evm_position_by_token_id(
-                    numeric_tid, self.gui.price_engine, wallet_address=wallet_address
-                )
+                if position_id.startswith("bsc:"):
+                    from venue_adapters.bsc_adapter import BSCAdapter
+                    adapter = BSCAdapter()
+                    venue = "BSC"
+                    tracking = get_position_tracking(self.gui.key_manager.address_db, numeric_tid, "BSC")
+                    fresh_pos = adapter._fetch_position_by_token_id(
+                        numeric_tid, self.gui.price_engine, wallet_address=wallet_address
+                    )
+                else:
+                    from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
+                    adapter = HyperliquidAdapter()
+                    venue = "HyperEVM"
+                    tracking = get_position_tracking(self.gui.key_manager.address_db, numeric_tid, "HyperEVM")
+                    fresh_pos = adapter.fetch_evm_position_by_token_id(
+                        numeric_tid, self.gui.price_engine, wallet_address=wallet_address
+                    )
 
                 if fresh_pos and not fresh_pos.error:
                     if tracking:
-                        fresh_pos.raw_data = fresh_pos.raw_data or {}
-                        fresh_pos.raw_data["tracking"] = tracking
-                        # Re-decode with tracking data by re-fetching (the adapter
-                        # doesn't expose a recompute method, so merge manually).
                         fresh_pos = self._lp_merge_tracking(fresh_pos, tracking)
-                    # Update the card in-place
-                    self.gui.root.after(0, lambda: self._lp_update_card_fees(position_id, fresh_pos))
+                    self.gui.root.after(0, lambda: self._lp_update_card_fees(position_id, fresh_pos, venue))
                 else:
-                    # Fallback: just set fees to $0.00
-                    self.gui.root.after(0, lambda: self._lp_update_card_fees_zero(position_id))
+                    self.gui.root.after(0, lambda: self._lp_update_card_fees_zero(position_id, venue))
             except Exception as e:
                 print(f"[refresh_fees] error: {e}")
-                # Fallback: just set fees to $0.00
-                self.gui.root.after(0, lambda: self._lp_update_card_fees_zero(position_id))
+                self.gui.root.after(0, lambda: self._lp_update_card_fees_zero(position_id, ""))
 
         threading.Thread(target=_refresh_thread, daemon=True).start()
 
@@ -1449,57 +1626,41 @@ class LPTab:
 
         return position
 
-    def _lp_update_card_fees(self, position_id: str, fresh_pos):
+    def _lp_update_card_fees(self, position_id: str, fresh_pos, venue: str = "HyperEVM"):
         """Update a single position card with fresh fee data (in-place).
 
-        Instead of removing and re-rendering the card, this finds the card
-        by position_id and updates only the fee-related labels.
-
         Args:
-            position_id: The position ID (e.g., 'hyperevm:512359')
+            position_id: The position ID (e.g., 'hyperevm:512359' or 'bsc:2242261')
             fresh_pos: The fresh LPPosition with updated fees
+            venue: The venue name used as the card key prefix
         """
         cards = self._lp_widgets.get("position_cards", {})
-        key = f"HyperEVM:{position_id}"
+        key = f"{venue}:{position_id}"
         card = cards.get(key)
         if not card:
-            # Try with just the position_id (without venue prefix)
             card = cards.get(position_id)
         if not card:
-            # Card not found — fall back to full render
-            print(f"[update_card_fees] card not found for {position_id}, doing full render")
-            self._lp_do_fetch()
+            print(f"[update_card_fees] card not found for {key}, doing auto-fetch")
+            self._lp_auto_fetch_all_saved()
             return
 
-        # Destroy the old card and re-render with fresh data
-        # This is simpler than trying to find and update individual labels,
-        # and preserves the visual layout exactly
+        # Destroy the old card and re-render with fresh data in the same position
         card.destroy()
         cards.pop(key, None)
         cards.pop(position_id, None)
         self._lp_render_card(fresh_pos)
 
-        # Update status
         status = self._lp_widgets.get("status_label")
         if status:
             status.configure(text=f"Fees updated for {fresh_pos.pair}")
 
-    def _lp_update_card_fees_zero(self, position_id: str):
-        """Fallback: update card to show $0.00 fees after collect.
+    def _lp_update_card_fees_zero(self, position_id: str, venue: str = ""):
+        """Fallback: refresh all saved pools after a collect operation.
 
-        This is used when the fresh position read fails. It simply
-        re-renders the card with fees set to $0.00 by doing a targeted
-        re-fetch of just this position.
-
-        Args:
-            position_id: The position ID (e.g., 'hyperevm:512359')
+        Does NOT write to the position entry or trigger a single-position fetch
+        (which would clear the screen). Instead re-fetches all saved pools.
         """
-        # Just trigger a single-position fetch for this ID
-        pos_entry = self._lp_widgets.get("position_entry")
-        if pos_entry:
-            pos_entry.delete(0, "end")
-            pos_entry.insert(0, position_id)
-            self._lp_do_fetch_single()
+        self._lp_auto_fetch_all_saved()
 
     def _lp_open_add_liquidity(self, position):
         """Open the Add Liquidity dialog from the new module."""
@@ -1521,25 +1682,106 @@ class LPTab:
         """Open the Edit Position stub from the new module."""
         open_edit_position(self, position)
 
+    def _lp_get_chain_info(self, position_id: str) -> tuple:
+        """Return (chain_name, gas_token, venue_key) for a position_id.
+
+        Args:
+            position_id: e.g. 'hyperevm:2242261' or 'bsc:2242261'
+
+        Returns:
+            Tuple of (chain_display_name, gas_token_symbol, writer_venue_key).
+        """
+        if position_id.startswith("bsc:"):
+            return ("BNB Chain (BSC)", "BNB", "bsc")
+        elif position_id.startswith("hyperevm:"):
+            return ("HyperEVM", "HYPE", "hyperliquid")
+        else:
+            return ("HyperEVM", "HYPE", "hyperliquid")
+
+    def _lp_resolve_wallet_for_position(self, position) -> tuple:
+        """Resolve (wallet_address, account_name) for a position.
+
+        Tries in order:
+        1. The address entry widget
+        2. The _lp_last_fetched_address from the fetch
+        3. The saved pool's wallet_address (by looking up the position in saved_pools)
+
+        Returns:
+            Tuple of (wallet_address, account_name). May be ("", "") if unresolvable.
+        """
+        # 1. Try the address entry
+        wallet_address = self._lp_get_current_wallet_address()
+        if not wallet_address:
+            wallet_address = getattr(self, "_lp_last_fetched_address", "")
+
+        # 2. Try to find the wallet from saved pools
+        if not wallet_address and self.gui.key_manager and position.position_id:
+            try:
+                raw_id = position.position_id.split(":", 1)[1]
+                token_id = int(raw_id)
+                venue = position.venue or "HyperEVM"
+                all_saved = load_saved_pools(self.gui.key_manager.address_db)
+                for entry in all_saved:
+                    if entry.get("token_id") == token_id and entry.get("venue", "") == venue:
+                        wallet_address = entry.get("wallet_address", "")
+                        break
+            except (ValueError, IndexError):
+                pass
+
+        # Pre-fill the address entry so the user sees which wallet is being used
+        if wallet_address:
+            entry = self._lp_widgets.get("address_entry")
+            if entry and not entry.get().strip():
+                entry.delete(0, "end")
+                entry.insert(0, wallet_address)
+
+        # 3. Resolve account name from wallet address
+        account_name = ""
+        if wallet_address and self.gui.key_manager:
+            accounts_data = self.gui.key_manager.address_db.get("accounts", {})
+            for acct, data in accounts_data.items():
+                for addr in data.get("addresses", []):
+                    if addr.get("address", "").lower() == wallet_address.lower():
+                        account_name = acct
+                        break
+                if account_name:
+                    break
+
+        # Also try _lp_get_current_account_name as fallback
+        if not account_name:
+            account_name = self._lp_get_current_account_name()
+
+        return wallet_address, account_name
+
     def _lp_compound_fees_dialog(self, position):
         """Show confirmation dialog and compound fees for an LP position."""
         from tkinter import messagebox
-        wallet_address = self._lp_get_current_wallet_address() or getattr(self, "_lp_last_fetched_address", "")
+        wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
         if not wallet_address:
-            self.gui.show_notification("Enter or select a wallet address first", error=True)
+            self.gui.show_notification("Could not resolve wallet address for this position", error=True)
             return
-        account_name = self._lp_get_current_account_name()
         if not account_name:
             self.gui.show_notification("Could not resolve vault account for this address", error=True)
             return
+
+        chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
+
+        # BSC compound is not yet supported
+        if position.position_id.startswith("bsc:"):
+            self.gui.show_notification(
+                "Compound fees on BSC is not yet implemented. Use Collect Fees instead."
+            )
+            return
+
         confirm = messagebox.askyesno(
             "Confirm: Compound Fees",
             "You are about to compound fees for position:\n"
             f"  {position.pair} ({position.position_id})\n\n"
-            "This will submit multiple transactions on HyperEVM:\n"
+            f"This will submit multiple transactions on {chain_name}:\n"
             "  1. Collect accrued fees\n"
             "  2. Swap to optimal ratio (if needed)\n"
             "  3. Increase liquidity with collected amounts\n\n"
+            f"Ensure your wallet has {gas_token} for gas.\n"
             "The key_manager_agent must be running and unlocked.\n\n"
             "Continue?",
         )
@@ -1549,7 +1791,7 @@ class LPTab:
 
         def _do_compound():
             try:
-                writer = self.gui.lp_engine.get_writer("hyperliquid", self.gui.current_password)
+                writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
                 if writer is None:
                     self.gui.root.after(0, lambda: self.gui.show_notification(
                         "Writer not available", error=True))
@@ -1578,7 +1820,7 @@ class LPTab:
                 print(f"[compound_fees] error: {error_msg}")
                 if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
                     error_msg = (
-                        f"Wallet has no HYPE for gas. Send HYPE to your wallet address "
+                        f"Wallet has no {gas_token} for gas. Send {gas_token} to your wallet address "
                         f"to pay for transactions. (Details: {error_msg})"
                     )
                 elif "nonce too high" in error_msg.lower():
@@ -1602,19 +1844,22 @@ class LPTab:
     def _lp_collect_fees_dialog(self, position):
         """Show confirmation dialog and collect fees for an LP position."""
         from tkinter import messagebox
-        wallet_address = self._lp_get_current_wallet_address() or getattr(self, "_lp_last_fetched_address", "")
+        wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
         if not wallet_address:
-            self.gui.show_notification("Enter or select a wallet address first", error=True)
+            self.gui.show_notification("Could not resolve wallet address for this position", error=True)
             return
-        account_name = self._lp_get_current_account_name()
         if not account_name:
             self.gui.show_notification("Could not resolve vault account for this address", error=True)
             return
+
+        chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
+
         confirm = messagebox.askyesno(
             "Confirm: Collect Fees",
             "You are about to collect fees for position:\n"
             f"  {position.pair} ({position.position_id})\n\n"
-            "This will spend gas on HyperEVM.\n"
+            f"This will spend gas on {chain_name}.\n"
+            f"Ensure your wallet has {gas_token} for gas.\n"
             "The key_manager_agent must be running and unlocked.\n\n"
             "Continue?",
         )
@@ -1624,7 +1869,7 @@ class LPTab:
 
         def _do_collect():
             try:
-                writer = self.gui.lp_engine.get_writer("hyperliquid", self.gui.current_password)
+                writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
                 if writer is None:
                     self.gui.root.after(0, lambda: self.gui.show_notification(
                         "Writer not available", error=True))
@@ -1653,7 +1898,7 @@ class LPTab:
                 print(f"[collect_fees] error: {error_msg}")
                 if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
                     error_msg = (
-                        f"Wallet has no HYPE for gas. Send HYPE to your wallet address "
+                        f"Wallet has no {gas_token} for gas. Send {gas_token} to your wallet address "
                         f"to pay for transactions. (Details: {error_msg})"
                     )
                 elif "nonce too high" in error_msg.lower():
@@ -1764,14 +2009,16 @@ class LPTab:
         and fees, effectively closing the position.
         """
         from tkinter import messagebox
-        wallet_address = self._lp_get_current_wallet_address() or getattr(self, "_lp_last_fetched_address", "")
+        wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
         if not wallet_address:
-            self.gui.show_notification("Enter or select a wallet address first", error=True)
+            self.gui.show_notification("Could not resolve wallet address for this position", error=True)
             return
-        account_name = self._lp_get_current_account_name()
         if not account_name:
             self.gui.show_notification("Could not resolve vault account for this address", error=True)
             return
+
+        chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
+
         confirm = messagebox.askyesno(
             "Confirm: Close Position",
             "You are about to CLOSE this position completely:\n"
@@ -1780,6 +2027,8 @@ class LPTab:
             "  1. Withdraw ALL liquidity from the position\n"
             "  2. Collect any remaining fees\n\n"
             "Your position NFT will remain but with zero liquidity.\n"
+            f"This will spend gas on {chain_name}.\n"
+            f"Ensure your wallet has {gas_token} for gas.\n"
             "The key_manager_agent must be running and unlocked.\n\n"
             "Continue?",
         )
@@ -1789,7 +2038,7 @@ class LPTab:
 
         def _do_close():
             try:
-                writer = self.gui.lp_engine.get_writer("hyperliquid", self.gui.current_password)
+                writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
                 if writer is None:
                     self.gui.root.after(0, lambda: self.gui.show_notification(
                         "Writer not available", error=True))
@@ -1817,7 +2066,7 @@ class LPTab:
                 print(f"[close_position] error: {error_msg}")
                 if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
                     error_msg = (
-                        f"Wallet has no HYPE for gas. Send HYPE to your wallet address "
+                        f"Wallet has no {gas_token} for gas. Send {gas_token} to your wallet address "
                         f"to pay for transactions. (Details: {error_msg})"
                     )
                 self.gui.root.after(0, lambda: self.gui.show_notification(
@@ -1842,3 +2091,4 @@ class LPTab:
         address = self._lp_get_current_wallet_address()
         if address and self.gui.online_mode:
             self._lp_do_fetch()
+

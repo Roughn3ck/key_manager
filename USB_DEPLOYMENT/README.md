@@ -1,18 +1,25 @@
 # ColdStack
 
-*Offline-first crypto key vault with LP position management for Hyperliquid.*
+*Offline-first crypto key vault with LP position management for Hyperliquid and BNB Chain.*
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production-success)]()
 
-**Latest release: [v5.2.1 — Krystal Skeleton + Light/Dark Mode](https://github.com/Roughn3ck/key_manager/releases/tag/v5.2.1)**
+**Latest release: [v5.2.1 — BSC Pool Reads + Light/Dark Mode](https://github.com/Roughn3ck/key_manager/releases/tag/v5.2.1)**
 
 ---
 
 ## What ColdStack Does
 
-ColdStack is a portable Windows application that securely stores your crypto wallet keys and manages your Hyperliquid LP positions — all from an encrypted vault that runs offline by default.
+ColdStack is a portable Windows application that securely stores your crypto wallet keys and manages your Hyperliquid and BNB Chain LP positions — all from an encrypted vault that runs offline by default.
 
 No browser. No browser extension. No cloud. Your keys never leave your machine.
+
+### Appearance
+
+- **Light / Dark / System mode** — user-selectable in Settings
+- Preference persisted in a small `appearance.json` file next to the app
+- Mode applied at startup (before login screen renders)
+- All widgets adapt to the selected mode, including ttk Comboboxes
 
 ### Three core capabilities:
 
@@ -28,12 +35,16 @@ No browser. No browser extension. No cloud. Your keys never leave your machine.
 - CoinGecko price feeds with multi-currency display (USD, AUD, CAD, EUR, CHF)
 - Hyperliquid vault tracking (deposits, APR, P&L)
 
-**3. LP Position Management** — Concentrated liquidity management for HyperEVM, with Krystal venue adapter skeleton in place for v5.2 multi-venue expansion.
+**3. LP Position Management** — Concentrated liquidity management for HyperEVM and BNB Chain (BSC).
 - Position cards with health status, range, fees, PnL, APR, days active
 - Add Liquidity (+) with auto-balance "Zap In" — swap excess token to match position ratio
 - Remove Liquidity (−) with percentage slider and estimated output
 - Compound Fees — collect → swap → re-deposit in one flow
 - Collect Fees, Close Position, and Save Pool operations
+- Krystal venue adapter with multi-DEX support:
+  - Uniswap V3 on BSC (factory `0xdB1d...`, NPM `0x7b8A...`)
+  - PancakeSwap V3 on BSC (factory `0x0BFb...`, NPM `0x46A1...`)
+  - Wallet scan queries all registered V3 Position Managers
 - Every write requires explicit user confirmation — no autonomous trading
 
 ---
@@ -55,15 +66,18 @@ That's it. ~50MB self-contained EXE. Works on any Windows 10/11 machine.
 
 ```
 +-------------+      +---------------------------+      +------------------+
-|  USB Drive  |      |  ColdStack GUI            |      |  HyperEVM         |
+|  USB Drive  |      |  ColdStack GUI            |      |  HyperEVM        |
 |             |      |  (coldstack.exe)          |      |  RPC / Hyperliquid|
 | key_vault   |----->|                           |<---->|  API              |
-| .encrypted  |      |  ┌─ Wallet tab            |      |                  |
-|             |      |  ├─ HL1 Vaults tab        |      |  Read: positions, |
-|             |      |  └─ LP Positions tab      |      |  balances, fees   |
-|             |      |                           |      |  Write: collect,  |
-|             |      |  Embedded signing agent    |      |  swap, deposit    |
-|             |      |  (localhost:8842)          |      |                  |
+| .encrypted  |      |  ┌─ Wallet tab            |      |  BSC RPC          |
+|             |      |  ├─ HL1 Vaults tab        |      |                  |
+|             |      |  └─ LP Positions tab      |      |  Read: positions,|
+|             |      |                           |      |  balances, fees   |
+|             |      |  Embedded signing agent    |      |  Write: collect,  |
+|             |      |  (localhost:8842)          |      |  swap, deposit    |
+|             |      |                           |      |                  |
+|             |      |  appearance.json           |      |  Venues:          |
+|             |      |  (theme preference)        |      |  HyperEVM, BSC    |
 +-------------+      +---------------------------+      +------------------+
 ```
 
@@ -73,6 +87,7 @@ That's it. ~50MB self-contained EXE. Works on any Windows 10/11 machine.
 - **Keys never exposed** — signing happens inside the embedded agent; private keys never returned to any caller
 - **Every write is user-confirmed** — no bots, no auto-trading, no autonomous rebalancing
 - **Auto-lock** — 5-minute inactivity timeout (with override checkbox)
+- **Session cleanup** — session file deleted on window close (WM_DELETE_WINDOW handler + atexit fallback)
 - **No telemetry** — the only outbound request is a user-initiated update check
 
 ### Headless Agent
@@ -99,7 +114,7 @@ python3 src/key_manager_agent.py --vault key_vault.encrypted --serve --port 8842
 
 ColdStack speaks Uniswap V3 concentrated liquidity on HyperEVM. It reads and writes to the Project X PositionManager and SwapRouter contracts directly.
 
-### What works today (v5.1.4)
+### What works today (v5.2.1)
 
 | Operation | Status |
 |-----------|--------|
@@ -114,11 +129,14 @@ ColdStack speaks Uniswap V3 concentrated liquidity on HyperEVM. It reads and wri
 | Close Position | ✅ |
 | Auto-Balance / Zap In (swap to match ratio) | ✅ |
 | Swap (exactInputSingle) | ✅ |
-| Edit Position (tick range, rebalance) | 🔜 v5.2 |
 | EVM ↔ HL1 Transfer (bridge assets) | ✅ |
 | Vault Explore + Deposit | ✅ |
 | HyperEVM balance fiat conversion (WHYPE, UBTC) | ✅ |
 | Close Position auto-refresh | ✅ |
+| HyperEVM positions (Project X) | ✅ |
+| BSC Uniswap V3 positions | ✅ |
+| BSC PancakeSwap V3 positions | ✅ |
+| Edit Position (tick range, rebalance) | 🔜 v5.2 |
 
 ### The Compound Fees Flow
 
@@ -160,14 +178,14 @@ Three on-chain transactions, each confirmed independently. Gas is paid in WHYPE 
 ## Roadmap
 
 ### v5.2 — Multi-Venue LP Aggregation (in progress)
-- Krystal skeleton adapter (BSC / PancakeSwap V3 via direct RPC reads)
+- Krystal adapter: full BSC pool reads (Uniswap V3 + PancakeSwap V3)
 - Light/Dark/System appearance mode toggle
 - Edit Position: tick range editing (narrow/widen the range)
 - Rebalance flow (close → swap → reopen at new range)
 - Slippage protection (amountOutMinimum > 0)
 
 ### v5.3+ — More Venues
-- Krystal API / full PancakeSwap V3 reads
+- Krystal API / full multi-chain reads
 - Orca, Raydium, Cetus (Solana DEXs)
 - Cross-chain LP position aggregation
 
@@ -201,8 +219,9 @@ python src/main.py derive-address --account "G5" --chain "EVM" --index 0
 
 ```
 src/
-  gui_main_v5.py              Main GUI (~2,600 lines, core wallet only)
-  settings_dialog.py          Settings dialog (online/currency/RPC/API keys)
+  gui_main_v5.py              Main GUI (~2,540 lines, core wallet only)
+  appearance.py               Light/dark mode management (v5.2.1)
+  settings_dialog.py          Settings dialog (online/currency/RPC/API keys/appearance)
   account_dialogs.py          Account management dialogs
   lp_tab.py                   LP Positions tab
   vault_tab.py                HL1 Vaults tab
@@ -221,7 +240,7 @@ src/
   venue_adapters/
     hyperliquid_adapter.py    Read adapter (positions, fees, balances)
     hyperliquid_writer.py     Write adapter (collect, swap, increase, close)
-    krystal_adapter.py        Krystal skeleton adapter (BSC, ETH, ARB, SOL)
+    krystal_adapter.py        BSC multi-DEX reads (Uniswap V3 + PancakeSwap V3)
     venue_writer.py           Abstract base + dataclasses
 ```
 

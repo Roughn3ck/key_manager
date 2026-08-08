@@ -28,6 +28,10 @@ def load_saved_pools(address_db: Dict[str, Any], wallet_address: Optional[str] =
     pools = address_db.get("saved_pools", [])
     if not isinstance(pools, list):
         return []
+    # Normalize legacy venue names (Krystal → BSC)
+    for entry in pools:
+        if isinstance(entry, dict) and entry.get("venue") in ("Krystal", "krystal"):
+            entry["venue"] = "BSC"
     if wallet_address:
         wallet_lower = wallet_address.lower()
         pools = [

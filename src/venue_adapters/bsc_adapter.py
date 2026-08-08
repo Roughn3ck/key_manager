@@ -86,6 +86,7 @@ SELECTOR_SYMBOL = "0x95d89b41"
 SELECTOR_GET_POOL = "0x1698ee82"
 # collect() is used as a read-only eth_call to get exact uncollected fees.
 SELECTOR_COLLECT = "0xfc6f7865"  # collect((uint256,address,uint128,uint128))
+SELECTOR_DECREASE_LIQUIDITY = "0x2c1eaa8e"  # decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))
 
 # ---------------------------------------------------------------------------
 # Token registries
@@ -284,7 +285,7 @@ def _get_token_symbol(token_address: str) -> str:
             if length:
                 offset = 66 + 64
                 hex_body = result[2:][offset:offset + length * 2]
-                return bytes.fromhex(hex_body).decode("utf-8", errors="ignore").strip()
+                return bytes.fromhex(hex_body).decode("utf-8", errors="ignore").replace("\x00", "").strip()
     except Exception:
         pass
     return lower[-6:].upper()
@@ -432,6 +433,16 @@ def _decode_positions_response(
     symbol0 = _get_token_symbol(token0)
     symbol1 = _get_token_symbol(token1)
 
+    # Override with DexScreener's correct symbol if available
+    # (on-chain symbol() can return null-padded or wrong symbols)
+    if price_engine:
+        ds_symbol0 = price_engine.get_token_symbol_by_address(token0, chain="bsc")
+        if ds_symbol0:
+            symbol0 = ds_symbol0
+        ds_symbol1 = price_engine.get_token_symbol_by_address(token1, chain="bsc")
+        if ds_symbol1:
+            symbol1 = ds_symbol1
+
     pool_address = _pool_for_token_ids(token0, token1, fee, position_manager)
     current_price: Optional[float] = None
     current_tick: Optional[int] = None
@@ -453,9 +464,18 @@ def _decode_positions_response(
 
     # Estimate real uncollected fees via collect() eth_call (read-only).
     fees_note = None
+    if not wallet_address and position_manager:
+        # Look up the actual owner of this NFT and use it for the collect() call
+        owner_result = _bsc_rpc_call(
+            "eth_call",
+            [{"to": position_manager, "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id)}, "latest"],
+        )
+        if owner_result and isinstance(owner_result, str) and len(owner_result) >= 66:
+            wallet_address = _decode_address(owner_result[2:66])
+
     if wallet_address:
         real_fee0, real_fee1, fee_status = _estimate_uncollected_fees(
-            token_id, wallet_address, decimals0, decimals1
+            token_id, wallet_address, decimals0, decimals1, position_manager
         )
         if fee_status == "ok":
             owed0_h = real_fee0
@@ -468,9 +488,21 @@ def _decode_positions_response(
         fees_note = "Connect wallet to read fees"
 
     fees_earned = {symbol0: owed0_h, symbol1: owed1_h}
-    fees_earned_usd = (
-        _usd_value(owed0_h, symbol0, price_engine) or 0.0
-    ) + (_usd_value(owed1_h, symbol1, price_engine) or 0.0)
+
+    # Compute fees USD value using DexScreener first, CoinGecko fallback
+    fees_earned_usd = 0.0
+    if price_engine:
+        fee_price0 = price_engine.get_token_price_by_address(token0, chain="bsc")
+        if fee_price0:
+            fees_earned_usd += owed0_h * fee_price0
+        else:
+            fees_earned_usd += _usd_value(owed0_h, symbol0, price_engine) or 0.0
+
+        fee_price1 = price_engine.get_token_price_by_address(token1, chain="bsc")
+        if fee_price1:
+            fees_earned_usd += owed1_h * fee_price1
+        else:
+            fees_earned_usd += _usd_value(owed1_h, symbol1, price_engine) or 0.0
 
     # Compute position value using V3 liquidity math
     position_value_usd = fees_earned_usd
@@ -487,9 +519,15 @@ def _decode_positions_response(
         if sqrtPriceX96 and sqrtPriceX96 > 0:
             sqrt_price = sqrtPriceX96 / (2 ** 96)
         elif current_price and current_price > 0:
-            sqrt_price = math.sqrt(current_price)
+            # current_price is human-readable (adjusted for decimals).
+            # Convert back to raw price for V3 math.
+            raw_price = current_price * (10 ** (decimals1 - decimals0))
+            sqrt_price = math.sqrt(raw_price)
         else:
             sqrt_price = None
+
+        if sqrt_price is None:
+            print(f"[bsc-value] No price data for token {token_id} — pool state fetch may have failed")
 
         if sqrt_price and sqrt_price > 0:
             if tick_lower <= current_tick <= tick_upper:
@@ -505,9 +543,26 @@ def _decode_positions_response(
             amount0_human = amount0_raw / (10 ** decimals0)
             amount1_human = amount1_raw / (10 ** decimals1)
 
-            val0 = _usd_value(amount0_human, symbol0, price_engine) or 0.0
-            val1 = _usd_value(amount1_human, symbol1, price_engine) or 0.0
+            # Primary: DexScreener token price by contract address
+            val0 = 0.0
+            val1 = 0.0
+            if price_engine:
+                price0 = price_engine.get_token_price_by_address(token0, chain="bsc")
+                if price0:
+                    val0 = amount0_human * price0
+                price1 = price_engine.get_token_price_by_address(token1, chain="bsc")
+                if price1:
+                    val1 = amount1_human * price1
+
+            # Fallback: CoinGecko by symbol
+            if val0 == 0.0:
+                val0 = _usd_value(amount0_human, symbol0, price_engine) or 0.0
+            if val1 == 0.0:
+                val1 = _usd_value(amount1_human, symbol1, price_engine) or 0.0
+
             position_value_usd = val0 + val1
+
+            print(f"[bsc-value] token {token_id}: val0={val0} val1={val1} total={position_value_usd}")
 
             deposit_amounts[symbol0] = amount0_human
             deposit_amounts[symbol1] = amount1_human
@@ -523,7 +578,7 @@ def _decode_positions_response(
     return LPPosition(
         position_id=f"bsc:{token_id}",
         pool_id=pool_address,
-        venue="Krystal",
+        venue="BSC",
         chain="BSC",
         pair=f"{symbol0}/{symbol1}",
         token_0=symbol0,
@@ -588,6 +643,8 @@ def _estimate_uncollected_fees(
     if not position_manager:
         position_manager = PANCAKE_V3_POSITION_MANAGER
 
+    print(f"[fees] token {token_id}: using position_manager={position_manager}")
+
     uint128_max = (1 << 128) - 1
     data = (
         SELECTOR_COLLECT
@@ -604,6 +661,7 @@ def _estimate_uncollected_fees(
                 "eth_call",
                 [{"to": position_manager, "data": data, "from": wallet_address}, "latest"],
             )
+            print(f"[fees] token {token_id}: raw collect() result length={len(result) if result else 0}")
             if not result or not isinstance(result, str) or len(result) < 2 + 64:
                 print(f"[fees] collect() eth_call returned no data for token {token_id}")
                 # Try without the `from` field — some RPCs don't require it
@@ -662,21 +720,21 @@ def _is_evm_address(value: str) -> bool:
 
 
 @register_adapter
-class KrystalAdapter(VenueAdapter):
-    """Krystal adapter for multichain LP position reads (BSC PancakeSwap V3)."""
+class BSCAdapter(VenueAdapter):
+    """BSC adapter for V3 LP position reads on BNB Chain."""
 
-    VENUE_KEY = "krystal"
+    VENUE_KEY = "bsc"
     CHAINS = ["bsc", "ethereum", "arbitrum", "solana"]
 
     def can_handle(self, address_or_id: str, chain_hint: str = "") -> bool:
-        """Return True for 42-char EVM addresses or numeric IDs with Krystal/BSC hint."""
+        """Return True for 42-char EVM addresses or numeric IDs with BSC hint."""
         if _is_evm_address(address_or_id):
             hint = (chain_hint or "").lower()
-            return any(k in hint for k in ("krystal", "bsc", "pancakeswap"))
-        # Numeric token ID with BSC/Krystal hint
+            return any(k in hint for k in ("bsc", "pancakeswap"))
+        # Numeric token ID with BSC hint
         if address_or_id.isdigit():
             hint = (chain_hint or "").lower()
-            return any(k in hint for k in ("krystal", "bsc", "pancakeswap"))
+            return any(k in hint for k in ("bsc", "pancakeswap"))
         return False
 
     def _fetch_position_by_token_id(
@@ -713,7 +771,7 @@ class KrystalAdapter(VenueAdapter):
             if pos is None:
                 return LPPosition(
                     position_id=f"bsc:{token_id}",
-                    venue="Krystal",
+                    venue="BSC",
                     chain="BSC",
                     error=f"Could not decode positions({token_id}) response.",
                 )
@@ -721,7 +779,7 @@ class KrystalAdapter(VenueAdapter):
 
         return LPPosition(
             position_id=f"bsc:{token_id}",
-            venue="Krystal",
+            venue="BSC",
             chain="BSC",
             error=f"Token ID {token_id} not found on any V3 Position Manager on BSC.",
         )
@@ -738,7 +796,7 @@ class KrystalAdapter(VenueAdapter):
         if not token0 or not token1:
             return LPPosition(
                 position_id=pool_address,
-                venue="Krystal",
+                venue="BSC",
                 chain="BSC",
                 error="Could not read pool state. The BSC RPC may be unavailable or this is not a valid PancakeSwap V3 pool.",
             )
@@ -749,7 +807,7 @@ class KrystalAdapter(VenueAdapter):
         return LPPosition(
             position_id=pool_address,
             pool_id=pool_address,
-            venue="Krystal",
+            venue="BSC",
             chain="BSC",
             pair=f"{symbol0}/{symbol1}",
             token_0=symbol0,
@@ -768,7 +826,7 @@ class KrystalAdapter(VenueAdapter):
     ) -> LPPosition:
         """Fetch a single PancakeSwap V3 LP position by NFT token ID or pool address."""
         if not online_mode:
-            raise OfflineError("Krystal adapter requires online mode.")
+            raise OfflineError("BSC adapter requires online mode.")
 
         address_or_id = address_or_id.strip()
 
@@ -778,7 +836,7 @@ class KrystalAdapter(VenueAdapter):
             if lowered == pm_addr.lower():
                 return LPPosition(
                     position_id=address_or_id,
-                    venue="Krystal",
+                    venue="BSC",
                     chain="BSC",
                     error=f"This is the {pm_name} Position Manager contract, not a position. Enter the numeric NFT Position ID (e.g. 123456) or a pool address.",
                 )
@@ -786,7 +844,7 @@ class KrystalAdapter(VenueAdapter):
             if lowered == fac_addr.lower():
                 return LPPosition(
                     position_id=address_or_id,
-                    venue="Krystal",
+                    venue="BSC",
                     chain="BSC",
                     error=f"This is the {fac_name} Factory contract, not a pool. Enter the numeric NFT Position ID or a pool address.",
                 )
@@ -805,7 +863,7 @@ class KrystalAdapter(VenueAdapter):
         # 4. Unknown format
         return LPPosition(
             position_id=address_or_id,
-            venue="Krystal",
+            venue="BSC",
             chain="BSC",
             error="Unrecognized input. Enter a numeric NFT Position ID or a 42-character pool address (0x...).",
         )
@@ -821,7 +879,7 @@ class KrystalAdapter(VenueAdapter):
         Scans all registered V3 Position Managers (Uniswap V3, PancakeSwap V3).
         """
         if not online_mode:
-            raise OfflineError("Krystal adapter requires online mode.")
+            raise OfflineError("BSC adapter requires online mode.")
 
         wallet_address = wallet_address.lower().strip()
         positions: List[LPPosition] = []
@@ -841,7 +899,7 @@ class KrystalAdapter(VenueAdapter):
                 except (ValueError, IndexError):
                     balance = 0
 
-            print(f"[krystal-scan] {pm_name} balanceOf={balance} for {wallet_address}")
+            print(f"[bsc-scan] {pm_name} balanceOf={balance} for {wallet_address}")
 
             if balance == 0:
                 continue
@@ -858,11 +916,11 @@ class KrystalAdapter(VenueAdapter):
                     try:
                         token_id = int(result[2:66], 16)
                         owned_ids.append(token_id)
-                        print(f"[krystal-scan] {pm_name} tokenOfOwnerByIndex({idx}) = {token_id}")
+                        print(f"[bsc-scan] {pm_name} tokenOfOwnerByIndex({idx}) = {token_id}")
                     except (ValueError, IndexError):
                         pass
 
-            print(f"[krystal-scan] {pm_name} found {len(owned_ids)} token IDs: {owned_ids}")
+            print(f"[bsc-scan] {pm_name} found {len(owned_ids)} token IDs: {owned_ids}")
 
             # 3. Fetch each position by token ID
             for token_id in owned_ids:
@@ -877,7 +935,7 @@ class KrystalAdapter(VenueAdapter):
     ) -> Dict[str, float]:
         """Return accumulated uncollected fees for a V3 position on BSC."""
         if not online_mode:
-            raise OfflineError("Krystal adapter requires online mode.")
+            raise OfflineError("BSC adapter requires online mode.")
 
         if position_id.startswith("bsc:"):
             try:
@@ -926,8 +984,13 @@ class KrystalAdapter(VenueAdapter):
         return {}
 
     def can_write(self) -> bool:
-        """Writer support is planned for v5.2.1."""
-        return False
+        """Writer support is available in v5.2.1."""
+        return True
+
+    def get_writer(self):
+        """Return a BSCWriter instance."""
+        from venue_adapters.bsc_writer import BSCWriter
+        return BSCWriter()
 
     def referral_code(self) -> Optional[str]:
         """Optional Krystal referral code — not configured yet."""
@@ -936,3 +999,5 @@ class KrystalAdapter(VenueAdapter):
     def referral_url(self) -> Optional[str]:
         """Optional Krystal referral URL — not configured yet."""
         return None
+
+

@@ -303,7 +303,7 @@ class ColdStackGUI:
     # Future adapters: add entries here (friendly_name -> adapter_key).
     LP_PLATFORM_MAP = {
         "HyperEVM (Project X)": "hyperliquid",
-        "Krystal (BSC)": "krystal",
+        "BSC (BNB Chain)": "bsc",
     }
     # Reverse map for converting adapter keys to friendly display names.
     LP_PLATFORM_MAP_reverse = {v: k for k, v in LP_PLATFORM_MAP.items()}
@@ -397,7 +397,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v5.2.1 - ColdStack | Krystal Skeleton + Light/Dark Mode",
+            text="v5.2.1 - ColdStack | BSC V3 + Light/Dark Mode",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )

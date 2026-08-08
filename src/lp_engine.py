@@ -353,7 +353,11 @@ class LPEngine:
         return self.strategy_engine.analyze(pos)
 
     def fetch_all_positions(
-        self, wallet_address: str, venue_key: Optional[str] = None, chain_hint: str = ""
+        self,
+        wallet_address: str,
+        venue_key: Optional[str] = None,
+        chain_hint: str = "",
+        include_closed: bool = False,
     ) -> List[LPPosition]:
         """Fetch all positions for a wallet, auto-detecting venue if not supplied."""
         self._require_online()
@@ -387,11 +391,11 @@ class LPEngine:
         lp_positions = []
         for p in positions:
             pid = p.position_id or ""
-            # Skip spot holdings
+            # Skip spot holdings always
             if ":spot:" in pid:
                 continue
-            # Skip closed EVM LP positions (liquidity == 0)
-            if pid.startswith("hyperevm:") and p.raw_data:
+            # Filter closed positions unless include_closed is True
+            if not include_closed and p.raw_data:
                 liquidity = p.raw_data.get("liquidity", 0)
                 if liquidity == 0:
                     continue

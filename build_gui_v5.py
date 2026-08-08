@@ -3,7 +3,7 @@
 PyInstaller build script for ColdStack GUI v5.2.1.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v5.2.1 (August 2026) - Krystal Skeleton + Light/Dark Mode
+Version: v5.2.1 (August 2026) - BSC V3 + Light/Dark Mode
 Builds: src/gui_main_v5.py
 Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
 
@@ -109,6 +109,7 @@ def build_gui_exe():
         '--hidden-import=venue_adapters.hyperliquid_adapter',
         '--hidden-import=venue_adapters.venue_writer',
         '--hidden-import=venue_adapters.hyperliquid_writer',
+        '--hidden-import=venue_adapters.bsc_writer',
         '--collect-submodules=venue_adapters',
         # --- v5.1: Saved pools ---
         '--hidden-import=saved_pools',
@@ -256,7 +257,7 @@ def main():
 
     print("=" * 60)
     print("ColdStack v5.2.1 - Portable EXE Builder")
-    print("Krystal Skeleton + Light/Dark Mode")
+    print("BSC V3 + Light/Dark Mode")
     print("=" * 60)
 
     if not check_dependencies():
