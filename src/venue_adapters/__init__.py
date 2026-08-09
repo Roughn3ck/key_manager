@@ -8,3 +8,4 @@ Version: v5.2.1 (August 2026) - Renamed Krystal adapter to BSC adapter
 
 from .hyperliquid_adapter import HyperliquidAdapter  # noqa: F401
 from .bsc_adapter import BSCAdapter  # noqa: F401
+from .aerodrome_adapter import AerodromeAdapter  # noqa: F401

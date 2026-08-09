@@ -528,6 +528,16 @@ class LPTab:
                             positions.append(pos)
                     except Exception:
                         pass
+                elif venue in ("Aerodrome", "aerodrome"):
+                    try:
+                        from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                        pos = AerodromeAdapter()._fetch_position_by_token_id(
+                            tid, self.gui.price_engine, wallet_address=wallet
+                        )
+                        if pos and not pos.error:
+                            positions.append(pos)
+                    except Exception:
+                        pass
                 elif venue in ("BSC", "bsc"):
                     try:
                         pos = bsc_adapter._fetch_position_by_token_id(
@@ -537,6 +547,31 @@ class LPTab:
                             positions.append(pos)
                     except Exception:
                         pass
+
+            # v5.2.2: Also check gauges for saved Aerodrome pools. The direct
+            # token-id fetch above catches unstaked NFTs; this catches staked
+            # positions where the gauge owns the NFT.
+            aero_saved = [
+                e for e in all_saved
+                if e.get("venue", "").lower() == "aerodrome"
+            ]
+            if aero_saved:
+                try:
+                    from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                    aero_adapter = AerodromeAdapter()
+                    for entry in aero_saved:
+                        wallet = entry.get("wallet_address", "")
+                        if not wallet:
+                            continue
+                        staked = aero_adapter._find_staked_positions_via_saved_pools(
+                            wallet, self.gui.price_engine, [entry]
+                        )
+                        for staked_pos in staked:
+                            if not any(p.position_id == staked_pos.position_id for p in positions):
+                                positions.append(staked_pos)
+                except Exception:
+                    pass
+
             self.gui.root.after(0, lambda: self._lp_on_loaded_all_saved(positions))
 
         threading.Thread(target=_auto_fetch_thread, daemon=True).start()
@@ -667,6 +702,16 @@ class LPTab:
                             positions.append(pos)
                     except Exception:
                         pass
+                elif venue in ("Aerodrome", "aerodrome"):
+                    try:
+                        from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                        pos = AerodromeAdapter()._fetch_position_by_token_id(
+                            tid, self.gui.price_engine, wallet_address=address
+                        )
+                        if pos and not pos.error:
+                            positions.append(pos)
+                    except Exception:
+                        pass
                 elif venue in ("BSC", "bsc"):
                     try:
                         from venue_adapters.bsc_adapter import BSCAdapter
@@ -677,6 +722,23 @@ class LPTab:
                             positions.append(pos)
                     except Exception:
                         pass
+            # v5.2.2: Saved Aerodrome pools may be staked in a gauge, and
+            # fetch_all_positions cannot enumerate them. Check gauges here.
+            aero_saved = [
+                e for e in saved
+                if e.get("venue", "").lower() == "aerodrome"
+            ]
+            if aero_saved:
+                try:
+                    from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                    staked = AerodromeAdapter()._find_staked_positions_via_saved_pools(
+                        address, self.gui.price_engine, aero_saved
+                    )
+                    for staked_pos in staked:
+                        if not any(p.position_id == staked_pos.position_id for p in positions):
+                            positions.append(staked_pos)
+                except Exception:
+                    pass
             self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address))
 
         threading.Thread(target=_fast_thread, daemon=True).start()
@@ -725,6 +787,19 @@ class LPTab:
                                     positions.append(pos)
                             except Exception:
                                 pass
+                        elif venue in ("Aerodrome", "aerodrome"):
+                            pid = f"base:{tid}"
+                            if any(p.position_id == pid for p in positions):
+                                continue
+                            try:
+                                from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                                pos = AerodromeAdapter()._fetch_position_by_token_id(
+                                    tid, self.gui.price_engine, wallet_address=address
+                                )
+                                if pos and not pos.error:
+                                    positions.append(pos)
+                            except Exception:
+                                pass
                         elif venue in ("BSC", "bsc"):
                             pid = f"bsc:{tid}"
                             if any(p.position_id == pid for p in positions):
@@ -737,6 +812,42 @@ class LPTab:
                                     positions.append(pos)
                             except Exception:
                                 pass
+                # v5.2.2: Aerodrome wallet scan cannot enumerate non-sequential
+                # NFTs, so also check gauges for any saved Aerodrome pools.
+                aero_saved = [
+                    e for e in saved
+                    if e.get("venue", "").lower() == "aerodrome"
+                ]
+                if aero_saved:
+                    try:
+                        from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                        staked = AerodromeAdapter()._find_staked_positions_via_saved_pools(
+                            address, self.gui.price_engine, aero_saved
+                        )
+                        for staked_pos in staked:
+                            if not any(p.position_id == staked_pos.position_id for p in positions):
+                                positions.append(staked_pos)
+                    except Exception:
+                        pass
+
+                # v5.2.2: If full scan found no Aerodrome positions, guide the
+                # user to manually enter their NFT token ID (staked positions
+                # are held by gauges and invisible to wallet scans).
+                aero_positions = [p for p in positions if p.venue and p.venue.lower() == "aerodrome"]
+                if not aero_positions and not aero_saved:
+                    from tkinter import messagebox
+                    self.gui.root.after(0, lambda: messagebox.showinfo(
+                        "Aerodrome Positions",
+                        "No Aerodrome positions found via wallet scan.\n\n"
+                        "If you have staked Aerodrome SlipStream positions, they won't appear "
+                        "in a wallet scan because the gauge contract holds the NFT.\n\n"
+                        "To find your position:\n"
+                        "1. Go to aerodrome.finance → Dashboard\n"
+                        "2. Find your position under \"Liquidity Rewards\"\n"
+                        "3. Look for the # number next to \"Deposit\" (e.g. #50282741)\n"
+                        "4. Enter that number in the Position ID / NFT ID field and click Fetch Position",
+                    ))
+
                 self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address))
             except OfflineError:
                 self.gui.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
@@ -815,6 +926,19 @@ class LPTab:
                                     positions.append(pos)
                             except Exception:
                                 pass
+                        elif venue in ("Aerodrome", "aerodrome"):
+                            pid = f"base:{tid}"
+                            if any(p.position_id == pid for p in positions):
+                                continue
+                            try:
+                                from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                                pos = AerodromeAdapter()._fetch_position_by_token_id(
+                                    tid, self.gui.price_engine, wallet_address=address
+                                )
+                                if pos and not pos.error:
+                                    positions.append(pos)
+                            except Exception:
+                                pass
                         elif venue in ("BSC", "bsc"):
                             pid = f"bsc:{tid}"
                             if any(p.position_id == pid for p in positions):
@@ -827,6 +951,41 @@ class LPTab:
                                     positions.append(pos)
                             except Exception:
                                 pass
+                # v5.2.2: Aerodrome wallet scan cannot enumerate non-sequential
+                # NFTs, so also check gauges for any saved Aerodrome pools.
+                aero_saved = [
+                    e for e in saved
+                    if e.get("venue", "").lower() == "aerodrome"
+                ]
+                if aero_saved and venue_key in (None, "aerodrome"):
+                    try:
+                        from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                        staked = AerodromeAdapter()._find_staked_positions_via_saved_pools(
+                            address, self.gui.price_engine, aero_saved
+                        )
+                        for staked_pos in staked:
+                            if not any(p.position_id == staked_pos.position_id for p in positions):
+                                positions.append(staked_pos)
+                    except Exception:
+                        pass
+
+                # v5.2.2: If Aerodrome scan returned 0 positions, show a helpful popup.
+                # Staked Aerodrome NFTs can't be found via wallet scan (the gauge owns the NFT).
+                # The user must enter their NFT token ID manually.
+                if venue_key == "aerodrome" and not positions:
+                    from tkinter import messagebox
+                    self.gui.root.after(0, lambda: messagebox.showinfo(
+                        "Aerodrome Positions Not Found",
+                        "Your Aerodrome SlipStream positions may be staked in a gauge, "
+                        "which makes them invisible to a wallet scan.\n\n"
+                        "To find your position:\n"
+                        "1. Go to aerodrome.finance → Dashboard\n"
+                        "2. Find your position under \"Liquidity Rewards\"\n"
+                        "3. Look for the # number next to \"Deposit\" (e.g. #50282741)\n"
+                        "4. Enter that number in the Position ID / NFT ID field\n"
+                        "   and click Fetch Position",
+                    ))
+
                 self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address))
             except OfflineError:
                 self.gui.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
@@ -985,6 +1144,8 @@ class LPTab:
                 adapter_key = "hyperliquid"
             elif adapter_key in ("bsc", "krystal"):
                 adapter_key = "bsc"
+            elif adapter_key in ("aerodrome", "base"):
+                adapter_key = "aerodrome"
             friendly = self.gui.LP_PLATFORM_MAP_reverse.get(adapter_key, venue_key)
             platform_menu.set(friendly)
         # Fetch by token ID (strip venue prefix if present)
@@ -1034,14 +1195,23 @@ class LPTab:
         the current position value as the initial deposit. The caller must later
         save the vault to persist changes.
         """
-        if not position.position_id.startswith("hyperevm:"):
+        if not (
+            position.position_id.startswith("hyperevm:") or
+            position.position_id.startswith("bsc:") or
+            position.position_id.startswith("base:")
+        ):
             return
         try:
             raw_id = position.position_id.split(":", 1)[1]
             token_id = int(raw_id)
         except (ValueError, IndexError):
             return
-        venue = "HyperEVM"
+        if position.position_id.startswith("bsc:"):
+            venue = "BSC"
+        elif position.position_id.startswith("base:"):
+            venue = "Aerodrome"
+        else:
+            venue = "HyperEVM"
         if not is_pool_saved(self.gui.key_manager.address_db, token_id, venue):
             return
         tracking = get_position_tracking(self.gui.key_manager.address_db, token_id, venue)
@@ -1183,7 +1353,7 @@ class LPTab:
                          font=ctk.CTkFont(size=11, weight="bold"),
                          text_color="#51cf94").pack(side="left", anchor="w")
 
-            # v5.1.1: Add / Remove / Edit liquidity icons
+            # v5.1.1: Add / Remove / Edit liquidity icons (HyperEVM only for now)
             if position.position_id and position.position_id.startswith("hyperevm:"):
                 status_label = self._lp_widgets.get("status_label")
 
@@ -1234,7 +1404,9 @@ class LPTab:
 
         status_label = self._lp_widgets.get("status_label")
         can_manage_lp = position.position_id and (
-            position.position_id.startswith("hyperevm:") or position.position_id.startswith("bsc:")
+            position.position_id.startswith("hyperevm:") or
+            position.position_id.startswith("bsc:") or
+            position.position_id.startswith("base:")
         )
 
         if can_manage_lp:
@@ -1299,9 +1471,11 @@ class LPTab:
         if not position.position_id:
             return
         if not (
-            position.position_id.startswith("hyperevm:") or position.position_id.startswith("bsc:")
+            position.position_id.startswith("hyperevm:") or
+            position.position_id.startswith("bsc:") or
+            position.position_id.startswith("base:")
         ):
-            self.gui.show_notification("Only HyperEVM and BSC positions can be saved")
+            self.gui.show_notification("Only HyperEVM, BSC and BASE positions can be saved")
             return
         # Extract token_id from "<prefix>:<token_id>"
         try:
@@ -1359,7 +1533,12 @@ class LPTab:
             pair = entry.get("pair", "Unknown Pair")
             if not tid:
                 continue
-            prefix = "hyperevm" if venue == "HyperEVM" else "bsc"
+            if venue == "HyperEVM":
+                prefix = "hyperevm"
+            elif venue == "Aerodrome":
+                prefix = "base"
+            else:
+                prefix = "bsc"
             # Placeholder card
             card = ctk.CTkFrame(scroll, corner_radius=10)
             card.pack(fill="x", pady=5, padx=5)
@@ -1371,7 +1550,12 @@ class LPTab:
                          font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
             ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
                          font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-            platform_label = "Platform: HyperEVM (Project X)" if venue == "HyperEVM" else "Platform: BSC (BNB Chain)"
+            if venue == "HyperEVM":
+                platform_label = "Platform: HyperEVM (Project X)"
+            elif venue == "Aerodrome":
+                platform_label = "Platform: Aerodrome (BASE)"
+            else:
+                platform_label = "Platform: BSC (BNB Chain)"
             ctk.CTkLabel(info, text=platform_label,
                          font=ctk.CTkFont(size=11), text_color=("#444444", "gray70")).pack(anchor="w", pady=(2, 0))
             ctk.CTkLabel(info, text="Fetching live data...",
@@ -1432,7 +1616,12 @@ class LPTab:
             wallet_address = entry.get("wallet_address", "")
             if not tid:
                 continue
-            prefix = "hyperevm" if venue == "HyperEVM" else "bsc"
+            if venue == "HyperEVM":
+                prefix = "hyperevm"
+            elif venue == "Aerodrome":
+                prefix = "base"
+            else:
+                prefix = "bsc"
             card = ctk.CTkFrame(scroll, corner_radius=10)
             card.pack(fill="x", pady=5, padx=5)
             info = ctk.CTkFrame(card, fg_color="transparent")
@@ -1487,9 +1676,11 @@ class LPTab:
                 placeholder cards that are not tracked in position_cards).
         """
         if not position.position_id or not (
-            position.position_id.startswith("hyperevm:") or position.position_id.startswith("bsc:")
+            position.position_id.startswith("hyperevm:") or
+            position.position_id.startswith("bsc:") or
+            position.position_id.startswith("base:")
         ):
-            self.gui.show_notification("Only HyperEVM and BSC positions can be removed")
+            self.gui.show_notification("Only HyperEVM, BSC and BASE positions can be removed")
             return
         try:
             token_id = int(position.position_id.split(":", 1)[1])
@@ -1510,12 +1701,15 @@ class LPTab:
             if card_frame:
                 card_frame.destroy()
             else:
-                position_prefix = "bsc" if position.position_id.startswith("bsc:") else "hyperevm"
+                if position.position_id.startswith("bsc:"):
+                    position_prefix = "bsc"
+                elif position.position_id.startswith("base:"):
+                    position_prefix = "base"
+                else:
+                    position_prefix = "hyperevm"
                 card_key = f"{venue}:{position_prefix}:{token_id}"
                 cards = self._lp_widgets.get("position_cards", {})
                 card_frame = cards.pop(card_key, None)
-                if not card_frame:
-                    card_frame = cards.pop(f"{venue}:hyperevm:{token_id}", None)
                 if card_frame:
                     card_frame.destroy()
             self._lp_update_saved_pools_count(addr)
@@ -1573,6 +1767,14 @@ class LPTab:
                     adapter = BSCAdapter()
                     venue = "BSC"
                     tracking = get_position_tracking(self.gui.key_manager.address_db, numeric_tid, "BSC")
+                    fresh_pos = adapter._fetch_position_by_token_id(
+                        numeric_tid, self.gui.price_engine, wallet_address=wallet_address
+                    )
+                elif position_id.startswith("base:"):
+                    from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                    adapter = AerodromeAdapter()
+                    venue = "Aerodrome"
+                    tracking = get_position_tracking(self.gui.key_manager.address_db, numeric_tid, "Aerodrome")
                     fresh_pos = adapter._fetch_position_by_token_id(
                         numeric_tid, self.gui.price_engine, wallet_address=wallet_address
                     )
@@ -1693,6 +1895,8 @@ class LPTab:
         """
         if position_id.startswith("bsc:"):
             return ("BNB Chain (BSC)", "BNB", "bsc")
+        elif position_id.startswith("base:"):
+            return ("BASE", "ETH", "aerodrome")
         elif position_id.startswith("hyperevm:"):
             return ("HyperEVM", "HYPE", "hyperliquid")
         else:
@@ -1766,10 +1970,10 @@ class LPTab:
 
         chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
 
-        # BSC compound is not yet supported
-        if position.position_id.startswith("bsc:"):
+        # BSC/BASE compound is not yet supported (requires swap implementation)
+        if position.position_id.startswith("bsc:") or position.position_id.startswith("base:"):
             self.gui.show_notification(
-                "Compound fees on BSC is not yet implemented. Use Collect Fees instead."
+                "Compound fees is not yet implemented on this chain. Use Collect Fees instead."
             )
             return
 
@@ -2091,4 +2295,5 @@ class LPTab:
         address = self._lp_get_current_wallet_address()
         if address and self.gui.online_mode:
             self._lp_do_fetch()
+
 

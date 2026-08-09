@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-PyInstaller build script for ColdStack GUI v5.2.1.
+PyInstaller build script for ColdStack GUI v5.2.2.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v5.2.1 (August 2026) - BSC V3 + Light/Dark Mode
+Version: v5.2.2 (August 2026) - Aerodrome SlipStream + BSC V3
 Builds: src/gui_main_v5.py
 Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
 
 Changes from build_gui_v5.py:
   1. Entry point: src/gui_main_v5.py
   2. New hidden imports: settings_dialog, account_dialogs, lp_tab, vault_tab, chain_options
-  3. Version strings updated to v5.2.1
+  3. Version strings updated to v5.2.2
   4. Krystal adapter skeleton + BSC RPC configuration
 
 WARNING: After ANY source change, rebuild: python build_gui_v5.py
@@ -32,8 +32,8 @@ def clean_build_dirs():
 
 
 def build_gui_exe():
-    """Run PyInstaller to build the ColdStack v5.1.4 EXE."""
-    print("Building ColdStack v5.2.1 executable...")
+    """Run PyInstaller to build the ColdStack v5.2.2 EXE."""
+    print("Building ColdStack v5.2.2 executable...")
 
     project_dir = Path(__file__).parent.resolve()
 
@@ -98,7 +98,7 @@ def build_gui_exe():
         '--hidden-import=vault_tab',
         '--hidden-import=lp_tab',
         '--hidden-import=chain_options',
-        # --- v5.2.1 Appearance module ---
+        # --- v5.2.2 Appearance module ---
         '--hidden-import=appearance',
         # --- v5.1 LP Engine hidden imports ---
         '--hidden-import=lp_engine',
@@ -110,6 +110,8 @@ def build_gui_exe():
         '--hidden-import=venue_adapters.venue_writer',
         '--hidden-import=venue_adapters.hyperliquid_writer',
         '--hidden-import=venue_adapters.bsc_writer',
+        '--hidden-import=venue_adapters.aerodrome_adapter',
+        '--hidden-import=venue_adapters.aerodrome_writer',
         '--collect-submodules=venue_adapters',
         # --- v5.1: Saved pools ---
         '--hidden-import=saved_pools',
@@ -197,7 +199,7 @@ echo ========================================
 echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting ColdStack v5.2.1...
+echo Starting ColdStack v5.2.2...
 echo.
 coldstack.exe
 pause
@@ -256,8 +258,8 @@ def main():
     print(f"Working directory: {os.getcwd()}")
 
     print("=" * 60)
-    print("ColdStack v5.2.1 - Portable EXE Builder")
-    print("BSC V3 + Light/Dark Mode")
+    print("ColdStack v5.2.2 - Portable EXE Builder")
+    print("Aerodrome SlipStream + BSC V3")
     print("=" * 60)
 
     if not check_dependencies():
@@ -280,3 +282,4 @@ if __name__ == '__main__':
 # file modification time to verify the EXE matches the current source code.
 # If the EXE is older than this timestamp, rebuild: python build_gui_v5.py)
 # BUILD: 2026-08-06 09:10 AEST
+

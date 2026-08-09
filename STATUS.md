@@ -2,7 +2,24 @@
 
 **Project:** https://github.com/Roughn3ck/key_manager
 **Current Version:** v5.2.1 (BSC Pool Reads + Light/Dark Mode)
-**Last Updated:** 2026-08-06
+**Last Updated:** 2026-08-09
+
+---
+
+## Known Issues (v5.2.1)
+
+### Aerodrome SlipStream Staked Positions — Wallet Scan Workaround
+
+**Status:** Temporary workaround — requires manual NFT ID entry
+
+Aerodrome SlipStream positions staked in a CL gauge cannot be discovered via wallet scan. When a position is staked, the NFT is transferred to the gauge contract, so `balanceOf(wallet)` returns 0. The adapter has no way to enumerate all gauges from the Aerodrome Voter contract (no `poolLength()` or `pools(uint256)` exposed).
+
+**Current workaround:** Enter the NFT token ID manually in the Position ID field. The token ID is visible on the Aerodrome dashboard (aerodrome.finance → Dashboard → look for `#<number>` next to "Deposit"). A popup guides the user to this when an Aerodrome scan returns 0 positions.
+
+**Future fix options (not yet viable):**
+- Transfer event log scanning: requires `eth_getLogs` over large block ranges. Public Base RPCs cap at ~10k blocks per query (413 error above). Scanning 6 months of history would need ~800 sequential calls — too slow/unreliable. A paid RPC (Alchemy/QuickNode/Infura) with higher log limits would make this feasible.
+- Aerodrome subgraph: the Aerodrome frontend uses a single Multicall3 batch call with 8192 bytes of custom bytecode sent to the wallet address. This likely relies on EIP-7702 (EOA delegation) or a similar mechanism that only works if the wallet has code. No public subgraph endpoint has been identified.
+- Caching (current partial solution): once a user enters a token ID manually and saves the pool, future wallet scans find the position via the saved-pools gauge lookup (`_find_staked_positions_via_saved_pools`).
 
 ---
 

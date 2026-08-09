@@ -304,6 +304,7 @@ class ColdStackGUI:
     LP_PLATFORM_MAP = {
         "HyperEVM (Project X)": "hyperliquid",
         "BSC (BNB Chain)": "bsc",
+        "Aerodrome (BASE)": "aerodrome",
     }
     # Reverse map for converting adapter keys to friendly display names.
     LP_PLATFORM_MAP_reverse = {v: k for k, v in LP_PLATFORM_MAP.items()}
@@ -397,7 +398,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v5.2.1 - ColdStack | BSC V3 + Light/Dark Mode",
+            text="v5.2.2 - ColdStack | Aerodrome SlipStream + BSC V3",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )
@@ -935,7 +936,7 @@ class ColdStackGUI:
                 release_url = data.get("html_url", "https://github.com/Roughn3ck/key_manager/releases")
                 release_name = data.get("name", "Latest Release")
 
-                current_version = "5.2.1"
+                current_version = "5.2.2"
                 latest_version = latest_tag.lstrip("v")
 
                 # Simple version comparison (handles major.minor[.patch])

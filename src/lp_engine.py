@@ -387,7 +387,7 @@ class LPEngine:
         )
         # v5.1: Filter out spot holdings and closed positions
         # Spot positions have ":spot:" in their position_id (e.g., "0x...:spot:USDC")
-        # Closed EVM positions have liquidity == 0 in raw_data
+        # Closed EVM positions (HyperEVM, BSC, BASE) have liquidity == 0 in raw_data
         lp_positions = []
         for p in positions:
             pid = p.position_id or ""
