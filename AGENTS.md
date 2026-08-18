@@ -4,9 +4,9 @@ Forge's project rules for working on ColdStack. Read this file at the start of e
 
 ## What This Is
 
-ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.2.1.
+ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.2.3.
 
-Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.2.1.
+Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.2.3.
 
 ## Commands
 
@@ -96,6 +96,18 @@ Offline by default — zero network requests unless the user enables "Go Online"
 
 ### LP fee reading (v5.1)
 Real uncollected fees on Project X / HyperEVM are read via a static `eth_call` to `collect((uint256,address,uint128,uint128))` (selector `0xfc6f7865`) on the Project X PositionManager at `0xeaD19AE861c29bBb2101E834922B2FEee69B9091`. This returns the same values shown in the Project X UI tooltip. Do not re-enable the old `feeGrowthGlobal` delta or `PROJECT_X_FEE_ESTIMATION_ENABLED` approach — it overcounts. The `fees_note` field on `LPPosition` is retained for backward compatibility but should not be populated by the Hyperliquid adapter.
+
+### Railgun Sidecar (v5.2.3)
+- `sidecar/` — Node.js Express server wrapping @railgun-community/wallet SDK. Runs on localhost:8765.
+- `sidecar/src/routes/` — engine, wallet, balances, transfer, poi, cache, health routes
+- `sidecar/src/state.js` — shared sidecar state (engine, wallets, balances, scan status)
+- `sidecar/src/db.js` — LevelDOWN database for encrypted wallet storage
+- `sidecar/src/artifacts.js` — ArtifactStore for proof artifact downloads
+- `sidecar/src/networks.js` — ColdStack chain name → Railgun NetworkName mapping
+- `sidecar/src/callbacks.js` — balance and scan progress callbacks
+- `sidecar/src/utils.js` — transaction helpers (gas, signing, approval)
+- `src/railgun_bridge.py` — Python HTTP client managing sidecar lifecycle
+- `src/railgun_tab.py` — CustomTkinter Railgun tab (sidecar status, wallet, balances, transactions)
 
 ### Key contract addresses (HyperEVM, Chain 999)
 - WHYPE: `0x5555555555555555555555555555555555555555`

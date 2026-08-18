@@ -1,17 +1,17 @@
 #!/usr/bin/env python3
 """
-PyInstaller build script for ColdStack GUI v5.2.2.
+PyInstaller build script for ColdStack GUI v5.2.3.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v5.2.2 (August 2026) - Aerodrome SlipStream + BSC V3
+Version: v5.2.3 (August 2026) - Railgun Privacy Integration
 Builds: src/gui_main_v5.py
 Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
 
 Changes from build_gui_v5.py:
   1. Entry point: src/gui_main_v5.py
-  2. New hidden imports: settings_dialog, account_dialogs, lp_tab, vault_tab, chain_options
-  3. Version strings updated to v5.2.2
-  4. Krystal adapter skeleton + BSC RPC configuration
+  2. New hidden imports: railgun_bridge, railgun_tab
+  3. Sidecar directory bundled as data files
+  4. Version strings updated to v5.2.3
 
 WARNING: After ANY source change, rebuild: python build_gui_v5.py
 """
@@ -32,8 +32,8 @@ def clean_build_dirs():
 
 
 def build_gui_exe():
-    """Run PyInstaller to build the ColdStack v5.2.2 EXE."""
-    print("Building ColdStack v5.2.2 executable...")
+    """Run PyInstaller to build the ColdStack v5.2.3 EXE."""
+    print("Building ColdStack v5.2.3 executable...")
 
     project_dir = Path(__file__).parent.resolve()
 
@@ -100,6 +100,9 @@ def build_gui_exe():
         '--hidden-import=chain_options',
         # --- v5.2.2 Appearance module ---
         '--hidden-import=appearance',
+        # --- v5.2.3: Railgun bridge + tab ---
+        '--hidden-import=railgun_bridge',
+        '--hidden-import=railgun_tab',
         # --- v5.1 LP Engine hidden imports ---
         '--hidden-import=lp_engine',
         '--hidden-import=price_engine',
@@ -135,6 +138,8 @@ def build_gui_exe():
         '--collect-all=rich',
         # --- Data files ---
         '--add-data=rpc_endpoints.json;.',
+        # --- v5.2.3: Railgun sidecar (Node.js) ---
+        '--add-data=sidecar;sidecar',
         # --- Build options ---
         '--clean',
         '--noconfirm',
@@ -176,7 +181,7 @@ def copy_to_usb_deployment():
         # Backup the previous production EXE using the version it was built from.
         # Bump this string whenever the shipped version changes so the backup name
         # matches the last stable build.
-        PREVIOUS_VERSION_TAG = "v5_1_4"  # v5.1.4 is the previous production build
+        PREVIOUS_VERSION_TAG = "v5_2_1"  # v5.2.1 is the previous production build
         backup_path = backups_dir / f'coldstack_{PREVIOUS_VERSION_TAG}.exe'
         print(f"Backing up previous EXE to {backup_path}...")
         shutil.copy2(target_path, backup_path)
@@ -199,7 +204,7 @@ echo ========================================
 echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting ColdStack v5.2.2...
+echo Starting ColdStack v5.2.3...
 echo.
 coldstack.exe
 pause
@@ -258,8 +263,8 @@ def main():
     print(f"Working directory: {os.getcwd()}")
 
     print("=" * 60)
-    print("ColdStack v5.2.2 - Portable EXE Builder")
-    print("Aerodrome SlipStream + BSC V3")
+    print("ColdStack v5.2.3 - Portable EXE Builder")
+    print("Railgun Privacy Integration")
     print("=" * 60)
 
     if not check_dependencies():
@@ -281,5 +286,5 @@ if __name__ == '__main__':
 # Build timestamp (auto-updated on each run — compare this to the EXE's
 # file modification time to verify the EXE matches the current source code.
 # If the EXE is older than this timestamp, rebuild: python build_gui_v5.py)
-# BUILD: 2026-08-06 09:10 AEST
+# BUILD: 2026-08-18 15:50 AEST
 

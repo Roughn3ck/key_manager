@@ -1,12 +1,12 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.2.1 (BSC Pool Reads + Light/Dark Mode)
-**Last Updated:** 2026-08-09
+**Current Version:** v5.2.3 (Railgun Privacy Integration)
+**Last Updated:** 2026-08-18
 
 ---
 
-## Known Issues (v5.2.1)
+## Known Issues (v5.2.3)
 
 ### Aerodrome SlipStream Staked Positions — Wallet Scan Workaround
 
@@ -20,6 +20,37 @@ Aerodrome SlipStream positions staked in a CL gauge cannot be discovered via wal
 - Transfer event log scanning: requires `eth_getLogs` over large block ranges. Public Base RPCs cap at ~10k blocks per query (413 error above). Scanning 6 months of history would need ~800 sequential calls — too slow/unreliable. A paid RPC (Alchemy/QuickNode/Infura) with higher log limits would make this feasible.
 - Aerodrome subgraph: the Aerodrome frontend uses a single Multicall3 batch call with 8192 bytes of custom bytecode sent to the wallet address. This likely relies on EIP-7702 (EOA delegation) or a similar mechanism that only works if the wallet has code. No public subgraph endpoint has been identified.
 - Caching (current partial solution): once a user enters a token ID manually and saves the pool, future wallet scans find the position via the saved-pools gauge lookup (`_find_staked_positions_via_saved_pools`).
+
+---
+
+## v5.2.3 - Railgun Privacy Integration (August 2026)
+
+### Summary
+v5.2.3 adds Railgun privacy protocol support via a Node.js sidecar process. ColdStack can now shield ERC-20 tokens, manage shielded balances, and execute private transfers (0zk→0zk) across Ethereum, Arbitrum, BNB Chain, Polygon, Base, and Optimism.
+
+### New Features
+- **Railgun Sidecar** — Node.js Express server wrapping the @railgun-community/wallet SDK
+- **Shielded Wallets** — load BIP39 mnemonics into Railgun private balances
+- **Shield/Unshield** — move ERC-20 tokens between public and private balances
+- **Private Transfers** — 0zk→0zk encrypted transfers with optional memo
+- **Balance Scanning** — automatic shielded balance updates via Railgun engine callbacks
+- **POI Support** — Private Proof of Innocence status tracking
+- **Cache Management** — full rebuild and cache clear for engine database
+
+### Architecture
+- Sidecar: Node.js Express server on localhost:8765
+- Bridge: Python HTTP client (`src/railgun_bridge.py`) manages sidecar lifecycle
+- GUI: New "Railgun" tab in the main tabview
+- Self-signing mode (no Broadcaster/Waku dependency for v5.2.3)
+
+### Requirements
+- Node.js 18+ installed on the system (for running the sidecar)
+- First launch downloads 50MB+ of proof artifacts (cached for subsequent use)
+
+### Files Added
+- `sidecar/` — complete Node.js sidecar (14 JS files + package.json)
+- `src/railgun_bridge.py` — Python HTTP bridge client
+- `src/railgun_tab.py` — Railgun GUI tab
 
 ---
 

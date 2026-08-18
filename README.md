@@ -1,10 +1,10 @@
 # ColdStack
 
-*Offline-first crypto key vault with LP position management for Hyperliquid and BNB Chain.*
+*Offline-first crypto key vault with LP position management and Railgun privacy protocol integration.*
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production-success)]()
 
-**Latest release: [v5.2.1 — BSC Pool Reads + Light/Dark Mode](https://github.com/Roughn3ck/key_manager/releases/tag/v5.2.1)**
+**Latest release: [v5.2.3 — Railgun Privacy Integration](https://github.com/Roughn3ck/key_manager/releases/tag/v5.2.3)**
 
 ---
 
@@ -46,6 +46,13 @@ No browser. No browser extension. No cloud. Your keys never leave your machine.
   - PancakeSwap V3 on BSC (factory `0x0BFb...`, NPM `0x46A1...`)
   - Wallet scan queries all registered V3 Position Managers
 - Every write requires explicit user confirmation — no autonomous trading
+
+**4. Railgun Privacy** — Shield and transfer tokens privately on 6 EVM chains.
+- Shield ERC-20 tokens into RAILGUN private balances
+- Private transfers (0zk→0zk) with encrypted memos
+- Shielded balance scanning with POI status tracking
+- Supports Ethereum, Arbitrum, BNB Chain, Polygon, Base, and Optimism
+- Node.js sidecar process (requires Node.js 18+)
 
 ---
 
@@ -215,6 +222,12 @@ python build_gui_v5.py
 python src/main.py derive-address --account "G5" --chain "EVM" --index 0
 ```
 
+### System Requirements
+- Windows 10/11 (64-bit)
+- Python 3.10+ (for development only)
+- Node.js 18+ (for Railgun privacy features)
+- 200MB free disk space (includes Railgun proof artifacts)
+
 ### Project Structure
 
 ```
@@ -237,11 +250,25 @@ src/
   balance_engine.py           Wallet balance fetching
   price_engine.py             CoinGecko price feeds
   derivation_engine.py        BIP39 HD wallet derivation
+  railgun_bridge.py           Railgun sidecar HTTP bridge (v5.2.3)
+  railgun_tab.py              Railgun privacy tab (v5.2.3)
   venue_adapters/
     hyperliquid_adapter.py    Read adapter (positions, fees, balances)
     hyperliquid_writer.py     Write adapter (collect, swap, increase, close)
     krystal_adapter.py        BSC multi-DEX reads (Uniswap V3 + PancakeSwap V3)
     venue_writer.py           Abstract base + dataclasses
+
+sidecar/                    Node.js Railgun sidecar (v5.2.3)
+  src/
+    server.js               Express HTTP server
+    routes/                 engine, wallet, balances, transfer, poi, cache, health
+    state.js                Shared sidecar state
+    db.js                   LevelDOWN database setup
+    artifacts.js            ArtifactStore for proof downloads
+    networks.js             Chain name mapping to Railgun networks
+    callbacks.js            Balance and scan progress callbacks
+    utils.js                Transaction helpers
+  package.json              Sidecar dependencies
 ```
 
 ### Contributing

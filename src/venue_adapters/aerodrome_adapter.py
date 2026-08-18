@@ -77,20 +77,26 @@ SELECTOR_TOKEN1 = "0xd21220a7"
 SELECTOR_DECIMALS = "0x313ce567"
 SELECTOR_SYMBOL = "0x95d89b41"
 SELECTOR_GET_POOL = "0x1698ee82"
+# Pool tick state: ticks(int24) returns 10 words (320 bytes + 0x prefix)
+SELECTOR_TICKS = "0xf30dba93"
 # collect() is used as a read-only eth_call to get exact uncollected fees.
 SELECTOR_COLLECT = "0xfc6f7865"  # collect((uint256,address,uint128,uint128))
-SELECTOR_DECREASE_LIQUIDITY = "0x2c1eaa8e"  # decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))
+SELECTOR_DECREASE_LIQUIDITY = "0x0c49ccbe"  # decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))
+SELECTOR_INCREASE_LIQUIDITY = "0x7cf9b221"  # increaseLiquidity((uint256,uint128,uint256,uint256,uint256,uint256,uint256))
 # Voter selector: pool -> CL gauge address
 SELECTOR_GAUGE_FOR_POOL = "0xb9a09fd5"  # gauges(address) -> address
 # CL Gauge selectors
-SELECTOR_STAKED_TOKEN_IDS = "0x4b937763"  # stakedTokenIds(address) -> uint256[]
-SELECTOR_POOL_OF_TOKEN = "0x16f0115b"  # poolOf(uint256 tokenId) -> address
-SELECTOR_EARNED_REWARDS = "0x7b0a47ee"  # earned(uint256 tokenId) -> uint256 (AERO, 18 decimals)
+SELECTOR_STAKED_TOKEN_IDS = "0x9e713103"  # stakedTokenIds(address) -> uint256[]
+SELECTOR_POOL_OF_TOKEN = "0x83966021"  # poolOf(uint256 tokenId) -> address
+SELECTOR_EARNED_REWARDS = "0x3e491d47"  # earned(address,uint256 tokenId) -> uint256 (AERO, 18 decimals)
+# Gauge getReward selector — claims AERO emissions for a staked position
+SELECTOR_GET_REWARD = "0x1c4b774b"  # getReward(uint256 tokenId)
 
 # Common BASE token addresses
 WETH_BASE = "0x4200000000000000000000000000000000000006"
 USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 AERO_TOKEN = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
+CBBTC_BASE = "0xcbB45146687557Fd9B6F8cB1E2D51a65F3B1D1c1"
 
 # ---------------------------------------------------------------------------
 # Token registries
@@ -100,12 +106,14 @@ TOKEN_DECIMALS = {
     WETH_BASE.lower(): 18,
     USDC_BASE.lower(): 6,
     AERO_TOKEN.lower(): 18,
+    CBBTC_BASE.lower(): 8,
 }
 
 TOKEN_SYMBOLS = {
     WETH_BASE.lower(): "WETH",
     USDC_BASE.lower(): "USDC",
     AERO_TOKEN.lower(): "AERO",
+    CBBTC_BASE.lower(): "cbBTC",
 }
 
 CANONICAL_SYMBOLS = {
@@ -308,6 +316,40 @@ def _get_earned_aero_rewards(
     return raw / 1e18  # AERO has 18 decimals
 
 
+def _get_gauge_address_for_position(
+    token_id: int, position_manager: str, wallet_address: str
+) -> Optional[str]:
+    """Find the CL gauge address that holds a staked NFT position.
+
+    Checks if the NFT owner is a gauge by calling poolOf(tokenId) on it.
+    Returns the gauge address if staked, None if unstaked.
+    """
+    owner_result = _base_rpc_call(
+        "eth_call",
+        [{"to": position_manager, "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id)}, "latest"],
+    )
+    if not owner_result or not isinstance(owner_result, str) or len(owner_result) < 66:
+        return None
+    nft_owner = _decode_address(owner_result[2:66])
+    if not nft_owner or int(nft_owner, 16) == 0:
+        return None
+    if nft_owner.lower() == wallet_address.lower():
+        return None  # Not staked — wallet owns the NFT
+    # The NFT owner is likely a gauge. Verify by calling poolOf(tokenId).
+    data = SELECTOR_POOL_OF_TOKEN + _pad_int_to_64(token_id)
+    pool_result = _base_rpc_call(
+        "eth_call",
+        [{"to": nft_owner, "data": data}, "latest"],
+    )
+    if pool_result and isinstance(pool_result, str) and len(pool_result) >= 66:
+        pool_addr = _decode_address(pool_result[2:66])
+        if int(pool_addr, 16) != 0:
+            return nft_owner.lower()  # Confirmed gauge
+    # Even if poolOf fails, return the owner if it's not the wallet
+    # (it might be a gauge with a different interface)
+    return nft_owner.lower()
+
+
 # ---------------------------------------------------------------------------
 # V3 math helpers
 # ---------------------------------------------------------------------------
@@ -431,6 +473,52 @@ def _pool_for_token_ids(
         if pool:
             return pool
 
+        return None
+
+
+def _resolve_pool_aggressive(
+    token0: str,
+    token1: str,
+    fee: int,
+    position_manager: str,
+    token_id: int,
+    nft_owner: str,
+) -> Optional[str]:
+    """Resolve pool address with multiple fallback strategies.
+
+    Tries in order:
+    1. _pool_for_token_ids (standard: factory getPool with known fee + fallback fees)
+    2. gauge.poolOf(tokenId) — if nft_owner looks like a gauge
+    3. Both factories with ALL common fee tiers (including the original fee)
+    """
+    # Strategy 1: Standard resolution
+    pool = _pool_for_token_ids(token0, token1, fee, position_manager)
+    if pool:
+        return pool
+
+    # Strategy 2: gauge.poolOf(tokenId)
+    if nft_owner and int(nft_owner, 16) != 0:
+        data = SELECTOR_POOL_OF_TOKEN + _pad_int_to_64(token_id)
+        result = _base_rpc_call("eth_call", [{"to": nft_owner, "data": data}, "latest"])
+        if result and isinstance(result, str) and len(result) >= 66:
+            resolved = _decode_address(result[2:66])
+            if int(resolved, 16) != 0:
+                print(f"[pool-resolve] Found pool via gauge.poolOf: {resolved}")
+                return resolved.lower()
+
+    # Strategy 3: Try both factories with ALL fee tiers
+    factories = list(POSITION_MANAGER_TO_FACTORY.values())
+    all_fees = [100, 500, 2500, 3000, 10000]
+    # Try the original fee first, then all others
+    tried = {fee}
+    for try_fee in [fee] + [f for f in all_fees if f != fee]:
+        for factory in factories:
+            pool = _try_get_pool(factory, token0, token1, try_fee)
+            if pool:
+                print(f"[pool-resolve] Found pool via factory getPool: fee={try_fee} factory={factory} pool={pool}")
+                return pool
+
+    print(f"[pool-resolve] Could not resolve pool for token0={token0} token1={token1} fee={fee}")
     return None
 
 
@@ -538,34 +626,31 @@ def _decode_positions_response(
         if ds_symbol1:
             symbol1 = ds_symbol1
 
-    pool_address = _pool_for_token_ids(token0, token1, fee, position_manager)
-
-    # Fallback: if factory resolution failed, ask the NFT owner (gauge if staked)
-    # for the pool address via poolOf(tokenId).
-    if not pool_address and position_manager:
+    # Look up NFT owner early — needed for pool resolution fallback
+    nft_owner = wallet_address
+    if position_manager:
         owner_result = _base_rpc_call(
             "eth_call",
             [{"to": position_manager, "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id)}, "latest"],
         )
         if owner_result and isinstance(owner_result, str) and len(owner_result) >= 66:
-            nft_owner_guess = _decode_address(owner_result[2:66])
-            if nft_owner_guess and int(nft_owner_guess, 16) != 0:
-                data = SELECTOR_POOL_OF_TOKEN + _pad_int_to_64(token_id)
-                pool_result = _base_rpc_call(
-                    "eth_call",
-                    [{"to": nft_owner_guess, "data": data}, "latest"],
-                )
-                if pool_result and isinstance(pool_result, str) and len(pool_result) >= 66:
-                    resolved = _decode_address(pool_result[2:66])
-                    if int(resolved, 16) != 0:
-                        pool_address = resolved.lower()
-                        print(f"[aerodrome-pool] resolved pool via gauge poolOf: {pool_address}")
+            nft_owner = _decode_address(owner_result[2:66])
+
+    # Resolve pool address with aggressive fallbacks (factory + gauge.poolOf + all fees)
+    pool_address = _resolve_pool_aggressive(
+        token0, token1, fee, position_manager, token_id, nft_owner
+    )
 
     current_price: Optional[float] = None
     current_tick: Optional[int] = None
     sqrtPriceX96: Optional[int] = None
     if pool_address:
         current_price, current_tick, _, _, _, sqrtPriceX96 = _fetch_pool_state(pool_address)
+        # Retry pool state once if it failed (BASE public RPCs can be flaky)
+        if current_tick is None:
+            print(f"[pool-state] First fetch failed for {pool_address}, retrying...")
+            time.sleep(0.5)
+            current_price, current_tick, _, _, _, sqrtPriceX96 = _fetch_pool_state(pool_address)
 
     range_low = _tick_to_price(tick_lower, decimals0, decimals1)
     range_high = _tick_to_price(tick_upper, decimals0, decimals1)
@@ -580,19 +665,69 @@ def _decode_positions_response(
     owed1_h = tokens_owed1 / (10 ** decimals1)
 
     fees_note = None
-    # Look up the actual NFT owner (may be a gauge if staked)
-    nft_owner = wallet_address
-    if position_manager:
-        owner_result = _base_rpc_call(
-            "eth_call",
-            [{"to": position_manager, "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id)}, "latest"],
-        )
-        if owner_result and isinstance(owner_result, str) and len(owner_result) >= 66:
-            nft_owner = _decode_address(owner_result[2:66])
 
-    # Use nft_owner for fee estimation (gauge is the owner when staked)
+    # Detect staked position (NFT owned by gauge, not wallet)
+    is_staked = (
+        nft_owner
+        and int(nft_owner, 16) != 0
+        and nft_owner.lower() != wallet_address.lower()
+    )
+
+    # Debug: trace fee computation path for staked positions
+    if is_staked:
+        print(f"[fees-debug] Staked position token_id={token_id}")
+        print(f"[fees-debug] pool_address={pool_address}")
+        print(f"[fees-debug] current_tick={current_tick}")
+        print(f"[fees-debug] liquidity={liquidity}")
+        print(f"[fees-debug] fee_growth_inside0_last={fee_growth_inside0_last_x128}")
+        print(f"[fees-debug] fee_growth_inside1_last={fee_growth_inside1_last_x128}")
+        print(f"[fees-debug] tokens_owed0={tokens_owed0} tokens_owed1={tokens_owed1}")
+        print(f"[fees-debug] decimals0={decimals0} decimals1={decimals1}")
+        print(f"[fees-debug] symbol0={symbol0} symbol1={symbol1}")
+
+    # Read uncollected trading fees.
+    # For STAKED positions: use the feeGrowthGlobal delta method. The gauge
+    # periodically calls collect() to claim fees for voters, resetting
+    # tokensOwed to 0. New fees accrue in feeGrowthGlobal but never move to
+    # tokensOwed (only burn() does that, and the gauge doesn't call burn()).
+    # So collect() simulation returns 0, but the real-time accrued fees are
+    # computed via: liquidity * (feeGrowthInside_current - feeGrowthInsideLast) / 2^128
+    #
+    # For UNSTAKED positions: use the collect() simulation. tokensOwed is
+    # up-to-date because the wallet can call burn()/collect() directly.
     fee_status = ""
-    if nft_owner:
+    if is_staked and pool_address and current_tick is not None:
+        # Staked: use feeGrowthGlobal delta method
+        real_fee0, real_fee1, fee_status = _compute_realtime_fees(
+            pool_address=pool_address,
+            tick_lower=tick_lower,
+            tick_upper=tick_upper,
+            current_tick=current_tick,
+            liquidity=liquidity,
+            fee_growth_inside0_last=fee_growth_inside0_last_x128,
+            fee_growth_inside1_last=fee_growth_inside1_last_x128,
+            tokens_owed0=tokens_owed0,
+            tokens_owed1=tokens_owed1,
+            decimals0=decimals0,
+            decimals1=decimals1,
+        )
+        if fee_status == "ok":
+            owed0_h = real_fee0
+            owed1_h = real_fee1
+        elif fee_status == "zero":
+            pass
+        else:
+            # Delta method failed — fall back to collect()
+            real_fee0, real_fee1, fee_status = _estimate_uncollected_fees(
+                token_id, nft_owner, decimals0, decimals1, position_manager
+            )
+            if fee_status == "ok":
+                owed0_h = real_fee0
+                owed1_h = real_fee1
+            else:
+                fees_note = "Fee data unavailable"
+    elif nft_owner:
+        # Unstaked: use collect() simulation
         real_fee0, real_fee1, fee_status = _estimate_uncollected_fees(
             token_id, nft_owner, decimals0, decimals1, position_manager
         )
@@ -600,7 +735,7 @@ def _decode_positions_response(
             owed0_h = real_fee0
             owed1_h = real_fee1
         elif fee_status == "zero":
-            fees_note = "No uncollected fees"
+            pass
         else:
             fees_note = "RPC unreachable"
     else:
@@ -622,14 +757,9 @@ def _decode_positions_response(
         else:
             fees_earned_usd += _usd_value(owed1_h, symbol1, price_engine) or 0.0
 
-    # For staked positions, the gauge auto-compounds trading fees (tokensOwed = 0).
-    # The user's earnings are AERO emission rewards via earned(wallet, tokenId).
-    # AERO is MERGED into fees_earned (not replacing trading fees).
-    is_staked = (
-        nft_owner
-        and int(nft_owner, 16) != 0
-        and nft_owner.lower() != wallet_address.lower()
-    )
+    # For staked positions, the gauge is the NFT owner.
+    # Trading fees (token0/token1) are relinquished to veAERO voters per
+    # Aerodrome's spec. The staker only earns AERO emissions.
     if is_staked:
         aero_earned = _get_earned_aero_rewards(nft_owner, token_id, wallet_address)
         if aero_earned > 0:
@@ -638,24 +768,12 @@ def _decode_positions_response(
                 aero_usd = price_engine.get_token_price_by_address(AERO_TOKEN, chain="base") or 0.0
             if not aero_usd:
                 aero_usd = _usd_value(aero_earned, "AERO", price_engine) or 0.0
-            # MERGE AERO into existing fees_earned (preserves trading fees)
             fees_earned["AERO"] = aero_earned
             fees_earned_usd = fees_earned_usd + (aero_earned * aero_usd)
-            # fees_note shows both revenue streams
+            # Set fees_note to explain the fee structure
             if fee_status == "zero":
-                # Trading fees auto-compounded by gauge — show AERO + note
-                fees_note = f"{aero_earned:.5f} AERO (emissions) · trading fees auto-compounded"
-            else:
-                # Trading fees present (shouldn't happen for staked, but handle it)
-                trading_parts = []
-                if owed0_h > 0:
-                    trading_parts.append(f"{owed0_h:g} {symbol0}")
-                if owed1_h > 0:
-                    trading_parts.append(f"{owed1_h:g} {symbol1}")
-                if trading_parts:
-                    fees_note = f"{aero_earned:.5f} AERO (emissions) · {' · '.join(trading_parts)} (fees)"
-                else:
-                    fees_note = f"{aero_earned:.5f} AERO (emissions)"
+                fees_note = "Staked · trading fees → veAERO voters"
+            # else: fees are shown from the fees_earned dict, no note needed
         elif fee_status == "zero":
             fees_note = "Staked (no pending emissions or fees)"
 
@@ -849,6 +967,175 @@ def _estimate_uncollected_fees(
 
     print(f"[fees] collect() eth_call failed for token {token_id} after 3 attempts: {last_error}")
     return (0.0, 0.0, "error")
+
+
+def _compute_realtime_fees(
+    pool_address: str,
+    tick_lower: int,
+    tick_upper: int,
+    current_tick: int,
+    liquidity: int,
+    fee_growth_inside0_last: int,
+    fee_growth_inside1_last: int,
+    tokens_owed0: int,
+    tokens_owed1: int,
+    decimals0: int,
+    decimals1: int,
+) -> Tuple[float, float, str]:
+    """Compute real-time uncollected trading fees using the feeGrowthGlobal delta method.
+
+    This is the same method used by the Uniswap V3 and Aerodrome UIs.
+    It reads feeGrowthGlobal from the pool, reads tick state to compute
+    feeGrowthInside, and calculates the delta from the position's
+    feeGrowthInsideLastX128.
+
+    totalFees = tokensOwed + liquidity * (feeGrowthInside - feeGrowthInsideLast) / 2^128
+
+    Returns:
+        (fee0_human, fee1_human, status) where status is "ok", "zero", or "error"
+    """
+    if not pool_address or liquidity == 0:
+        return (0.0, 0.0, "zero")
+
+    pool_address = pool_address.lower()
+
+    # 1. Read feeGrowthGlobal0X128 and feeGrowthGlobal1X128 from the pool
+    fg_global0_result = _base_rpc_call(
+        "eth_call",
+        [{"to": pool_address, "data": SELECTOR_FEE_GROWTH_GLOBAL0}, "latest"],
+    )
+    fg_global1_result = _base_rpc_call(
+        "eth_call",
+        [{"to": pool_address, "data": SELECTOR_FEE_GROWTH_GLOBAL1}, "latest"],
+    )
+
+    if not fg_global0_result or not fg_global1_result:
+        print(f"[fees-delta] Failed to read feeGrowthGlobal for pool {pool_address}")
+        return (0.0, 0.0, "error")
+
+    try:
+        fg_global0 = int(fg_global0_result[2:66], 16)
+        fg_global1 = int(fg_global1_result[2:66], 16)
+    except (ValueError, IndexError):
+        print(f"[fees-delta] Failed to decode feeGrowthGlobal")
+        return (0.0, 0.0, "error")
+
+    # 2. Read tick state for tickLower and tickUpper
+    # ticks(int24) returns 10 words (320 hex chars after 0x):
+    # word 0: liquidityGross (uint128)
+    # word 1: liquidityNet (int128)
+    # word 2: stakedLiquidityNet (int128)  [Aerodrome-specific]
+    # word 3: feeGrowthOutside0X128 (uint256)
+    # word 4: feeGrowthOutside1X128 (uint256)
+    # word 5: rewardGrowthOutsideX128 (uint256)  [Aerodrome-specific]
+    # word 6: tickCumulativeOutside (int56)
+    # word 7: secondsPerLiquidityOutsideX128 (uint160)
+    # word 8: secondsOutside (uint32)
+    # word 9: initialized (bool)
+
+    def _read_tick_fee_growth_outside(tick: int) -> Tuple[int, int, bool]:
+        """Read feeGrowthOutside0X128 and feeGrowthOutside1X128 for a tick.
+
+        Returns (fgOutside0, fgOutside1, initialized).
+        """
+        # Encode int24: for negative values, use two's complement in 32 bytes
+        if tick < 0:
+            tick_padded = format((1 << 256) + tick, "064x")
+        else:
+            tick_padded = format(tick, "064x")
+        data = SELECTOR_TICKS + tick_padded
+        result = _base_rpc_call("eth_call", [{"to": pool_address, "data": data}, "latest"])
+        if not result or not isinstance(result, str) or len(result) < 2 + 64 * 10:
+            print(f"[fees-delta] Failed to read tick {tick} for pool {pool_address}")
+            return (0, 0, False)
+        body = result[2:]
+        try:
+            # word 3: feeGrowthOutside0X128
+            fg_outside0 = int(body[3 * 64:(3 + 1) * 64], 16)
+            # word 4: feeGrowthOutside1X128
+            fg_outside1 = int(body[4 * 64:(4 + 1) * 64], 16)
+            # word 9: initialized (bool) — last word
+            initialized_word = int(body[9 * 64:(9 + 1) * 64], 16)
+            initialized = initialized_word != 0
+            return (fg_outside0, fg_outside1, initialized)
+        except (ValueError, IndexError):
+            print(f"[fees-delta] Failed to decode tick {tick}")
+            return (0, 0, False)
+
+    fg_outside_lower0, fg_outside_lower1, _ = _read_tick_fee_growth_outside(tick_lower)
+    fg_outside_upper0, fg_outside_upper1, _ = _read_tick_fee_growth_outside(tick_upper)
+
+    # If ticks are not initialized, feeGrowthOutside is 0.
+    # This is correct for Uniswap V3 — uninitialized ticks have 0 fee growth outside.
+
+    # 3. Compute feeGrowthInside using the Uniswap V3 formula
+    #
+    # if tickCurrent < tickLower:
+    #   feeGrowthInside = feeGrowthOutside_lower - feeGrowthOutside_upper
+    # elif tickCurrent >= tickUpper:
+    #   feeGrowthInside = feeGrowthOutside_upper - feeGrowthOutside_lower
+    # else:  # tickLower <= tickCurrent < tickUpper
+    #   feeGrowthInside = feeGrowthGlobal - feeGrowthOutside_lower - feeGrowthOutside_upper
+    #
+    # NOTE: All arithmetic is modular (mod 2^256), so subtraction works
+    # even when values wrap around.
+
+    MOD = 1 << 256
+
+    if current_tick < tick_lower:
+        fg_inside0 = (fg_outside_lower0 - fg_outside_upper0) % MOD
+        fg_inside1 = (fg_outside_lower1 - fg_outside_upper1) % MOD
+    elif current_tick >= tick_upper:
+        fg_inside0 = (fg_outside_upper0 - fg_outside_lower0) % MOD
+        fg_inside1 = (fg_outside_upper1 - fg_outside_lower1) % MOD
+    else:
+        fg_inside0 = (fg_global0 - fg_outside_lower0 - fg_outside_upper0) % MOD
+        fg_inside1 = (fg_global1 - fg_outside_lower1 - fg_outside_upper1) % MOD
+
+    # 4. Calculate fee delta and convert to token amounts
+    #
+    # feeDelta = feeGrowthInside - feeGrowthInsideLast  (mod 2^256)
+    # accruedFees = liquidity * feeDelta / 2^128
+    # totalUncollected = tokensOwed + accruedFees
+
+    fee_delta0 = (fg_inside0 - fee_growth_inside0_last) % MOD
+    fee_delta1 = (fg_inside1 - fee_growth_inside1_last) % MOD
+
+    accrued0 = (liquidity * fee_delta0) >> 128
+    accrued1 = (liquidity * fee_delta1) >> 128
+
+    total_fee0_raw = tokens_owed0 + accrued0
+    total_fee1_raw = tokens_owed1 + accrued1
+
+    fee0_human = total_fee0_raw / (10 ** decimals0)
+    fee1_human = total_fee1_raw / (10 ** decimals1)
+
+    print(
+        f"[fees-delta] pool={pool_address} tick_lower={tick_lower} tick_upper={tick_upper} "
+        f"current_tick={current_tick} liquidity={liquidity}"
+    )
+    print(f"[fees-delta] fg_global0={fg_global0} fg_global1={fg_global1}")
+    print(f"[fees-delta] fg_inside0={fg_inside0} fg_inside1={fg_inside1}")
+    print(
+        f"[fees-delta] fg_inside0_last={fee_growth_inside0_last} "
+        f"fg_inside1_last={fee_growth_inside1_last}"
+    )
+    print(f"[fees-delta] fee_delta0={fee_delta0} fee_delta1={fee_delta1}")
+    print(f"[fees-delta] accrued0={accrued0} accrued1={accrued1}")
+    print(f"[fees-delta] tokens_owed0={tokens_owed0} tokens_owed1={tokens_owed1}")
+    print(
+        f"[fees-delta] total_fee0_raw={total_fee0_raw} total_fee1_raw={total_fee1_raw}"
+    )
+    print(f"[fees-delta] human0={fee0_human:.10f} human1={fee1_human:.10f}")
+    status = "ok" if total_fee0_raw > 0 or total_fee1_raw > 0 else "zero"
+    print(
+        f"[fees-delta-result] fee0_human={fee0_human:.10f} "
+        f"fee1_human={fee1_human:.10f} status={status}"
+    )
+
+    if total_fee0_raw > 0 or total_fee1_raw > 0:
+        return (fee0_human, fee1_human, "ok")
+    return (0.0, 0.0, "zero")
 
 
 # ---------------------------------------------------------------------------
@@ -1250,6 +1537,14 @@ class AerodromeAdapter(VenueAdapter):
 
                 token0 = _decode_address(body[128:192]).lower()
                 token1 = _decode_address(body[192:256]).lower()
+                fee_tier = int(body[256:320], 16)
+                tick_lower = _decode_int24(body[320:384])
+                tick_upper = _decode_int24(body[384:448])
+                liquidity = int(body[448:512], 16)
+                fee_growth_inside0_last = int(body[512:576], 16)
+                fee_growth_inside1_last = int(body[576:640], 16)
+                tokens_owed0 = int(body[640:704], 16)
+                tokens_owed1 = int(body[704:768], 16)
                 decimals0 = _get_token_decimals(token0)
                 decimals1 = _get_token_decimals(token1)
 
@@ -1257,14 +1552,37 @@ class AerodromeAdapter(VenueAdapter):
                     "eth_call",
                     [{"to": pm, "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id)}, "latest"],
                 )
-                wallet = ""
+                nft_owner = ""
                 if owner_result and isinstance(owner_result, str) and len(owner_result) >= 66:
-                    wallet = _decode_address(owner_result[2:66])
+                    nft_owner = _decode_address(owner_result[2:66])
 
-                if not wallet:
-                    return {}
+                # Check if staked (gauge owns the NFT)
+                is_staked_pos = (
+                    nft_owner
+                    and int(nft_owner, 16) != 0
+                )
 
-                fee0, fee1, _ = _estimate_uncollected_fees(token_id, wallet, decimals0, decimals1, pm)
+                # Read pool state for delta method
+                pool_addr = _pool_for_token_ids(token0, token1, fee_tier, pm)
+                _, cur_tick, _, _, _, _ = _fetch_pool_state(pool_addr) if pool_addr else (None, None, 0, "", "", None)
+
+                if is_staked_pos and pool_addr and cur_tick is not None:
+                    fee0, fee1, _ = _compute_realtime_fees(
+                        pool_address=pool_addr,
+                        tick_lower=tick_lower,
+                        tick_upper=tick_upper,
+                        current_tick=cur_tick,
+                        liquidity=liquidity,
+                        fee_growth_inside0_last=fee_growth_inside0_last,
+                        fee_growth_inside1_last=fee_growth_inside1_last,
+                        tokens_owed0=tokens_owed0,
+                        tokens_owed1=tokens_owed1,
+                        decimals0=decimals0,
+                        decimals1=decimals1,
+                    )
+                else:
+                    fee0, fee1, _ = _estimate_uncollected_fees(token_id, nft_owner, decimals0, decimals1, pm)
+
                 symbol0 = _get_token_symbol(token0)
                 symbol1 = _get_token_symbol(token1)
                 return {symbol0: fee0, symbol1: fee1}

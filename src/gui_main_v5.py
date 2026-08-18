@@ -2,7 +2,7 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.1.3 (July 2026) - Swap Module + Wallet Card Redesign
+Version: v5.2.3 (August 2026) - Railgun Privacy Integration
 """
 import sys
 import os
@@ -116,6 +116,8 @@ from account_dialogs import (
 )
 from vault_tab import VaultTab
 from lp_tab import LPTab
+# v5.2.3: Railgun privacy tab
+from railgun_tab import RailgunTab
 # v5.1: Vault tracker imports
 from vault_tracker import HyperliquidVaultTracker, VaultPosition
 # BackupEngine import removed — backups are deprecated; users copy
@@ -344,6 +346,9 @@ class ColdStackGUI:
         # v5.1: Vault tracker instance (created after login)
         self.vault_tracker: Optional[HyperliquidVaultTracker] = None
         self.vault_tab: Optional[VaultTab] = None
+
+        # v5.2.3: Railgun tab instance (created after login)
+        self.railgun_tab: Optional[RailgunTab] = None
 
         # v5.1: Embedded key_manager_agent HTTP server
         self._agent_server: Optional[Any] = None
@@ -630,6 +635,7 @@ class ColdStackGUI:
         vault_tab = self.tabview.add("Wallet")
         vaults_tab = self.tabview.add("HL1 Vaults")
         lp_tab = self.tabview.add("LP Positions")
+        railgun_tab = self.tabview.add("Railgun")
 
         # Vault tab: existing two-panel layout
         main_container = ctk.CTkFrame(vault_tab, corner_radius=0)
@@ -656,6 +662,11 @@ class ColdStackGUI:
 
         # v5.1: Restore LP tab selector state after tab creation
         self.lp_tab._lp_restore_state()
+
+        # v5.2.3: Railgun privacy tab
+        if not hasattr(self, 'railgun_tab') or self.railgun_tab is None:
+            self.railgun_tab = RailgunTab(self)
+        self.railgun_tab.create_tab(railgun_tab)
 
         # v5.1: Tab change callback for auto-fetching saved pools
         self.tabview.configure(command=self._on_tab_changed)
@@ -2340,6 +2351,13 @@ class ColdStackGUI:
         .key_manager_session file (containing the base64-encoded password)
         would persist on disk.
         """
+        # v5.2.3: Stop Railgun sidecar if running
+        try:
+            if hasattr(self, 'railgun_tab') and self.railgun_tab:
+                self.railgun_tab.on_close()
+        except Exception:
+            pass
+
         try:
             # Stop the embedded agent server first (frees the port)
             self._stop_embedded_agent()

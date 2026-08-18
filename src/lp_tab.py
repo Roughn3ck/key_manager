@@ -10,6 +10,7 @@ from lp_engine import OfflineError
 from saved_pools import (
     load_saved_pools, save_pool, remove_saved_pool, is_pool_saved,
     update_position_tracking, get_position_tracking,
+    update_saved_pool_wallet,
 )
 from venue_adapters.venue_writer import (
     CollectFeesParams, CompoundFeesParams,
@@ -525,6 +526,9 @@ class LPTab:
                             tid, self.gui.price_engine, wallet_address=wallet
                         )
                         if pos and not pos.error:
+                            # Attach wallet address for display
+                            if wallet:
+                                pos.wallet_address = wallet
                             positions.append(pos)
                     except Exception:
                         pass
@@ -535,6 +539,9 @@ class LPTab:
                             tid, self.gui.price_engine, wallet_address=wallet
                         )
                         if pos and not pos.error:
+                            # Attach wallet address for display
+                            if wallet:
+                                pos.wallet_address = wallet
                             positions.append(pos)
                     except Exception:
                         pass
@@ -544,6 +551,9 @@ class LPTab:
                             tid, self.gui.price_engine, wallet_address=wallet
                         )
                         if pos and not pos.error:
+                            # Attach wallet address for display
+                            if wallet:
+                                pos.wallet_address = wallet
                             positions.append(pos)
                     except Exception:
                         pass
@@ -568,6 +578,9 @@ class LPTab:
                         )
                         for staked_pos in staked:
                             if not any(p.position_id == staked_pos.position_id for p in positions):
+                                # Attach wallet address for display
+                                if wallet:
+                                    staked_pos.wallet_address = wallet
                                 positions.append(staked_pos)
                 except Exception:
                     pass
@@ -1261,6 +1274,12 @@ class LPTab:
         ctk.CTkLabel(info, text=header_text,
                      font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
 
+        # Wallet address (if available from saved pool)
+        wallet_addr = getattr(position, "wallet_address", "")
+        if wallet_addr and len(wallet_addr) >= 16:
+            ctk.CTkLabel(info, text=f"Wallet: {wallet_addr[:10]}...{wallet_addr[-6:]}",
+                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(1, 0))
+
         # Line 2: Range · Current · % In/Out Range (with colored % In Range)
         range_frame = ctk.CTkFrame(info, fg_color="transparent")
         range_frame.pack(fill="x", pady=(2, 0))
@@ -1310,23 +1329,56 @@ class LPTab:
         line3_frame.pack(fill="x", pady=(2, 0))
 
         line3_gray_parts = []
+
+        # Build the token-denominated fee breakdown from fees_earned dict.
+        # For staked/special positions (fees_note is set), show ALL tokens
+        # including zeros so the user can see which tokens the position earns.
         if getattr(position, "fees_note", None):
-            line3_gray_parts.append(f"Fees: {position.fees_note}")
-        elif position.fees_earned_usd is not None and position.fees_earned_usd != 0:
-            fee_str = f"Fees earned: {self.gui._format_currency(position.fees_earned_usd)}"
+            token_fees = " · ".join(
+                f"{amt:g} {sym}" for sym, amt in position.fees_earned.items()
+            )
+        else:
             token_fees = " · ".join(
                 f"{amt:g} {sym}" for sym, amt in position.fees_earned.items() if amt
             )
+
+        # v5.2.2: Use appropriate precision for fee amounts so tiny values
+        # (e.g. 0.00032 WETH) don't get rounded to 0.
+        def _fmt_fee(amt: float, sym: str) -> str:
+            """Format a fee amount with appropriate precision."""
+            if amt == 0:
+                return f"0 {sym}"
+            if amt < 0.001:
+                return f"{amt:.8f} {sym}".rstrip("0").rstrip(".")
+            if amt < 1:
+                return f"{amt:.6f} {sym}".rstrip("0").rstrip(".")
+            return f"{amt:g} {sym}"
+
+        if getattr(position, "fees_note", None):
+            token_fees = " · ".join(
+                _fmt_fee(amt, sym) for sym, amt in position.fees_earned.items()
+            )
+        else:
+            token_fees = " · ".join(
+                _fmt_fee(amt, sym) for sym, amt in position.fees_earned.items() if amt
+            )
+
+        if position.fees_earned_usd is not None and position.fees_earned_usd != 0:
+            fee_str = f"Fees earned: {self.gui._format_currency(position.fees_earned_usd)}"
             if token_fees:
                 fee_str += f" ({token_fees})"
             line3_gray_parts.append(fee_str)
-        elif position.fees_earned:
+            # Also show fees_note as supplementary info (e.g. "Staked · trading fees → veAERO voters")
+            if getattr(position, "fees_note", None):
+                line3_gray_parts.append(position.fees_note)
+        elif token_fees:
             # Show token-denominated fees even when USD value is 0 or unavailable
-            token_fees = " · ".join(
-                f"{amt:g} {sym}" for sym, amt in position.fees_earned.items() if amt
-            )
-            if token_fees:
-                line3_gray_parts.append(f"Fees: {token_fees}")
+            line3_gray_parts.append(f"Fees: {token_fees}")
+            if getattr(position, "fees_note", None):
+                line3_gray_parts.append(position.fees_note)
+        elif getattr(position, "fees_note", None):
+            # No token amounts to show, but we have a note
+            line3_gray_parts.append(f"Fees: {position.fees_note}")
         if position.pnl_usd is not None:
             sign = "+" if position.pnl_usd >= 0 else ""
             pnl_str = f"PnL: {sign}{self.gui._format_currency(position.pnl_usd)}"
@@ -1653,6 +1705,12 @@ class LPTab:
                           font=ctk.CTkFont(size=10),
                           command=lambda pos=saved_pos: self._lp_fetch_saved_single(pos)
                           ).pack(pady=2)
+            ctk.CTkButton(button_frame, text="Reassign", width=70, height=26,
+                          font=ctk.CTkFont(size=10),
+                          fg_color=("#0d6efd", "#0b5ed7"),
+                          hover_color=("#0b5ed7", "#0a4fdb"),
+                          command=lambda pos=saved_pos, card=card: self._lp_reassign_pool_wallet(pos, card)
+                          ).pack(pady=2)
             ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
                           font=ctk.CTkFont(size=10),
                           fg_color=("#dc3545", "#c82333"),
@@ -1665,6 +1723,129 @@ class LPTab:
             status.configure(
                 text=f"Showing {len(all_saved)} saved pool(s) (cached — click Fetch for live data)"
             )
+
+    def _lp_reassign_pool_wallet(self, saved_pos, card):
+        """Reassign a saved pool to a different wallet address.
+
+        Opens a dialog showing all vault accounts with EVM addresses,
+        letting the user pick the correct account for this pool.
+        """
+        from tkinter import messagebox, simpledialog, Toplevel, StringVar
+        import tkinter as tk
+
+        if not self.gui.key_manager:
+            return
+
+        # Build a list of vault accounts with EVM addresses
+        accounts_data = self.gui.key_manager.address_db.get("accounts", {})
+        account_options = []
+        address_map = {}  # display_string -> (account_name, evm_address)
+
+        for acct_name in sorted(accounts_data.keys()):
+            addresses = accounts_data.get(acct_name, {}).get("addresses", [])
+            for addr_entry in addresses:
+                coin = addr_entry.get("coin", "").lower()
+                chain = addr_entry.get("chain", "").lower()
+                if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
+                    evm_addr = addr_entry.get("address", "")
+                    if evm_addr:
+                        display = f"{acct_name} — {evm_addr[:8]}...{evm_addr[-6:]}"
+                        account_options.append(display)
+                        address_map[display] = (acct_name, evm_addr)
+
+        if not account_options:
+            self.gui.show_notification("No vault accounts with EVM addresses found", error=True)
+            return
+
+        # Also add a manual entry option
+        account_options.append("Manual address entry...")
+
+        # Show selection dialog
+        dialog = Toplevel(self.gui.root)
+        dialog.title("Reassign Pool Wallet")
+        dialog.geometry("450x350")
+        dialog.transient(self.gui.root)
+        dialog.grab_set()
+
+        ctk.CTkLabel(dialog, text=f"Reassign: {saved_pos.pair} ({saved_pos.position_id})",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(pady=(10, 5), padx=15, anchor="w")
+        current_addr = saved_pos.wallet_address or ""
+        if current_addr:
+            ctk.CTkLabel(dialog, text=f"Current wallet: {current_addr[:10]}...{current_addr[-6:]}",
+                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(pady=(0, 10), padx=15, anchor="w")
+
+        listbox = tk.Listbox(dialog, height=10,
+                             font=("TkDefaultFont", 11), selectbackground="#0d6efd",
+                             selectforeground="white")
+        for opt in account_options:
+            listbox.insert("end", opt)
+        listbox.selection_set(0)
+        listbox.pack(fill="both", expand=True, padx=15, pady=(0, 10))
+
+        def _on_select():
+            sel = listbox.curselection()
+            if not sel:
+                return
+            choice = account_options[sel[0]]
+
+            if choice == "Manual address entry...":
+                manual_addr = simpledialog.askstring(
+                    "Manual Address", "Enter the EVM wallet address:",
+                    parent=dialog
+                )
+                if not manual_addr or not manual_addr.strip().startswith("0x") or len(manual_addr.strip()) != 42:
+                    self.gui.show_notification("Invalid address", error=True)
+                    return
+                new_wallet = manual_addr.strip()
+            else:
+                _, new_wallet = address_map[choice]
+
+            # Parse token_id and venue from position_id
+            prefix = "hyperevm"
+            try:
+                pos_id = saved_pos.position_id
+                if ":" in pos_id:
+                    prefix, tid_str = pos_id.split(":", 1)
+                    tid = int(tid_str)
+                else:
+                    tid = int(pos_id)
+
+                if prefix == "base":
+                    venue = "Aerodrome"
+                elif prefix == "bsc":
+                    venue = "BSC"
+                else:
+                    venue = "HyperEVM"
+            except (ValueError, IndexError):
+                self.gui.show_notification("Could not parse position ID", error=True)
+                dialog.destroy()
+                return
+
+            # Update the saved pool entry
+            ok = update_saved_pool_wallet(
+                self.gui.key_manager.address_db, tid, venue, new_wallet
+            )
+            if ok:
+                # Re-encrypt the vault to persist
+                self.gui.key_manager.save_encrypted_data(self.gui.current_password)
+                self.gui.show_notification(
+                    f"Pool reassigned to {new_wallet[:10]}...{new_wallet[-6:]}"
+                )
+                dialog.destroy()
+                # Re-render the saved pool cards
+                self._lp_clear_single()
+                self._lp_render_all_saved_placeholders()
+                if self.gui.online_mode:
+                    self._lp_auto_fetch_all_saved()
+            else:
+                self.gui.show_notification("Failed to reassign pool", error=True)
+                dialog.destroy()
+
+        ctk.CTkButton(dialog, text="Reassign", command=_on_select,
+                      font=ctk.CTkFont(size=12, weight="bold")).pack(pady=(0, 10), padx=15)
+
+        dialog.bind("<Return>", lambda e: _on_select())
+        dialog.bind("<Escape>", lambda e: dialog.destroy())
 
     def _lp_remove_pool(self, position, card_frame=None):
         """Remove a saved pool from the encrypted vault.
@@ -1970,10 +2151,10 @@ class LPTab:
 
         chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
 
-        # BSC/BASE compound is not yet supported (requires swap implementation)
-        if position.position_id.startswith("bsc:") or position.position_id.startswith("base:"):
+        # BSC compound is not yet supported (requires swap implementation)
+        if position.position_id.startswith("bsc:"):
             self.gui.show_notification(
-                "Compound fees is not yet implemented on this chain. Use Collect Fees instead."
+                "Compound fees is not yet implemented on BSC. Use Collect Fees instead."
             )
             return
 
@@ -2085,6 +2266,7 @@ class LPTab:
                 tx_hash = writer.collect_fees(CollectFeesParams(
                     account=account_name,
                     position_id=position.position_id,
+                    recipient=wallet_address,
                 ))
                 if tx_hash:
                     self.gui.root.after(0, lambda: self.gui.show_notification(

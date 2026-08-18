@@ -139,6 +139,31 @@ def _find_pool_entry(address_db: Dict[str, Any], token_id: int, venue: str) -> O
     return None
 
 
+def update_saved_pool_wallet(
+    address_db: Dict[str, Any],
+    token_id: int,
+    venue: str,
+    new_wallet_address: str,
+) -> bool:
+    """Update the wallet_address for a saved pool entry.
+
+    Used when a pool was saved with the wrong wallet address (e.g. saved
+    while a different account was selected in the LP tab).
+
+    The caller must re-encrypt the vault to persist this change.
+
+    Returns True on success, False if pool not found or error.
+    """
+    try:
+        entry = _find_pool_entry(address_db, token_id, venue)
+        if entry is None:
+            return False
+        entry["wallet_address"] = new_wallet_address
+        return True
+    except Exception:
+        return False
+
+
 def update_position_tracking(
     address_db: Dict[str, Any],
     token_id: int,
