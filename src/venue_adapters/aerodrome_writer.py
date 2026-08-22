@@ -114,8 +114,8 @@ class AerodromeWriter(VenueWriter):
         return False
 
     def _get_account_address(self, account: str) -> str:
-        """Get the EVM address for a vault account name."""
-        result = self._agent_call("get_address", account=account, chain="EVM")
+        """Get the EVM address for a vault account name on BASE."""
+        result = self._agent_call("get_address", account=account, chain="EVM", chain_id=self.chain_id)
         if isinstance(result, list) and result:
             return result[0].get("address", "")
         if isinstance(result, dict):
@@ -383,7 +383,8 @@ class AerodromeWriter(VenueWriter):
         body = result[2:]
         token0 = _decode_address(body[128:192]).lower()
         token1 = _decode_address(body[192:256]).lower()
-        fee_tier = int(body[256:320], 16)
+        # SlipStream positions() returns tickSpacing at this offset, not fee tier
+        tick_spacing = int(body[256:320], 16)
         tick_lower = _decode_int24(body[320:384])
         tick_upper = _decode_int24(body[384:448])
         liquidity = int(body[448:512], 16)
@@ -453,7 +454,7 @@ class AerodromeWriter(VenueWriter):
             return tx_hashes
 
         # Step 3: Read pool state for liquidity computation
-        pool_address = _pool_for_token_ids(token0, token1, fee_tier, position_manager)
+        pool_address = _pool_for_token_ids(token0, token1, tick_spacing, position_manager)
         if not pool_address:
             print(f"[aerodrome-compound] Could not resolve pool address")
             return tx_hashes

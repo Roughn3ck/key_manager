@@ -996,7 +996,9 @@ class LPTab:
                         "2. Find your position under \"Liquidity Rewards\"\n"
                         "3. Look for the # number next to \"Deposit\" (e.g. #50282741)\n"
                         "4. Enter that number in the Position ID / NFT ID field\n"
-                        "   and click Fetch Position",
+                        "   and click Fetch Position\n\n"
+                        "Tip: Once you find your position, click Save Pool to add it to your\n"
+                        "saved pools for fast future lookups.",
                     ))
 
                 self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address))
@@ -1266,8 +1268,10 @@ class LPTab:
         cards = self._lp_widgets.setdefault("position_cards", {})
         key = f"{position.venue}:{position.position_id}"
         cards[key] = card
-        info = ctk.CTkFrame(card, fg_color="transparent")
-        info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+        # Card layout: info on top (full width), buttons below (full width)
+        # to prevent button clipping on long position text.
+        info = ctk.CTkFrame(card, corner_radius=10)
+        info.pack(fill="x", padx=10, pady=(8, 2))
 
         # Line 1: tokens · venue · ID (on one line)
         header_text = f"{position.health_emoji} {position.pair}  ·  {position.venue}  ·  ID: {position.position_id}"
@@ -1302,6 +1306,70 @@ class LPTab:
         elif position.range_low is not None:
             ctk.CTkLabel(range_frame, text="  ·  ? Not fetched",
                          font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(side="left", anchor="w")
+
+        # Buttons on the right side of range_frame
+        button_frame = ctk.CTkFrame(range_frame, fg_color="transparent")
+        button_frame.pack(side="right", padx=(4, 0))
+
+        status_label = self._lp_widgets.get("status_label")
+        can_manage_lp = position.position_id and (
+            position.position_id.startswith("hyperevm:") or
+            position.position_id.startswith("bsc:") or
+            position.position_id.startswith("base:")
+        )
+
+        if can_manage_lp:
+            collect_btn = ctk.CTkButton(button_frame, text="💰 Collect", width=75, height=24,
+                              font=ctk.CTkFont(size=9, weight="bold"),
+                              fg_color=("#fd7e14", "#dc6602"),
+                              command=lambda pos=position: self._lp_collect_fees_dialog(pos))
+            collect_btn.pack(side="left", padx=(0, 2))
+            if status_label:
+                _lp_tooltip(collect_btn, status_label, "Collect Fees")
+
+            compound_btn = ctk.CTkButton(button_frame, text="🔄 Compound", width=85, height=24,
+                              font=ctk.CTkFont(size=9, weight="bold"),
+                              fg_color=("#20c997", "#1aa179"),
+                              command=lambda pos=position: self._lp_compound_fees_dialog(pos))
+            compound_btn.pack(side="left", padx=(0, 2))
+            if status_label:
+                _lp_tooltip(compound_btn, status_label, "Compound Fees")
+
+            close_btn = ctk.CTkButton(button_frame, text="✕ Close", width=65, height=24,
+                              font=ctk.CTkFont(size=9, weight="bold"),
+                              fg_color=("#6f42c1", "#5a32a3"),
+                              hover_color=("#5a32a3", "#42288a"),
+                              command=lambda pos=position: self._lp_close_position_dialog(pos))
+            close_btn.pack(side="left", padx=(0, 2))
+            if status_label:
+                _lp_tooltip(close_btn, status_label, "Close Position")
+
+        if position.position_id:
+            copy_btn = ctk.CTkButton(button_frame, text="📋 Copy", width=65, height=22,
+                              font=ctk.CTkFont(size=9),
+                              fg_color="gray40",
+                              command=lambda pid=position.position_id: self.gui.copy_to_clipboard(pid))
+            copy_btn.pack(side="left", padx=(0, 2))
+
+        if can_manage_lp:
+            try:
+                _token_id = int(position.position_id.split(":", 1)[1])
+            except (ValueError, IndexError):
+                _token_id = 0
+            _venue = position.venue or "HyperEVM"
+            if _token_id and is_pool_saved(self.gui.key_manager.address_db, _token_id, _venue):
+                remove_btn = ctk.CTkButton(button_frame, text="✕ Remove", width=70, height=22,
+                                  font=ctk.CTkFont(size=9),
+                                  fg_color=("#dc3545", "#c82333"),
+                                  hover_color=("#c82333", "#a71d2a"),
+                                  command=lambda pos=position: self._lp_remove_pool(pos))
+                remove_btn.pack(side="left", padx=(0, 2))
+            else:
+                save_btn = ctk.CTkButton(button_frame, text="★ Save", width=60, height=22,
+                                  font=ctk.CTkFont(size=9),
+                                  fg_color=("#0d6efd", "#0b5ed7"),
+                                  command=lambda pos=position: self._lp_save_pool(pos))
+                save_btn.pack(side="left", padx=(0, 2))
 
         # v5.1: Position range slider with marker
         if position.range_low is not None and position.range_high is not None:
@@ -1399,42 +1467,47 @@ class LPTab:
             ctk.CTkLabel(line3_frame, text="  ·  ".join(line3_gray_parts),
                          font=ctk.CTkFont(size=11), text_color=("#444444", "gray70")).pack(side="left", anchor="w")
 
-        # Value — green and bold, after Holdings, before Suggestion
-        if position.current_value_usd is not None:
-            ctk.CTkLabel(line3_frame, text=f"  ·  Value: {self.gui._format_currency(position.current_value_usd)}",
+        # Pool value (liquidity only) — green and bold
+        if position.current_value_usd is not None and position.deposit_amounts:
+            ctk.CTkLabel(line3_frame, text=f"  ·  Pool Value: {self.gui._format_currency(position.current_value_usd)}",
                          font=ctk.CTkFont(size=11, weight="bold"),
                          text_color="#51cf94").pack(side="left", anchor="w")
+        elif position.current_value_usd is not None and not position.deposit_amounts:
+            # Pool state failed — show what we have
+            ctk.CTkLabel(line3_frame, text=f"  ·  Pool Value: —",
+                         font=ctk.CTkFont(size=11, weight="bold"),
+                         text_color=("#666666", "gray50")).pack(side="left", anchor="w")
 
-            # v5.1.1: Add / Remove / Edit liquidity icons (HyperEVM only for now)
-            if position.position_id and position.position_id.startswith("hyperevm:"):
-                status_label = self._lp_widgets.get("status_label")
+        # v5.1.1: Add / Remove / Edit liquidity icons (HyperEVM only for now)
+        if position.position_id and position.position_id.startswith("hyperevm:"):
+            status_label = self._lp_widgets.get("status_label")
 
-                add_btn = ctk.CTkButton(line3_frame, text="+", width=26, height=26,
-                                        font=ctk.CTkFont(size=14, weight="bold"),
-                                        fg_color=("#20c997", "#1aa179"),
-                                        hover_color=("#1aa179", "#158f63"),
-                                        command=lambda pos=position: self._lp_open_add_liquidity(pos))
-                add_btn.pack(side="left", padx=(8, 2), anchor="w")
-                if status_label:
-                    _lp_tooltip(add_btn, status_label, "Add Liquidity")
+            add_btn = ctk.CTkButton(line3_frame, text="+", width=26, height=26,
+                                    font=ctk.CTkFont(size=14, weight="bold"),
+                                    fg_color=("#20c997", "#1aa179"),
+                                    hover_color=("#1aa179", "#158f63"),
+                                    command=lambda pos=position: self._lp_open_add_liquidity(pos))
+            add_btn.pack(side="left", padx=(8, 2), anchor="w")
+            if status_label:
+                _lp_tooltip(add_btn, status_label, "Add Liquidity")
 
-                remove_btn = ctk.CTkButton(line3_frame, text="−", width=26, height=26,
-                                           font=ctk.CTkFont(size=14, weight="bold"),
-                                           fg_color=("#fd7e14", "#dc6602"),
-                                           hover_color=("#dc6602", "#b85700"),
-                                           command=lambda pos=position: self._lp_open_remove_liquidity(pos))
-                remove_btn.pack(side="left", padx=2, anchor="w")
-                if status_label:
-                    _lp_tooltip(remove_btn, status_label, "Remove Liquidity")
+            remove_btn = ctk.CTkButton(line3_frame, text="−", width=26, height=26,
+                                       font=ctk.CTkFont(size=14, weight="bold"),
+                                       fg_color=("#fd7e14", "#dc6602"),
+                                       hover_color=("#dc6602", "#b85700"),
+                                       command=lambda pos=position: self._lp_open_remove_liquidity(pos))
+            remove_btn.pack(side="left", padx=2, anchor="w")
+            if status_label:
+                _lp_tooltip(remove_btn, status_label, "Remove Liquidity")
 
-                edit_btn = ctk.CTkButton(line3_frame, text="✎", width=26, height=26,
-                                         font=ctk.CTkFont(size=12),
-                                         fg_color=("#6f42c1", "#5a32a3"),
-                                         hover_color=("#5a32a3", "#42288a"),
-                                         command=lambda pos=position: self._lp_open_edit_position(pos))
-                edit_btn.pack(side="left", padx=2, anchor="w")
-                if status_label:
-                    _lp_tooltip(edit_btn, status_label, "Edit Position")
+            edit_btn = ctk.CTkButton(line3_frame, text="✎", width=26, height=26,
+                                     font=ctk.CTkFont(size=12),
+                                     fg_color=("#6f42c1", "#5a32a3"),
+                                     hover_color=("#5a32a3", "#42288a"),
+                                     command=lambda pos=position: self._lp_open_edit_position(pos))
+            edit_btn.pack(side="left", padx=2, anchor="w")
+            if status_label:
+                _lp_tooltip(edit_btn, status_label, "Edit Position")
 
         # Suggestion — yellow and bold, at the end
         if position.suggested_action:
@@ -1445,78 +1518,6 @@ class LPTab:
         if position.error:
             ctk.CTkLabel(info, text=f"Note: {position.error}",
                          font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-
-        # Compact action buttons — single row, small icons
-        button_frame = ctk.CTkFrame(card, fg_color="transparent")
-        button_frame.pack(side="right", padx=8, pady=8)
-
-        # Row 1: Collect + Compound + Close (action buttons)
-        action_row = ctk.CTkFrame(button_frame, fg_color="transparent")
-        action_row.pack(fill="x")
-
-        status_label = self._lp_widgets.get("status_label")
-        can_manage_lp = position.position_id and (
-            position.position_id.startswith("hyperevm:") or
-            position.position_id.startswith("bsc:") or
-            position.position_id.startswith("base:")
-        )
-
-        if can_manage_lp:
-            collect_btn = ctk.CTkButton(action_row, text="💰 Collect", width=75, height=24,
-                              font=ctk.CTkFont(size=9, weight="bold"),
-                              fg_color=("#fd7e14", "#dc6602"),
-                              command=lambda pos=position: self._lp_collect_fees_dialog(pos))
-            collect_btn.pack(side="left", padx=1)
-            if status_label:
-                _lp_tooltip(collect_btn, status_label, "Collect Fees")
-
-            compound_btn = ctk.CTkButton(action_row, text="🔄 Compound", width=85, height=24,
-                              font=ctk.CTkFont(size=9, weight="bold"),
-                              fg_color=("#20c997", "#1aa179"),
-                              command=lambda pos=position: self._lp_compound_fees_dialog(pos))
-            compound_btn.pack(side="left", padx=1)
-            if status_label:
-                _lp_tooltip(compound_btn, status_label, "Compound Fees")
-
-            close_btn = ctk.CTkButton(action_row, text="✕ Close", width=65, height=24,
-                              font=ctk.CTkFont(size=9, weight="bold"),
-                              fg_color=("#6f42c1", "#5a32a3"),
-                              hover_color=("#5a32a3", "#42288a"),
-                              command=lambda pos=position: self._lp_close_position_dialog(pos))
-            close_btn.pack(side="left", padx=1)
-            if status_label:
-                _lp_tooltip(close_btn, status_label, "Close Position")
-
-        # Row 2: Copy + Save/Remove (utility buttons)
-        util_row = ctk.CTkFrame(button_frame, fg_color="transparent")
-        util_row.pack(fill="x", pady=(2, 0))
-
-        if position.position_id:
-            copy_btn = ctk.CTkButton(util_row, text="📋 Copy", width=65, height=22,
-                              font=ctk.CTkFont(size=9),
-                              fg_color="gray40",
-                              command=lambda pid=position.position_id: self.gui.copy_to_clipboard(pid))
-            copy_btn.pack(side="left", padx=1)
-
-        if can_manage_lp:
-            try:
-                _token_id = int(position.position_id.split(":", 1)[1])
-            except (ValueError, IndexError):
-                _token_id = 0
-            _venue = position.venue or "HyperEVM"
-            if _token_id and is_pool_saved(self.gui.key_manager.address_db, _token_id, _venue):
-                remove_btn = ctk.CTkButton(util_row, text="✕ Remove", width=70, height=22,
-                                  font=ctk.CTkFont(size=9),
-                                  fg_color=("#dc3545", "#c82333"),
-                                  hover_color=("#c82333", "#a71d2a"),
-                                  command=lambda pos=position: self._lp_remove_pool(pos))
-                remove_btn.pack(side="left", padx=1)
-            else:
-                save_btn = ctk.CTkButton(util_row, text="★ Save", width=60, height=22,
-                                  font=ctk.CTkFont(size=9),
-                                  fg_color=("#0d6efd", "#0b5ed7"),
-                                  command=lambda pos=position: self._lp_save_pool(pos))
-                save_btn.pack(side="left", padx=1)
 
     def _lp_save_pool(self, position):
         """Save the current position's public identifiers to saved_pools.json."""

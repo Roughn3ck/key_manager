@@ -313,30 +313,38 @@ class KeyManager:
 
         Also removes the account from any pool it belongs to.
 
+        Handles orphaned accounts that may exist in pool member lists
+        but not in the accounts dict (can happen after pool swaps).
+
         Args:
             account_name: Name of the account to delete.
             password: Vault password for re-encryption.
 
         Returns:
-            True if the account was found and deleted, False otherwise.
+            True if the account was found anywhere and deleted, False if not found at all.
         """
+        deleted = False
+
+        # Remove from accounts dict if present
         accounts = self.address_db.get("accounts", {})
-        if account_name not in accounts:
-            return False
+        if account_name in accounts:
+            del accounts[account_name]
+            deleted = True
 
-        # Remove the account entry
-        del accounts[account_name]
-
-        # Remove from any pool
+        # Remove from any pool member list
         for pool_data in self.address_db.get("pools", {}).values():
             if account_name in pool_data.get("accounts", []):
                 pool_data["accounts"].remove(account_name)
+                deleted = True
 
         # Remove mnemonic if present
         self.address_db.get("mnemonics", {}).pop(account_name, None)
 
         # Remove private keys if present
         self.address_db.get("private_keys", {}).pop(account_name, None)
+
+        if not deleted:
+            return False
 
         return self.save_encrypted_data(password)
 

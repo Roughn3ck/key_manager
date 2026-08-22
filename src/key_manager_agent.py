@@ -540,8 +540,13 @@ class KeyManagerAgent:
             }
         return {"status": "ok", "result": result}
 
-    def get_address(self, account: str, chain: str = None) -> dict:
-        """Get addresses for an account, optionally filtered by chain."""
+    def get_address(self, account: str, chain: str = None, chain_id: int = None) -> dict:
+        """Get addresses for an account, optionally filtered by chain.
+
+        When multiple EVM addresses exist, chain_id is used to disambiguate:
+        - 999 (HyperEVM) prefers HyperEVM/Hyperliquid/HYPE keys
+        - 8453 (Base) / 1 (Ethereum) prefer non-HyperEVM keys
+        """
         self._check_session()
         accounts = self.vault_data.get("accounts", {})
         if account not in accounts:
@@ -557,16 +562,47 @@ class KeyManagerAgent:
                         or chain_lower in a.get("coin", "").lower()]
             if not filtered:
                 return {"status": "error", "error": f"No {chain} address found for account '{account}'"}
+            # Disambiguate multiple EVM addresses by chain_id
+            if chain and chain.upper() == "EVM" and chain_id is not None and len(filtered) > 1:
+                disambiguated = self._disambiguate_by_chain_id(filtered, chain_id, field="chain")
+                if disambiguated:
+                    return {"status": "ok", "result": [disambiguated]}
             return {"status": "ok", "result": filtered}
         return {"status": "ok", "result": addresses}
 
-    def _get_private_key(self, account: str, chain: str = "EVM") -> str:
+    @staticmethod
+    def _disambiguate_by_chain_id(items: list, chain_id: int, field: str = "chain"):
+        """Pick the best-matching entry from a list of dicts based on chain_id.
+
+        Used by get_address and _get_private_key to avoid signing with the wrong
+        EVM key when a vault has multiple EVM addresses/keys.
+        """
+        HYPE_KEYWORDS = ["HYPEREVM", "HYPERLIQUID", "HYPE"]
+
+        def _is_hype(entry: dict) -> bool:
+            val = entry.get(field, "").upper()
+            return any(kw in val for kw in HYPE_KEYWORDS)
+
+        if chain_id in {999}:
+            for entry in items:
+                if _is_hype(entry):
+                    return entry
+            return None
+
+        # For Base/Ethereum/generic EVM, prefer non-HyperEVM keys
+        non_hype = [e for e in items if not _is_hype(e)]
+        if non_hype:
+            return non_hype[0]
+        return items[0] if items else None
+
+    def _get_private_key(self, account: str, chain: str = "EVM", chain_id: int = None) -> str:
         """Get private key for an account/chain. Internal only — never returned to caller.
 
         When multiple keys match the chain substring (e.g. both "EVM (Ethereum)"
         and "Hyperliquid (HL1 & HyperEVM)" match chain="EVM"), prefer the most
-        specific match. HyperEVM/Hyperliquid keys are preferred when the chain
-        is "EVM" and the RPC is HyperEVM (chain_id 999).
+        specific match. chain_id is used to disambiguate EVM keys:
+        - 999 (HyperEVM) prefers HyperEVM/Hyperliquid/HYPE keys
+        - 8453 (Base) / 1 (Ethereum) prefer non-HyperEVM keys
         """
         pk_store = self.vault_data.get("private_keys", {})
         keys = pk_store.get(account)
@@ -595,9 +631,16 @@ class KeyManagerAgent:
         if len(matches) == 1:
             return matches[0]["key"]
 
-        # Multiple matches — disambiguate by checking for HyperEVM/Hyperliquid
-        # when chain is "EVM" (since HyperEVM is a specific EVM chain)
-        # Priority: HyperEVM > Hyperliquid > generic EVM > other
+        # Multiple matches — disambiguate by chain_id if available
+        if chain.upper() == "EVM" and chain_id is not None:
+            selected = self._disambiguate_by_chain_id(matches, chain_id, field="chain")
+            if selected:
+                print(f"[key_select] chain='{chain}' chain_id={chain_id} matched multiple keys for "
+                      f"account='{account}', selecting key with chain='{selected.get('chain', '')}')")
+                return selected["key"]
+
+        # No chain_id or disambiguation failed — prefer HyperEVM keys for EVM
+        # requests as a conservative fallback matching the original behaviour.
         priority_keywords = ["HYPEREVM", "HYPERLIQUID", "HYPE"]
         for keyword in priority_keywords:
             for match in matches:
@@ -621,7 +664,7 @@ class KeyManagerAgent:
         """Sign a transaction. Returns signed tx hex (not broadcast)."""
         self._check_session()
         try:
-            privkey = self._get_private_key(account, chain)
+            privkey = self._get_private_key(account, chain, chain_id=chain_id)
 
             # Derive sender address for nonce/chain_id fetch
             sender = private_key_to_address(privkey)
@@ -1065,7 +1108,7 @@ class KeyManagerAgent:
         elif action == "list_accounts":
             return self.list_accounts()
         elif action == "get_address":
-            return self.get_address(cmd.get("account"), cmd.get("chain"))
+            return self.get_address(cmd.get("account"), cmd.get("chain"), cmd.get("chain_id"))
         elif action == "sign_tx":
             return self.sign_tx(
                 account=cmd["account"],

@@ -76,7 +76,9 @@ SELECTOR_TOKEN0 = "0x0dfe1681"
 SELECTOR_TOKEN1 = "0xd21220a7"
 SELECTOR_DECIMALS = "0x313ce567"
 SELECTOR_SYMBOL = "0x95d89b41"
-SELECTOR_GET_POOL = "0x1698ee82"
+# Aerodrome SlipStream uses getPool(address,address,int24) — tickSpacing, NOT uint24 fee
+# Uniswap V3 uses getPool(address,address,uint24) = 0x1698ee82, but SlipStream is different
+SELECTOR_GET_POOL = "0x28af8d0b"  # getPool(address,address,int24)
 # Pool tick state: ticks(int24) returns 10 words (320 bytes + 0x prefix)
 SELECTOR_TICKS = "0xf30dba93"
 # collect() is used as a read-only eth_call to get exact uncollected fees.
@@ -187,7 +189,7 @@ def _base_rpc_batch(
             try:
                 payload = json.dumps(payload_obj).encode("utf-8")
                 req = urllib.request.Request(url, data=payload, headers=headers)
-                with urllib.request.urlopen(req, timeout=30) as response:
+                with urllib.request.urlopen(req, timeout=15) as response:
                     data = json.loads(response.read().decode("utf-8"))
                     if isinstance(data, dict) and data.get("error"):
                         raise RuntimeError(data.get("error", {}).get("message", "RPC error"))
@@ -435,9 +437,13 @@ def _usd_value(amount: Optional[float], symbol: str, price_engine: Optional[Pric
 # Pool helpers
 # ---------------------------------------------------------------------------
 
-def _try_get_pool(factory: str, token0: str, token1: str, fee: int) -> Optional[str]:
-    """Try to get a pool address from a factory for a given fee tier."""
-    data = SELECTOR_GET_POOL + _pad_address(token0) + _pad_address(token1) + _pad_int_to_64(fee)
+# Common SlipStream tick spacings: 1, 10, 50, 60, 100, 200
+ALL_TICK_SPACINGS = [1, 10, 50, 60, 100, 200]
+
+
+def _try_get_pool(factory: str, token0: str, token1: str, tick_spacing: int) -> Optional[str]:
+    """Try to get a pool address from a factory for a given tick spacing."""
+    data = SELECTOR_GET_POOL + _pad_address(token0) + _pad_address(token1) + _pad_int_to_64(tick_spacing)
     result = _base_rpc_call("eth_call", [{"to": factory, "data": data}, "latest"])
     if result and isinstance(result, str) and len(result) >= 66:
         addr = _decode_address(result[2:66])
@@ -447,11 +453,11 @@ def _try_get_pool(factory: str, token0: str, token1: str, fee: int) -> Optional[
 
 
 def _pool_for_token_ids(
-    token0: str, token1: str, fee: int, position_manager: str
+    token0: str, token1: str, tick_spacing: int, position_manager: str
 ) -> Optional[str]:
     """Resolve pool address via the correct factory for the given position manager.
 
-    Tries the given fee first, then falls back to all common fee tiers.
+    Tries the given tick spacing first, then falls back to all common tick spacings.
     """
     factory = POSITION_MANAGER_TO_FACTORY.get(position_manager.lower())
     if not factory:
@@ -459,27 +465,26 @@ def _pool_for_token_ids(
     if token1.lower() < token0.lower():
         token0, token1 = token1, token0
 
-    # Try the given fee first
-    pool = _try_get_pool(factory, token0, token1, fee)
+    # Try the given tick spacing first
+    pool = _try_get_pool(factory, token0, token1, tick_spacing)
     if pool:
         return pool
 
-    # Fallback: try all common fee tiers
-    COMMON_FEES = [100, 500, 2500, 3000, 10000]
-    for fallback_fee in COMMON_FEES:
-        if fallback_fee == fee:
+    # Fallback: try all common tick spacings
+    for ts in ALL_TICK_SPACINGS:
+        if ts == tick_spacing:
             continue
-        pool = _try_get_pool(factory, token0, token1, fallback_fee)
+        pool = _try_get_pool(factory, token0, token1, ts)
         if pool:
             return pool
 
-        return None
+    return None
 
 
 def _resolve_pool_aggressive(
     token0: str,
     token1: str,
-    fee: int,
+    tick_spacing: int,
     position_manager: str,
     token_id: int,
     nft_owner: str,
@@ -487,12 +492,12 @@ def _resolve_pool_aggressive(
     """Resolve pool address with multiple fallback strategies.
 
     Tries in order:
-    1. _pool_for_token_ids (standard: factory getPool with known fee + fallback fees)
+    1. _pool_for_token_ids (standard: factory getPool with known tick spacing + fallbacks)
     2. gauge.poolOf(tokenId) — if nft_owner looks like a gauge
-    3. Both factories with ALL common fee tiers (including the original fee)
+    3. Both factories with ALL common tick spacings (including the original tick spacing)
     """
     # Strategy 1: Standard resolution
-    pool = _pool_for_token_ids(token0, token1, fee, position_manager)
+    pool = _pool_for_token_ids(token0, token1, tick_spacing, position_manager)
     if pool:
         return pool
 
@@ -506,43 +511,66 @@ def _resolve_pool_aggressive(
                 print(f"[pool-resolve] Found pool via gauge.poolOf: {resolved}")
                 return resolved.lower()
 
-    # Strategy 3: Try both factories with ALL fee tiers
+    # Strategy 3: Try both factories with ALL tick spacings
     factories = list(POSITION_MANAGER_TO_FACTORY.values())
-    all_fees = [100, 500, 2500, 3000, 10000]
-    # Try the original fee first, then all others
-    tried = {fee}
-    for try_fee in [fee] + [f for f in all_fees if f != fee]:
+    tried = {tick_spacing}
+    for try_ts in [tick_spacing] + [ts for ts in ALL_TICK_SPACINGS if ts != tick_spacing]:
         for factory in factories:
-            pool = _try_get_pool(factory, token0, token1, try_fee)
+            pool = _try_get_pool(factory, token0, token1, try_ts)
             if pool:
-                print(f"[pool-resolve] Found pool via factory getPool: fee={try_fee} factory={factory} pool={pool}")
+                print(f"[pool-resolve] Found pool via factory getPool: tick_spacing={try_ts} factory={factory} pool={pool}")
                 return pool
 
-    print(f"[pool-resolve] Could not resolve pool for token0={token0} token1={token1} fee={fee}")
+    print(f"[pool-resolve] Could not resolve pool for token0={token0} token1={token1} tick_spacing={tick_spacing}")
     return None
 
 
 def _fetch_pool_state(
     pool_address: str
 ) -> Tuple[Optional[float], Optional[int], int, str, str, Optional[int]]:
-    """Return (human_price, current_tick, fee, token0, token1, sqrtPriceX96_raw) for a pool."""
+    """Return (human_price, current_tick, fee, token0, token1, sqrtPriceX96_raw) for a pool.
+
+    Retries RPC calls up to 3 times with 0.5s delay and alternates between the
+    primary and fallback BASE RPC endpoints to tolerate transient failures.
+    """
     pool_address = pool_address.lower()
-    slot0_result = _base_rpc_call(
-        "eth_call",
-        [{"to": pool_address, "data": SELECTOR_SLOT0}, "latest"],
-    )
-    fee_result = _base_rpc_call(
-        "eth_call",
-        [{"to": pool_address, "data": SELECTOR_FEE}, "latest"],
-    )
-    token0_result = _base_rpc_call(
-        "eth_call",
-        [{"to": pool_address, "data": SELECTOR_TOKEN0}, "latest"],
-    )
-    token1_result = _base_rpc_call(
-        "eth_call",
-        [{"to": pool_address, "data": SELECTOR_TOKEN1}, "latest"],
-    )
+
+    # Helper that rebinds the global RPC URLs for retries while preserving the
+    # existing _base_rpc_call retry-through-fallback behaviour.
+    def _fetch_with_retries(make_calls):
+        for attempt in range(3):
+            result = make_calls()
+            if result[0] is not None and result[1]:
+                return result
+            if attempt < 2:
+                print(f"[pool-state] Attempt {attempt + 1} failed for {pool_address}, retrying...")
+                time.sleep(0.5)
+                # Cycle endpoints by temporarily swapping globals
+                global BASE_RPC_URL, BASE_RPC_FALLBACK
+                BASE_RPC_URL, BASE_RPC_FALLBACK = BASE_RPC_FALLBACK, BASE_RPC_URL
+        return result
+
+    def _make_calls():
+        slot0_result = _base_rpc_call(
+            "eth_call",
+            [{"to": pool_address, "data": SELECTOR_SLOT0}, "latest"],
+        )
+        fee_result = _base_rpc_call(
+            "eth_call",
+            [{"to": pool_address, "data": SELECTOR_FEE}, "latest"],
+        )
+        token0_result = _base_rpc_call(
+            "eth_call",
+            [{"to": pool_address, "data": SELECTOR_TOKEN0}, "latest"],
+        )
+        token1_result = _base_rpc_call(
+            "eth_call",
+            [{"to": pool_address, "data": SELECTOR_TOKEN1}, "latest"],
+        )
+        return (slot0_result, fee_result, token0_result, token1_result)
+
+    call_results = _fetch_with_retries(_make_calls)
+    slot0_result, fee_result, token0_result, token1_result = call_results
 
     fee = 0
     if fee_result and isinstance(fee_result, str) and len(fee_result) >= 66:
@@ -602,7 +630,9 @@ def _decode_positions_response(
         operator = _decode_address(body[64:128])
         token0 = _decode_address(body[128:192]).lower()
         token1 = _decode_address(body[192:256]).lower()
-        fee = int(body[256:320], 16)
+        # SlipStream positions() returns tickSpacing at offset 256:320, NOT fee tier
+        # The getPool(address,address,int24) call uses this value directly
+        tick_spacing = int(body[256:320], 16)
         tick_lower = _decode_int24(body[320:384])
         tick_upper = _decode_int24(body[384:448])
         liquidity = int(body[448:512], 16)
@@ -636,9 +666,9 @@ def _decode_positions_response(
         if owner_result and isinstance(owner_result, str) and len(owner_result) >= 66:
             nft_owner = _decode_address(owner_result[2:66])
 
-    # Resolve pool address with aggressive fallbacks (factory + gauge.poolOf + all fees)
+    # Resolve pool address with aggressive fallbacks (factory + gauge.poolOf + all tick spacings)
     pool_address = _resolve_pool_aggressive(
-        token0, token1, fee, position_manager, token_id, nft_owner
+        token0, token1, tick_spacing, position_manager, token_id, nft_owner
     )
 
     current_price: Optional[float] = None
@@ -646,11 +676,10 @@ def _decode_positions_response(
     sqrtPriceX96: Optional[int] = None
     if pool_address:
         current_price, current_tick, _, _, _, sqrtPriceX96 = _fetch_pool_state(pool_address)
-        # Retry pool state once if it failed (BASE public RPCs can be flaky)
+        # _fetch_pool_state already retries internally; if it still fails, we
+        # report that pool state is unavailable rather than fabricate holdings.
         if current_tick is None:
-            print(f"[pool-state] First fetch failed for {pool_address}, retrying...")
-            time.sleep(0.5)
-            current_price, current_tick, _, _, _, sqrtPriceX96 = _fetch_pool_state(pool_address)
+            print(f"[pool-state] Pool state unavailable for {pool_address} after retries")
 
     range_low = _tick_to_price(tick_lower, decimals0, decimals1)
     range_high = _tick_to_price(tick_upper, decimals0, decimals1)
@@ -828,20 +857,21 @@ def _decode_positions_response(
             if val1 == 0.0:
                 val1 = _usd_value(amount1_human, symbol1, price_engine) or 0.0
 
+            # Pool value is liquidity only — fees are shown separately via fees_earned_usd
             position_value_usd = val0 + val1
 
-            print(f"[aerodrome-value] token {token_id}: val0={val0} val1={val1} total={position_value_usd}")
+            print(f"[aerodrome-value] token {token_id}: val0={val0} val1={val1} fees={fees_earned_usd} pool_value={position_value_usd}")
 
             deposit_amounts[symbol0] = amount0_human
             deposit_amounts[symbol1] = amount1_human
         else:
+            # Pool state unavailable — can't compute real holdings
             if liquidity:
-                deposit_amounts[symbol0] = liquidity / (10 ** (decimals0 + 3))
-                deposit_amounts[symbol1] = liquidity / (10 ** (decimals1 + 3))
+                print(f"[aerodrome-value] No pool state for token {token_id} — holdings unavailable")
     else:
+        # Pool state unavailable — can't compute real holdings
         if liquidity:
-            deposit_amounts[symbol0] = liquidity / (10 ** (decimals0 + 3))
-            deposit_amounts[symbol1] = liquidity / (10 ** (decimals1 + 3))
+            print(f"[aerodrome-value] No pool state for token {token_id} — holdings unavailable")
 
     return LPPosition(
         position_id=f"base:{token_id}",
@@ -860,7 +890,11 @@ def _decode_positions_response(
         fees_earned_usd=fees_earned_usd,
         fees_note=fees_note,
         current_value_usd=position_value_usd,
-        deposit_value_usd=position_value_usd,
+        deposit_value_usd=position_value_usd if deposit_amounts else None,
+        error=(
+            "Pool state unavailable — holdings and value may be incomplete. Try refreshing."
+            if not deposit_amounts and liquidity else None
+        ),
         pnl_usd=pnl_usd,
         pnl_pct=pnl_pct,
         apy=apy,
@@ -871,7 +905,7 @@ def _decode_positions_response(
             "operator": operator,
             "token0": token0,
             "token1": token1,
-            "fee": fee,
+            "tick_spacing": tick_spacing,
             "tick_lower": tick_lower,
             "tick_upper": tick_upper,
             "liquidity": liquidity,
@@ -1344,8 +1378,11 @@ class AerodromeAdapter(VenueAdapter):
 
             for token_id in owned_ids:
                 pos = self._fetch_position_by_token_id(token_id, price_engine, wallet_address)
-                if pos and not pos.error:
-                    positions.append(pos)
+                if pos:
+                    has_liquidity = pos.raw_data and pos.raw_data.get("liquidity", 0) > 0
+                    has_fees = pos.fees_earned_usd and pos.fees_earned_usd > 0
+                    if has_liquidity or has_fees:
+                        positions.append(pos)
 
         # If we found any unstaked Aerodrome positions, use their pool addresses
         # to discover gauges and check for additional staked positions in those
@@ -1372,13 +1409,20 @@ class AerodromeAdapter(VenueAdapter):
                         positions.append(staked_pos)
                         existing_ids.add(staked_pos.position_id)
 
-        # v5.2.2: Also discover staked positions via Transfer event logs.
-        # This catches positions staked in gauges we haven't saved or discovered
-        # from unstaked NFTs.
-        log_staked = self._find_staked_positions_via_transfer_logs(
-            wallet_address, price_engine, existing_ids
-        )
-        positions.extend(log_staked)
+        # v5.2.4: Skip the expensive transfer log scan when there are no unstaked
+        # positions and no saved pools. The user can enter their NFT ID directly.
+        # The transfer log scan is still useful when we have saved pool-derived
+        # gauges to check, but that's handled by _find_staked_positions_via_saved_pools.
+        if positions or existing_ids:
+            # We have some positions — also scan for staked ones
+            log_staked = self._find_staked_positions_via_transfer_logs(
+                wallet_address, price_engine, existing_ids, max_seconds=30
+            )
+            positions.extend(log_staked)
+        else:
+            # No unstaked positions and no saved pools — skip the expensive scan.
+            # The LP tab will show the "positions may be staked" helpful message.
+            print("[aerodrome-scan] No unstaked positions or saved pools — skipping transfer log scan")
 
         return positions
 
@@ -1420,10 +1464,13 @@ class AerodromeAdapter(VenueAdapter):
                 pos = self._fetch_position_by_token_id(
                     staked_tid, price_engine, wallet_address=wallet_address
                 )
-                if pos and not pos.error:
-                    if pos.raw_data:
-                        pos.raw_data["gauge_address"] = gauge
-                    positions.append(pos)
+                if pos:
+                    has_liquidity = pos.raw_data and pos.raw_data.get("liquidity", 0) > 0
+                    has_fees = pos.fees_earned_usd and pos.fees_earned_usd > 0
+                    if has_liquidity or has_fees:
+                        if pos.raw_data:
+                            pos.raw_data["gauge_address"] = gauge
+                        positions.append(pos)
 
         return positions
 
@@ -1432,6 +1479,7 @@ class AerodromeAdapter(VenueAdapter):
         wallet_address: str,
         price_engine: Optional[PriceEngine],
         existing_position_ids: set,
+        max_seconds: int = 30,
     ) -> List[LPPosition]:
         """Discover staked Aerodrome positions by scanning Transfer events.
 
@@ -1461,11 +1509,15 @@ class AerodromeAdapter(VenueAdapter):
             return positions
 
         discovered_gauges: Dict[str, None] = {}
-        chunk_size = 50000
-        max_blocks = 2_000_000  # ~4 months on Base
+        chunk_size = 100_000  # was 50_000
+        max_blocks = 500_000  # ~12 days on Base (was 2,000,000)
         start_block = max(0, latest_block - max_blocks)
+        scan_start = time.monotonic()
 
         for from_block in range(start_block, latest_block, chunk_size):
+            if time.monotonic() - scan_start > max_seconds:
+                print(f"[staked-scan] Time budget {max_seconds}s exceeded, stopping scan")
+                break
             to_block = min(from_block + chunk_size - 1, latest_block)
             for pm in V3_POSITION_MANAGERS:
                 params = {
@@ -1500,11 +1552,14 @@ class AerodromeAdapter(VenueAdapter):
                 pos = self._fetch_position_by_token_id(
                     staked_tid, price_engine, wallet_address=wallet_address
                 )
-                if pos and not pos.error:
-                    if pos.raw_data:
-                        pos.raw_data["gauge_address"] = gauge_addr
-                    positions.append(pos)
-                    existing_position_ids.add(pos_id)
+                if pos:
+                    has_liquidity = pos.raw_data and pos.raw_data.get("liquidity", 0) > 0
+                    has_fees = pos.fees_earned_usd and pos.fees_earned_usd > 0
+                    if has_liquidity or has_fees:
+                        if pos.raw_data:
+                            pos.raw_data["gauge_address"] = gauge_addr
+                        positions.append(pos)
+                        existing_position_ids.add(pos_id)
 
         return positions
 
@@ -1537,7 +1592,8 @@ class AerodromeAdapter(VenueAdapter):
 
                 token0 = _decode_address(body[128:192]).lower()
                 token1 = _decode_address(body[192:256]).lower()
-                fee_tier = int(body[256:320], 16)
+                # SlipStream positions() returns tickSpacing at this offset, not fee tier
+                tick_spacing = int(body[256:320], 16)
                 tick_lower = _decode_int24(body[320:384])
                 tick_upper = _decode_int24(body[384:448])
                 liquidity = int(body[448:512], 16)
@@ -1563,7 +1619,7 @@ class AerodromeAdapter(VenueAdapter):
                 )
 
                 # Read pool state for delta method
-                pool_addr = _pool_for_token_ids(token0, token1, fee_tier, pm)
+                pool_addr = _pool_for_token_ids(token0, token1, tick_spacing, pm)
                 _, cur_tick, _, _, _, _ = _fetch_pool_state(pool_addr) if pool_addr else (None, None, 0, "", "", None)
 
                 if is_staked_pos and pool_addr and cur_tick is not None:

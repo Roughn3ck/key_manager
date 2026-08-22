@@ -109,7 +109,10 @@ def show_delete_account_dialog(gui):
                     gui.show_placeholder_view()
                 gui.refresh_left_panel()
             else:
-                status_label.configure(text="Failed to delete account", text_color="red")
+                status_label.configure(
+                    text="Account not found in vault data. It may have already been removed.",
+                    text_color="red"
+                )
         except Exception as e:
             status_label.configure(text=f"Error: {e}", text_color="red")
 

@@ -1,13 +1,14 @@
 """
 Railgun Tab — Privacy protocol integration for ColdStack.
 
-Provides GUI for managing the Railgun sidecar, loading shielded wallets,
-viewing private balances, and executing shield/unshield/transfer operations.
+Provides GUI for managing the Railgun sidecar, loading shielded wallets
+from existing vault accounts, viewing private balances, and executing
+shield/unshield/transfer operations.
 
 Version: v5.2.3 (August 2026)
 """
 import threading
-import json
+import hashlib
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 
@@ -21,7 +22,7 @@ class RailgunTab:
     """Railgun privacy tab for ColdStack GUI.
 
     Manages the Railgun Node.js sidecar lifecycle and provides
-    UI for shielded wallet operations.
+    UI for shielded wallet operations using existing vault accounts.
     """
 
     def __init__(self, gui):
@@ -33,10 +34,11 @@ class RailgunTab:
         self._encryption_key: Optional[str] = None
         self._balance_labels: Dict[str, ctk.CTkLabel] = {}
         self._sidecar_running = False
+        self._selected_account: Optional[str] = None
 
     def create_tab(self, parent):
         """Create the Railgun tab content inside the parent frame."""
-        # Main container
+        # Main scrollable container — in case the whole tab is tall
         container = ctk.CTkFrame(parent, corner_radius=0)
         container.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -46,7 +48,7 @@ class RailgunTab:
 
         ctk.CTkLabel(
             status_frame,
-            text="Railgun Privacy Engine",
+            text="🔒 Railgun Privacy Engine",
             font=ctk.CTkFont(size=18, weight="bold")
         ).pack(pady=(10, 5))
 
@@ -119,7 +121,7 @@ class RailgunTab:
         )
         self._widgets["btn_refresh_status"].pack(side="left")
 
-        # ─── Section 2: Wallet Loading ───
+        # ─── Section 2: Wallet Loading (from vault accounts) ───
         wallet_frame = ctk.CTkFrame(container, corner_radius=8)
         wallet_frame.pack(fill="x", pady=(0, 10))
 
@@ -129,23 +131,35 @@ class RailgunTab:
             font=ctk.CTkFont(size=16, weight="bold")
         ).pack(pady=(10, 5))
 
-        # Mnemonic entry
-        mnem_row = ctk.CTkFrame(wallet_frame, fg_color="transparent")
-        mnem_row.pack(fill="x", padx=15, pady=(0, 5))
-        ctk.CTkLabel(mnem_row, text="Mnemonic:", width=100, anchor="w").pack(side="left")
-        self._widgets["mnemonic_entry"] = ctk.CTkEntry(
-            mnem_row, show="*", width=400, placeholder_text="12 or 24 word BIP39 mnemonic"
+        # Account dropdown (selects from existing vault accounts with mnemonics)
+        acct_row = ctk.CTkFrame(wallet_frame, fg_color="transparent")
+        acct_row.pack(fill="x", padx=15, pady=(0, 5))
+        ctk.CTkLabel(acct_row, text="Vault Account:", width=120, anchor="w").pack(side="left")
+        self._widgets["account_dropdown"] = ctk.CTkOptionMenu(
+            acct_row,
+            values=["No accounts found"],
+            command=self._on_account_selected,
+            width=300
         )
-        self._widgets["mnemonic_entry"].pack(side="left", fill="x", expand=True, padx=(5, 0))
+        self._widgets["account_dropdown"].pack(side="left", fill="x", expand=True, padx=(5, 0))
 
-        # Encryption key entry
-        key_row = ctk.CTkFrame(wallet_frame, fg_color="transparent")
-        key_row.pack(fill="x", padx=15, pady=(0, 5))
-        ctk.CTkLabel(key_row, text="Encryption Key:", width=100, anchor="w").pack(side="left")
-        self._widgets["encryption_key_entry"] = ctk.CTkEntry(
-            key_row, show="*", width=400, placeholder_text="32-byte hex encryption key (64 hex chars)"
+        # Refresh account list button
+        self._widgets["btn_refresh_accounts"] = ctk.CTkButton(
+            wallet_frame,
+            text="Refresh Account List",
+            width=150,
+            command=self._refresh_account_list
         )
-        self._widgets["encryption_key_entry"].pack(side="left", fill="x", expand=True, padx=(5, 0))
+        self._widgets["btn_refresh_accounts"].pack(padx=15, pady=(5, 5), anchor="w")
+
+        # Railgun password entry (used to derive encryption key)
+        pass_row = ctk.CTkFrame(wallet_frame, fg_color="transparent")
+        pass_row.pack(fill="x", padx=15, pady=(0, 5))
+        ctk.CTkLabel(pass_row, text="Railgun Password:", width=120, anchor="w").pack(side="left")
+        self._widgets["password_entry"] = ctk.CTkEntry(
+            pass_row, show="•", width=300, placeholder_text="Password to encrypt your shielded wallet"
+        )
+        self._widgets["password_entry"].pack(side="left", fill="x", expand=True, padx=(5, 0))
 
         # Load wallet button
         self._widgets["btn_load_wallet"] = ctk.CTkButton(
@@ -167,9 +181,9 @@ class RailgunTab:
         )
         self._widgets["wallet_info"].pack(fill="x", padx=15, pady=(0, 10))
 
-        # ─── Section 3: Balances ───
+        # ─── Section 3: Balances (FIXED HEIGHT — doesn't eat the screen) ───
         balance_frame = ctk.CTkFrame(container, corner_radius=8)
-        balance_frame.pack(fill="both", expand=True, pady=(0, 10))
+        balance_frame.pack(fill="x", expand=False, pady=(0, 10))
 
         ctk.CTkLabel(
             balance_frame,
@@ -187,9 +201,10 @@ class RailgunTab:
         )
         self._widgets["btn_refresh_balances"].pack(padx=15, pady=(0, 10), anchor="w")
 
-        # Scrollable balance list
-        self._balance_scroll = ctk.CTkScrollableFrame(balance_frame)
-        self._balance_scroll.pack(fill="both", expand=True, padx=15, pady=(0, 10))
+        # Fixed-height scrollable balance list (200px max — scrolls if more)
+        self._balance_scroll = ctk.CTkScrollableFrame(balance_frame, height=200)
+        self._balance_scroll.pack(fill="x", expand=False, padx=15, pady=(0, 10))
+        self._balance_scroll.pack_propagate(False)
 
         self._widgets["balance_placeholder"] = ctk.CTkLabel(
             self._balance_scroll,
@@ -230,6 +245,67 @@ class RailgunTab:
         )
         self._widgets["btn_transfer"].pack(side="left")
 
+    # ─── Account List ───
+
+    def _get_accounts_with_mnemonics(self) -> List[str]:
+        """Get list of 'Pool > Account' strings for accounts that have mnemonics in the vault."""
+        if not self.gui.key_manager:
+            return []
+
+        address_db = self.gui.key_manager.address_db
+        pools = address_db.get("pools", {})
+        mnemonics = address_db.get("mnemonics", {})
+        accounts_with_mnemonics = []
+
+        for pool_name, pool_data in pools.items():
+            for account_name in pool_data.get("accounts", []):
+                if account_name in mnemonics:
+                    accounts_with_mnemonics.append(f"{pool_name} > {account_name}")
+
+        # Also check for accounts with mnemonics that aren't in any pool
+        all_pool_accounts = set()
+        for pool_data in pools.values():
+            all_pool_accounts.update(pool_data.get("accounts", []))
+
+        for account_name in mnemonics:
+            if account_name not in all_pool_accounts:
+                accounts_with_mnemonics.append(f"No Pool > {account_name}")
+
+        return accounts_with_mnemonics
+
+    def _refresh_account_list(self):
+        """Refresh the account dropdown with current vault accounts."""
+        accounts = self._get_accounts_with_mnemonics()
+        if accounts:
+            self._widgets["account_dropdown"].configure(values=accounts)
+            self._widgets["account_dropdown"].set("Select an account...")
+        else:
+            self._widgets["account_dropdown"].configure(values=["No accounts with mnemonics found"])
+            self._widgets["account_dropdown"].set("No accounts with mnemonics found")
+        self.gui.show_notification(f"Found {len(accounts)} accounts with mnemonics")
+
+    def _on_account_selected(self, selection: str):
+        """Called when user selects an account from the dropdown."""
+        self._selected_account = selection
+        # Enable load button if we have a valid selection
+        if " > " in selection:
+            self._widgets["btn_load_wallet"].configure(state="normal")
+        else:
+            self._widgets["btn_load_wallet"].configure(state="disabled")
+
+    @staticmethod
+    def _parse_account_selection(selection: str) -> str:
+        """Extract account name from 'Pool > Account' format."""
+        if " > " in selection:
+            parts = selection.split(" > ", 1)
+            return parts[1]
+        return selection
+
+    @staticmethod
+    def _derive_encryption_key(password: str) -> str:
+        """Derive a 32-byte hex encryption key from a password string."""
+        return hashlib.sha256(password.encode('utf-8')).hexdigest()
+
     # ─── Sidecar Lifecycle ───
 
     def _on_start_sidecar(self):
@@ -244,6 +320,7 @@ class RailgunTab:
                     if ok:
                         self._sidecar_running = True
                         self.gui.root.after(0, lambda: self._update_sidecar_ui(running=True))
+                        self.gui.root.after(0, lambda: self._refresh_account_list())
                         self.gui.root.after(0, lambda: self.gui.show_notification("Railgun sidecar started"))
                     else:
                         self.gui.root.after(0, lambda: self.gui.show_notification("Sidecar failed to start", error=True))
@@ -305,7 +382,6 @@ class RailgunTab:
             self.gui.show_notification("Sidecar not running", error=True)
             return
 
-        # Get RPC config from the GUI
         rpc_config = self.gui.rpc_config
         if not rpc_config:
             self.gui.show_notification("No RPC config loaded. Go Online first.", error=True)
@@ -343,20 +419,31 @@ class RailgunTab:
     # ─── Wallet Loading ───
 
     def _on_load_wallet(self):
-        """Load a Railgun wallet from mnemonic + encryption key."""
+        """Load a Railgun wallet from a vault account + Railgun password."""
         if not self.sidecar or not self._sidecar_running:
             self.gui.show_notification("Sidecar not running", error=True)
             return
 
-        mnemonic = self._widgets["mnemonic_entry"].get().strip()
-        encryption_key = self._widgets["encryption_key_entry"].get().strip()
+        if not self._selected_account or " > " not in self._selected_account:
+            self.gui.show_notification("Select a vault account first", error=True)
+            return
 
+        password = self._widgets["password_entry"].get().strip()
+        if not password:
+            self.gui.show_notification("Enter a Railgun password", error=True)
+            return
+
+        # Get the account name from the dropdown selection
+        account_name = self._parse_account_selection(self._selected_account)
+
+        # Get the mnemonic from the vault
+        mnemonic = self.gui.show_mnemonic(account_name)
         if not mnemonic:
-            self.gui.show_notification("Enter a mnemonic first", error=True)
+            self.gui.show_notification(f"No mnemonic found for account '{account_name}'", error=True)
             return
-        if not encryption_key:
-            self.gui.show_notification("Enter an encryption key", error=True)
-            return
+
+        # Derive the encryption key from the password
+        encryption_key = self._derive_encryption_key(password)
 
         def _load():
             try:
@@ -368,19 +455,21 @@ class RailgunTab:
             except Exception as e:
                 self.gui.root.after(0, lambda: self.gui.show_notification(f"Wallet load failed: {e}", error=True))
 
-        self.gui.show_notification("Loading shielded wallet...")
+        self.gui.show_notification(f"Loading shielded wallet from '{account_name}'...")
         threading.Thread(target=_load, daemon=True).start()
 
     def _on_wallet_loaded(self, result):
         """Called when wallet loading completes."""
         if result.get("status") == "ok":
+            addr_short = f"{self._railgun_address[:12]}...{self._railgun_address[-8:]}" if self._railgun_address else "unknown"
             self._widgets["wallet_status"].configure(
-                text=f"Wallet: {self._railgun_address[:12]}...{self._railgun_address[-8:]}",
+                text=f"Wallet: {addr_short}",
                 text_color="#4caf50"
             )
             self._widgets["wallet_info"].configure(
                 text=f"Wallet ID: {self._railgun_wallet_id}\n"
                      f"0zk Address: {self._railgun_address}\n"
+                     f"Account: {self._selected_account}\n"
                      f"Created: {result.get('created', 'existing')}"
             )
             self._widgets["btn_refresh_balances"].configure(state="normal")
@@ -401,7 +490,6 @@ class RailgunTab:
             self.gui.show_notification("No wallet loaded", error=True)
             return
 
-        # Refresh for all Railgun-supported chains
         chains = ["ethereum", "arbitrum", "bsc", "polygon", "base", "optimism"]
 
         def _refresh():
@@ -411,11 +499,9 @@ class RailgunTab:
                 except Exception as e:
                     print(f"[railgun] Balance refresh for {chain}: {e}")
 
-            # Give callbacks a moment to populate
             import time
             time.sleep(2)
 
-            # Fetch status
             try:
                 status = self.sidecar.get_balance_status()
                 self.gui.root.after(0, lambda: self._render_balances(status))
@@ -426,8 +512,7 @@ class RailgunTab:
         threading.Thread(target=_refresh, daemon=True).start()
 
     def _render_balances(self, status):
-        """Render balance data in the scrollable frame."""
-        # Clear existing
+        """Render balance data in the fixed-height scrollable frame."""
         for widget in self._balance_scroll.winfo_children():
             widget.destroy()
 
@@ -445,7 +530,6 @@ class RailgunTab:
             self.gui.show_notification("No shielded balances found")
             return
 
-        # Render balances by chain and bucket
         for chain, chain_buckets in wallet_buckets.items():
             chain_frame = ctk.CTkFrame(self._balance_scroll, corner_radius=6)
             chain_frame.pack(fill="x", pady=5)
@@ -462,7 +546,6 @@ class RailgunTab:
                 if not erc20_amounts:
                     continue
 
-                # Only show Spendable bucket prominently
                 color = "#4caf50" if bucket_name == "Spendable" else "#888888"
                 bucket_text = f"  {bucket_name}:"
                 ctk.CTkLabel(

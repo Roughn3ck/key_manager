@@ -403,7 +403,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v5.2.2 - ColdStack | Aerodrome SlipStream + BSC V3",
+            text="v5.2.4 - ColdStack | Railgun Sidecar + Aerodrome + BSC V3",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )

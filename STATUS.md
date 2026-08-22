@@ -1,12 +1,24 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.2.3 (Railgun Privacy Integration)
-**Last Updated:** 2026-08-18
+**Current Version:** v5.2.4 (Railgun Sidecar + Aerodrome & BSC V3 Pools)
+**Last Updated:** 2026-08-22
 
 ---
 
-## Known Issues (v5.2.3)
+## Known Issues (v5.2.4)
+
+### Aerodrome SlipStream — Active Troubleshooting
+
+**Status:** Read support is functional; write operations are still being validated
+
+Aerodrome SlipStream positions on Base are now discovered via wallet scan and saved-pool gauge lookup. However, the following write paths are not yet fully verified and may fail in production:
+
+- **Collect Fees** — fee collection for Aerodrome NFT positions needs the correct `NonfungiblePositionManager.collect()` calldata and spender approval path. Test on a small position first.
+- **Compound Fees** — requires collect → swap through the Aerodrome swap router → re-deposit; the exact router and multi-hop path for SlipStream pools has not been confirmed.
+- **Close Position** — must collect unclaimed fees, then call `decreaseLiquidity` with `liquidity=uint128.max` and burn the NFT. The current decrease/burn sequence is being validated against live SlipStream positions.
+
+Until these are verified, treat Aerodrome write operations as experimental. Always double-check the transaction preview and ensure the embedded signing agent is running before confirming.
 
 ### Aerodrome SlipStream Staked Positions — Wallet Scan Workaround
 
@@ -20,6 +32,37 @@ Aerodrome SlipStream positions staked in a CL gauge cannot be discovered via wal
 - Transfer event log scanning: requires `eth_getLogs` over large block ranges. Public Base RPCs cap at ~10k blocks per query (413 error above). Scanning 6 months of history would need ~800 sequential calls — too slow/unreliable. A paid RPC (Alchemy/QuickNode/Infura) with higher log limits would make this feasible.
 - Aerodrome subgraph: the Aerodrome frontend uses a single Multicall3 batch call with 8192 bytes of custom bytecode sent to the wallet address. This likely relies on EIP-7702 (EOA delegation) or a similar mechanism that only works if the wallet has code. No public subgraph endpoint has been identified.
 - Caching (current partial solution): once a user enters a token ID manually and saves the pool, future wallet scans find the position via the saved-pools gauge lookup (`_find_staked_positions_via_saved_pools`).
+
+---
+
+## v5.2.4 - Railgun Sidecar + Aerodrome & BSC V3 Pools (August 2026)
+
+### Summary
+v5.2.4 ships the Railgun privacy sidecar alongside expanded LP coverage: Aerodrome SlipStream on Base and Uniswap V3 / PancakeSwap V3 on BNB Chain. This is an incremental release on top of v5.2.3 with a bug fix for account deletion.
+
+### New Features
+- **Aerodrome SlipStream (Base)** — read-only position discovery for concentrated-liquidity pools on Base
+  - Wallet scan via `balanceOf`/`tokenOfOwnerByIndex` on the SlipStream Position Manager
+  - Saved-pool gauge fallback for staked positions (`_find_staked_positions_via_saved_pools`)
+  - Position decoding: token pair, fee tier, tick range, liquidity, price, in-range %
+- **BSC V3 Pool Reads** — Uniswap V3 and PancakeSwap V3 positions on BNB Chain via the Krystal adapter
+  - Factory/NPM registry for both DEXs
+  - Wallet scan across all registered position managers
+  - Fee estimation via read-only `collect()` `eth_call`
+
+### Bug Fixes
+- **Delete Account** (`src/main.py`, `src/account_dialogs.py`) — accounts that only exist in a pool member list (orphaned after pool swaps) can now be deleted; error message improved when an account is not found anywhere.
+
+### Files Changed
+- `src/main.py` — `delete_account()` rewritten to handle orphaned pool references
+- `src/account_dialogs.py` — clearer "not found" error message in delete dialog
+- `src/venue_adapters/aerodrome_adapter.py` — Aerodrome SlipStream read adapter
+- `src/venue_adapters/krystal_adapter.py` — BSC V3 read adapter
+- `src/lp_tab.py` — Aerodrome and BSC rendering/scan integration
+
+### Verification
+- `python -m py_compile` passes for modified files
+- Delete-account dialog now removes orphaned pool-only accounts
 
 ---
 
