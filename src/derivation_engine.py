@@ -25,6 +25,14 @@ from hdwallet.derivations import (
 )
 from mnemonic import Mnemonic as MnemonicValidator
 
+from ed25519_utils import (
+    b58encode,
+    ed25519_privkey_to_pubkey,
+    slip10_derive_path,
+    slip10_master_key_from_seed,
+    slip10_derive_hardened,
+)
+
 
 # ---------------------------------------------------------------------------
 # Bech32 / Bech32m encoding (BIP173 / BIP350)
@@ -199,6 +207,53 @@ class DerivationEngine:
             "semantic": None,
             "cryptocurrency": "Solana",
         },
+        "SOL (Solana) — Account 1": {
+            "path": "m/44'/501'/1'/0'",
+            "address_type": "solana",
+            "coin_type": 501,
+            "derivation_class": "BIP44",
+            "semantic": None,
+            "cryptocurrency": "Solana",
+            "account_index": 1,
+        },
+        "SOL (Solana) — Account 2": {
+            "path": "m/44'/501'/2'/0'",
+            "address_type": "solana",
+            "coin_type": 501,
+            "derivation_class": "BIP44",
+            "semantic": None,
+            "cryptocurrency": "Solana",
+            "account_index": 2,
+        },
+        "SOL (Solana) — Account 3": {
+            "path": "m/44'/501'/3'/0'",
+            "address_type": "solana",
+            "coin_type": 501,
+            "derivation_class": "BIP44",
+            "semantic": None,
+            "cryptocurrency": "Solana",
+            "account_index": 3,
+        },
+        "SOL (Solana) — Address 1": {
+            "path": "m/44'/501'/0'/1'",
+            "address_type": "solana",
+            "coin_type": 501,
+            "derivation_class": "BIP44",
+            "semantic": None,
+            "cryptocurrency": "Solana",
+            "account_index": 0,
+            "_solana_address_index": 1,
+        },
+        "SOL (Solana) — Address 2": {
+            "path": "m/44'/501'/0'/2'",
+            "address_type": "solana",
+            "coin_type": 501,
+            "derivation_class": "BIP44",
+            "semantic": None,
+            "cryptocurrency": "Solana",
+            "account_index": 0,
+            "_solana_address_index": 2,
+        },
         "DASH (Dash)": {
             "path": "m/44'/5'/0'/0/0",
             "address_type": "dash",
@@ -330,6 +385,57 @@ class DerivationEngine:
             return hdwallet.address()
 
     @staticmethod
+    def _derive_solana_slip10(mnemonic: str, final_index: int,
+                               chain: str, path: str) -> Dict[str, Any]:
+        """Derive a Solana key using SLIP-0010 Ed25519 (all-hardened, 4 levels).
+
+        Brave/Phantom wallets use m/44'/501'/{account}'/{0}' — 4 hardened
+        levels.  The generic BIP44Derivation in hdwallet produces
+        m/44'/501'/0'/0/0 (5 levels, unhardened change+address), which
+        yields a different key.
+
+        This method implements SLIP-0010 directly to produce the standard
+        4-level all-hardened derivation that Solana wallets expect.
+
+        Args:
+            mnemonic: BIP39 mnemonic phrase.
+            final_index: Index for the 4th hardened level (0 for account
+                         variants, address_index for address variants).
+            chain: Chain label for the result dict.
+            path: Human-readable path string.
+
+        Returns:
+            Dict with keys: chain, path, address, private_key, public_key.
+        """
+        m = MnemonicValidator("english")
+        seed = m.to_seed(mnemonic.strip(), passphrase="")
+
+        # SLIP-0010: 4 hardened levels — purpose/coin_type/account/index
+        key, chain_code = slip10_master_key_from_seed(seed)
+        key, chain_code = slip10_derive_hardened(key, chain_code, 44)
+        key, chain_code = slip10_derive_hardened(key, chain_code, 501)
+
+        # Level 3: account index from the chain config (0 for base, N for Account N)
+        config = DerivationEngine.SUPPORTED_CHAINS.get(chain, {})
+        acct_idx = config.get("account_index", 0)
+        key, chain_code = slip10_derive_hardened(key, chain_code, acct_idx)
+
+        # Level 4: final hardened index
+        key, chain_code = slip10_derive_hardened(key, chain_code, final_index)
+
+        private_key = key.hex()
+        pubkey_bytes = ed25519_privkey_to_pubkey(key)
+        address = b58encode(pubkey_bytes)
+
+        return {
+            "chain": chain,
+            "path": path,
+            "address": address,
+            "private_key": private_key,
+            "public_key": pubkey_bytes.hex(),
+        }
+
+    @staticmethod
     def derive_from_mnemonic(mnemonic: str, chain: str,
                              path: Optional[str] = None,
                              account_index: int = 0,
@@ -365,6 +471,39 @@ class DerivationEngine:
         derivation_class = config["derivation_class"]
         coin_type = config["coin_type"]
         default_path = config["path"]
+
+        # v5.2.5: Use per-variant account/address index from config when
+        # available (e.g. "SOL (Solana) — Account 1" has account_index=1).
+        # This overrides the function-level defaults of 0.
+        cfg_account_index = config.get("account_index")
+        cfg_address_index = config.get("address_index")
+        if cfg_account_index is not None and account_index == 0:
+            account_index = cfg_account_index
+        if cfg_address_index is not None and address_index == 0:
+            address_index = cfg_address_index
+
+        # v5.2.5-hotfix5: Solana uses SLIP-0010 Ed25519 derivation (4 hardened
+        # levels), NOT BIP44Derivation (5 levels with unhardened change/address).
+        # Routing here to ensure Brave/Phantom compatibility.
+        if address_type == "solana":
+            # Determine the 4th-level hardened index.  For account variants
+            # (Account N) the path is m/44'/501'/N'/0' — the 4th level is 0.
+            # For address variants (Address N) the path is m/44'/501'/0'/N'
+            # — the 4th level is the address index.
+            sol_idx = config.get("_solana_address_index")
+            if sol_idx is not None:
+                final_index = sol_idx
+            elif cfg_account_index is not None:
+                final_index = 0
+            elif address_index != 0:
+                final_index = address_index
+            else:
+                final_index = 0
+            acct_for_path = config.get("account_index", 0)
+            used_path = path if path else f"m/44'/501'/{acct_for_path}'/{final_index}'"
+            return DerivationEngine._derive_solana_slip10(
+                mnemonic, final_index, chain, used_path
+            )
 
         # Build mnemonic object for hdwallet
         mnemonic_obj = BIP39Mnemonic(mnemonic=mnemonic.strip())

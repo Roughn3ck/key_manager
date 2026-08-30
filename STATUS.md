@@ -1,12 +1,74 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.2.4 (Railgun Sidecar + Aerodrome & BSC V3 Pools)
-**Last Updated:** 2026-08-22
+**Current Version:** v5.3.0 (ColdTrack Foundation + Orca Whirlpool + Railgun + Aerodrome + BSC V3)
+**Last Updated:** 2026-08-30
 
 ---
 
-## Known Issues (v5.2.4)
+## v5.3.0 - ColdTrack Foundation (August 2026)
+
+### Summary
+v5.3.0 introduces ColdTrack as a new module and tab in ColdStack. ColdTrack is the financial ledger layer — the monetization layer of the ColdStack ecosystem. This release establishes the foundation: SQLite database, account bridge from vault, and the ColdTrack tab UI. It also bundles all v5.2.6 hotfixes (Solana derivation, Token-2022, base58 display, etc.) that were never separately released.
+
+### New Features
+- **ColdTrack Module** — New `src/coldtrack/` subpackage
+  - SQLite database layer (`coldtrack.db`) with 9-table schema (v3.0)
+  - Schema: PORTFOLIOS, ACCOUNTS, FX_RATES, TRANSACTIONS, LP_POSITIONS, LP_SNAPSHOTS, VAULT_DEPOSITS, HOLDINGS, TAGS + TRANSACTION_TAGS
+  - Account bridge: user-initiated sync from vault → ColdTrack DB
+  - ColdTrack tab in CTkTabview: portfolio overview + account list
+  - Controlled disclosure: only public identifiers cross the bridge (no private keys)
+- **Multi-currency schema** — USD, CAD, AUD, EUR values stored per transaction/snapshot
+- **Multi-portfolio schema** — PORTFOLIOS as ownership root (Executive Mind, Kit & Paul)
+
+### v5.2.6 Hotfixes (bundled)
+- **Solana derivation fix** — SLIP-0010 all-hardened 4-level derivation (`m/44'/501'/0'/0'`) replacing wrong BIP44 5-level
+- **Base58 private key display** — Solana keys shown in 64-byte keypair base58 format (Brave/Phantom compatible)
+- **Solana sendTransaction encoding** — explicit `{"encoding": "base64"}` fixes invalid base58 errors
+- **Token ID type fix** — EVM token_id string→int conversion for saved pools
+- **Orca Token-2022 support** — per-mint token program detection (position NFT vs pool tokens)
+- **LP tab error fixes** — saved pool placeholders for failed fetches, Orca auto-fetch, copyable error messages
+- **Add Private Key dialog** — scrollable form, vault-mnemonic derive stores key in derived_meta (placeholder fix)
+- **Delete private key feature** — per-key delete with password confirmation
+- **VERSION constant** — single source of truth replacing hardcoded version strings
+
+### Files Added
+- `src/coldtrack/__init__.py` — Package init
+- `src/coldtrack/db.py` — SQLite database layer (9 tables, CRUD)
+- `src/coldtrack/importer.py` — Vault → ColdTrack account bridge
+- `src/coldtrack/tab.py` — ColdTrack tab UI
+- `src/ed25519_utils.py` — Shared Ed25519 math primitives, base58, SLIP-0010 HD derivation
+- `src/venue_adapters/orca_adapter.py` — Orca Whirlpool read adapter (Solana LP positions)
+- `src/venue_adapters/orca_writer.py` — Orca Whirlpool write adapter (collect/close/rebalance via agent)
+
+### Files Changed
+- `src/gui_main_v5.py` — ColdTrack tab registered; VERSION constant; delete private key UI; base58 display; copyable notifications; scrollable Add Private Key dialog
+- `src/derivation_engine.py` — Solana SLIP-0010 routing; ed25519_utils imports
+- `src/key_manager_agent.py` — ed25519_utils imports; Solana sendTransaction encoding fix; SLIP-0010 key preference
+- `src/main.py` — delete_private_key() + delete-key CLI command
+- `src/account_dialogs.py` — Add Private Key overhaul (scrollable, custom mnemonic, derived_meta fix); delete private key dialog
+- `src/lp_tab.py` — Placeholder rendering for failed fetches; Orca auto-fetch; token_id type fix
+- `src/lp_engine.py` — Minor updates
+- `src/venue_adapters/orca_adapter.py` — Token-2022 detection; Token-2022 wallet scan; _detect_token_program
+- `src/saved_pools.py` — Minor updates
+- `build_gui_v5.py` — ColdTrack + ed25519_utils hidden imports; version bumped to v5.3.0
+- `.gitignore` — coldtrack.db
+- `AGENTS.md` — ColdTrack module section; version bump
+- `README.md` — ColdTrack section
+- `src/chain_options.py` — Minor updates
+
+### Verification
+- `python -m py_compile` passes for all new and modified files
+- Solana test mnemonic produces `HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk` ✅
+- GUI launches, ColdTrack tab appears alongside existing tabs
+- Vault sync creates coldtrack.db with correct schema
+- Portfolios and accounts display correctly after sync
+- Existing tabs (Wallet, HL1 Vaults, LP Positions, Railgun) unaffected
+- All `py_compile` checks pass
+
+---
+
+## Known Issues
 
 ### Aerodrome SlipStream — Active Troubleshooting
 

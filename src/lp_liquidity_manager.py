@@ -16,6 +16,7 @@ from venue_adapters.venue_writer import (
     IncreaseLiquidityParams,
     DecreaseLiquidityParams,
     CollectFeesParams,
+    RebalanceParams,
 )
 
 # Token constants (match hyperliquid_writer.py)
@@ -901,27 +902,421 @@ class RemoveLiquidityDialog:
 
 
 class EditPositionDialog:
-    """Edit Position -- stub for v5.2."""
+    """Rebalance Position dialog for Aerodrome (Base) and Orca (Solana) LP positions.
+
+    Shows current range / price, offers Auto-Recenter (±buffer around current price)
+    or Custom Range (manual human prices → ticks), then runs the multi-TX rebalance
+    flow via the venue's writer.rebalance() on confirmation.
+
+    For HyperEVM / BSC positions the stub behaviour is preserved (rebalance is not
+    yet implemented there).
+    """
 
     def __init__(self, parent, position):
         self.parent = parent
         self.position = position
 
+        pos_id = (position.position_id or "")
+        self._is_base = pos_id.startswith("base:")
+        self._is_solana = pos_id.startswith("solana:")
+
+        # Stub fallback for venues that don't support rebalance yet
+        if not (self._is_base or self._is_solana):
+            self.win = ctk.CTkToplevel(parent.root)
+            self.win.title("Edit Position")
+            self.win.geometry("360x220")
+            self.win.resizable(False, False)
+            self.win.grab_set()
+            ctk.CTkLabel(self.win, text="\u270e Edit Position",
+                         font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(30, 10))
+            ctk.CTkLabel(self.win, text="Rebalance is available for Aerodrome (BASE) and Orca (Solana) positions",
+                         font=ctk.CTkFont(size=12), text_color="gray70").pack(pady=5)
+            ctk.CTkLabel(self.win,
+                         text="HyperEVM and BSC position editing is planned for a future release.",
+                         font=ctk.CTkFont(size=11), text_color="gray50").pack(pady=5)
+            ctk.CTkButton(self.win, text="Close", width=100, height=30,
+                          command=self.win.destroy).pack(pady=15)
+            return
+
+        # Raw position data populated by the adapter fetch
+        raw = position.raw_data if isinstance(position.raw_data, dict) else {}
+        self.tick_lower_old = raw.get("tick_lower")
+        self.tick_upper_old = raw.get("tick_upper")
+        self.tick_spacing = raw.get("tick_spacing", 60)
+        self.decimals0 = raw.get("decimals0", 18)
+        self.decimals1 = raw.get("decimals1", 6)
+
+        # Gas token + writer key by venue
+        if self._is_solana:
+            self._gas_token = "SOL"
+            self._writer_key = "orca"
+            self._chain_name = "Solana"
+        else:
+            self._gas_token = "ETH"
+            self._writer_key = "aerodrome"
+            self._chain_name = "BASE"
+
         self.win = ctk.CTkToplevel(parent.root)
-        self.win.title("Edit Position")
-        self.win.geometry("360x220")
+        self.win.title("Rebalance Position")
+        self.win.geometry("480x680")
         self.win.resizable(False, False)
         self.win.grab_set()
 
-        ctk.CTkLabel(self.win, text="\u270e Edit Position",
-                     font=ctk.CTkFont(size=18, weight="bold")).pack(pady=(30, 10))
-        ctk.CTkLabel(self.win, text="Coming in v5.2",
-                     font=ctk.CTkFont(size=13), text_color="gray70").pack(pady=5)
+        self._build_ui()
+        self._update_range_estimate()
+
+    # ------------------------------------------------------------------
+    # UI construction
+    # ------------------------------------------------------------------
+
+    def _build_ui(self):
+        """Build the rebalance dialog."""
+        # Header
+        header = ctk.CTkFrame(self.win, fg_color="transparent")
+        header.pack(fill="x", padx=20, pady=(15, 5))
+        ctk.CTkLabel(header, text="\u270e Rebalance Position",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(side="left")
+        ctk.CTkButton(header, text="\u2715", width=28, height=28,
+                      fg_color="transparent", hover_color="gray20",
+                      command=self.win.destroy).pack(side="right")
+
+        # Position summary
+        pair = self.position.pair or "Unknown Pair"
+        status = "IN RANGE" if (self.position.position_in_range_pct is not None
+                                and 0 <= self.position.position_in_range_pct <= 100) else "OUT OF RANGE"
+        ctk.CTkLabel(self.win, text=f"{pair}  \u00b7  {self.position.position_id}  \u00b7  {status}",
+                     font=ctk.CTkFont(size=11), text_color="gray70").pack(anchor="w", padx=20)
+
+        # Current range / price panel
+        info_frame = ctk.CTkFrame(self.win, fg_color="gray15", corner_radius=8)
+        info_frame.pack(fill="x", padx=20, pady=10)
+        ctk.CTkLabel(info_frame, text="Current Position",
+                     font=ctk.CTkFont(size=11, weight="bold")).pack(anchor="w", padx=10, pady=(8, 2))
+
+        range_txt = "—"
+        if self.position.range_low is not None and self.position.range_high is not None:
+            range_txt = f"Range: {self.position.range_low:g} \u2013 {self.position.range_high:g}"
+        cur_txt = "—"
+        if self.position.current_price is not None:
+            cur_txt = f"Current price: {self.position.current_price:g}"
+        ctk.CTkLabel(info_frame, text=range_txt + "\n" + cur_txt,
+                     font=ctk.CTkFont(size=11), text_color="gray70",
+                     justify="left").pack(anchor="w", padx=10, pady=(0, 8))
+
+        # Mode toggle: Auto-Recenter vs Custom Range
+        self.mode_var = ctk.StringVar(value="auto")
+        mode_frame = ctk.CTkFrame(self.win, fg_color="transparent")
+        mode_frame.pack(fill="x", padx=20, pady=(5, 5))
+        ctk.CTkRadioButton(mode_frame, text="Auto-Recenter (± buffer around current price)",
+                           variable=self.mode_var, value="auto",
+                           font=ctk.CTkFont(size=11),
+                           command=self._on_mode_change).pack(anchor="w")
+        ctk.CTkRadioButton(mode_frame, text="Custom Range (enter prices manually)",
+                           variable=self.mode_var, value="custom",
+                           font=ctk.CTkFont(size=11),
+                           command=self._on_mode_change).pack(anchor="w", pady=(4, 0))
+
+        # Auto-recenter buffer input
+        self.auto_frame = ctk.CTkFrame(self.win, fg_color="transparent")
+        self.auto_frame.pack(fill="x", padx=20, pady=(5, 5))
+        ctk.CTkLabel(self.auto_frame, text="Buffer (±%):",
+                     font=ctk.CTkFont(size=11)).pack(side="left")
+        self.buffer_entry = ctk.CTkEntry(self.auto_frame, width=70, placeholder_text="20")
+        self.buffer_entry.insert(0, "20")
+        self.buffer_entry.pack(side="left", padx=(5, 0))
+        self.buffer_entry.bind("<KeyRelease>", lambda e: self._update_range_estimate())
+
+        # Custom range input
+        self.custom_frame = ctk.CTkFrame(self.win, fg_color="transparent")
+        ctk.CTkLabel(self.custom_frame, text="New lower price:",
+                     font=ctk.CTkFont(size=11)).pack(anchor="w")
+        self.lower_entry = ctk.CTkEntry(self.custom_frame, placeholder_text="e.g. 2400")
+        self.lower_entry.pack(fill="x", pady=(2, 6))
+        self.lower_entry.bind("<KeyRelease>", lambda e: self._update_range_estimate())
+        ctk.CTkLabel(self.custom_frame, text="New upper price:",
+                     font=ctk.CTkFont(size=11)).pack(anchor="w")
+        self.upper_entry = ctk.CTkEntry(self.custom_frame, placeholder_text="e.g. 3600")
+        self.upper_entry.pack(fill="x", pady=(2, 6))
+        self.upper_entry.bind("<KeyRelease>", lambda e: self._update_range_estimate())
+        # hidden initially
+        self.custom_frame.pack_forget()
+
+        # New range estimate readout
+        self.estimate_label = ctk.CTkLabel(self.win, text="",
+                                            font=ctk.CTkFont(size=11), text_color="#51cf94",
+                                            justify="left")
+        self.estimate_label.pack(anchor="w", padx=20, pady=(5, 5))
+
+        # Slippage
+        slip_frame = ctk.CTkFrame(self.win, fg_color="transparent")
+        slip_frame.pack(fill="x", padx=20, pady=(5, 5))
+        ctk.CTkLabel(slip_frame, text="Slippage tolerance (%):",
+                     font=ctk.CTkFont(size=11)).pack(side="left")
+        self.slippage_entry = ctk.CTkEntry(slip_frame, width=70, placeholder_text="0")
+        self.slippage_entry.insert(0, "0")
+        self.slippage_entry.pack(side="left", padx=(5, 0))
+
+        # Warnings
         ctk.CTkLabel(self.win,
-                     text="Will allow editing tick range,\nrebalancing, and position settings.",
-                     font=ctk.CTkFont(size=11), text_color="gray50").pack(pady=5)
-        ctk.CTkButton(self.win, text="Close", width=100, height=30,
-                      command=self.win.destroy).pack(pady=15)
+                     text=f"\u26a0 This will submit multiple transactions on {self._chain_name}: close, collect, swap (if needed), approve/mint.",
+                     font=ctk.CTkFont(size=10), text_color="#ffd43b",
+                     wraplength=440, justify="left").pack(anchor="w", padx=20, pady=(10, 2))
+        ctk.CTkLabel(self.win,
+                     text=f"Ensure your wallet has {self._gas_token} on {self._chain_name} for gas. The key_manager_agent must be running and unlocked.",
+                     font=ctk.CTkFont(size=10), text_color="gray60",
+                     wraplength=440, justify="left").pack(anchor="w", padx=20, pady=(0, 10))
+
+        # Buttons
+        btn_row = ctk.CTkFrame(self.win, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20, pady=(5, 15))
+        ctk.CTkButton(btn_row, text="Cancel", fg_color="gray30",
+                      width=100, height=38, command=self.win.destroy).pack(side="left")
+        self.confirm_btn = ctk.CTkButton(btn_row, text="CONFIRM REBALANCE",
+                                          fg_color=("#6f42c1", "#5a32a3"),
+                                          hover_color=("#5a32a3", "#42288a"),
+                                          height=38, command=self._on_confirm)
+        self.confirm_btn.pack(side="right", fill="x", expand=True, padx=(10, 0))
+
+    # ------------------------------------------------------------------
+    # Mode switching + range estimation
+    # ------------------------------------------------------------------
+
+    def _on_mode_change(self):
+        """Toggle visibility of the auto vs custom input sections."""
+        if self.mode_var.get() == "auto":
+            self.custom_frame.pack_forget()
+            self.auto_frame.pack(fill="x", padx=20, pady=(5, 5))
+        else:
+            self.auto_frame.pack_forget()
+            self.custom_frame.pack(fill="x", padx=20, pady=(5, 5))
+            # Prefill with current range if known
+            if self.position.range_low is not None and not self.lower_entry.get():
+                self.lower_entry.insert(0, f"{self.position.range_low:g}")
+            if self.position.range_high is not None and not self.upper_entry.get():
+                self.upper_entry.insert(0, f"{self.position.range_high:g}")
+        self._update_range_estimate()
+
+    def _price_to_tick(self, human_price: float) -> int:
+        """Convert a human-readable price to a raw tick, snapped to tick_spacing."""
+        import math as _math
+        raw = human_price * (10 ** (self.decimals1 - self.decimals0))
+        tick = int(_math.floor(_math.log(raw, 1.0001)))
+        return (tick // self.tick_spacing) * self.tick_spacing
+
+    def _tick_to_price(self, tick: int) -> float:
+        """Convert a raw tick back to a human-readable price for display."""
+        raw = 1.0001 ** tick
+        return raw * (10 ** (self.decimals0 - self.decimals1))
+
+    def _compute_new_range(self):
+        """Return (tick_lower, tick_upper) based on the current mode, or (None, None) on error."""
+        if self.mode_var.get() == "auto":
+            # Auto-Recenter via StrategyEngine.compute_recentered_range
+            try:
+                buffer_pct = float(self.buffer_entry.get() or "20") / 100.0
+            except ValueError:
+                return None, None
+            if buffer_pct <= 0 or buffer_pct >= 1:
+                return None, None
+            # Use the shared strategy engine on the parent GUI
+            engine = getattr(getattr(self.parent, "gui", self.parent), "lp_engine", None)
+            if engine is None:
+                # Fallback: compute manually
+                if self.position.current_price is None:
+                    return None, None
+                low_h = self.position.current_price * (1 - buffer_pct)
+                high_h = self.position.current_price * (1 + buffer_pct)
+                return self._price_to_tick(low_h), self._price_to_tick(high_h)
+            lo, hi = engine.compute_recentered_range(
+                self.position, buffer_pct=buffer_pct, tick_spacing=self.tick_spacing
+            )
+            return lo, hi
+        # Custom range — user entered human prices; convert to ticks
+        try:
+            low_h = float(self.lower_entry.get() or "0")
+            high_h = float(self.upper_entry.get() or "0")
+        except ValueError:
+            return None, None
+        if low_h <= 0 or high_h <= 0 or low_h >= high_h:
+            return None, None
+        return self._price_to_tick(low_h), self._price_to_tick(high_h)
+
+    def _update_range_estimate(self):
+        """Recompute and show the new range estimate."""
+        lo, hi = self._compute_new_range()
+        if lo is None or hi is None:
+            self.estimate_label.configure(text="New range: —", text_color="gray60")
+            return
+        lo_h = self._tick_to_price(lo)
+        hi_h = self._tick_to_price(hi)
+        self.estimate_label.configure(
+            text=f"New range: {lo_h:g} \u2013 {hi_h:g}\n(ticks {lo} to {hi})",
+            text_color="#51cf94")
+
+    # ------------------------------------------------------------------
+    # Confirm + execute
+    # ------------------------------------------------------------------
+
+    def _on_confirm(self):
+        """Validate inputs, then run the rebalance flow in a background thread."""
+        new_lower, new_upper = self._compute_new_range()
+        if new_lower is None or new_upper is None:
+            _notify(self.parent, "Invalid range — check inputs", error=True)
+            return
+        if new_lower >= new_upper:
+            _notify(self.parent, "Lower tick must be below upper tick", error=True)
+            return
+
+        try:
+            slippage = float(self.slippage_entry.get() or "0")
+        except ValueError:
+            _notify(self.parent, "Invalid slippage value", error=True)
+            return
+        if slippage < 0 or slippage > 50:
+            _notify(self.parent, "Slippage must be between 0 and 50%", error=True)
+            return
+
+        # Resolve wallet address + vault account name
+        if self._is_solana:
+            # Solana positions are owned by the vault's Solana account — there is
+            # no "wallet entry" widget flow like EVM. Find the vault account whose
+            # addresses include a Solana entry (chain/coin containing 'solana' or 'sol').
+            account_name = self._resolve_solana_account()
+            wallet_address = ""  # not needed for Orca signing (agent resolves by account name)
+            if not account_name:
+                _notify(self.parent,
+                        "Could not find a vault account with a Solana address. "
+                        "Add a Solana key to your vault first.", error=True)
+                return
+        else:
+            # EVM flow (Base) — use the LPTab helper which walks the address entry,
+            # saved pools, and account list in order
+            wallet_address = getattr(self.position, "wallet_address", "")
+            account_name = ""
+            resolver = getattr(self.parent, "_lp_resolve_wallet_for_position", None)
+            if resolver:
+                resolved_wallet, resolved_account = resolver(self.position)
+                wallet_address = wallet_address or resolved_wallet
+                account_name = resolved_account
+
+            # Fallbacks if the LPTab helper is unavailable or returned partial results
+            if not account_name and wallet_address:
+                account_name = _resolve_account_name(self.parent, wallet_address)
+                if not account_name:
+                    # _resolve_account_name looks for parent.key_manager; the LPTab
+                    # stores it on parent.gui. Try that explicitly.
+                    gui = getattr(self.parent, "gui", None)
+                    if gui is not None:
+                        account_name = _resolve_account_name(gui, wallet_address)
+
+            if not wallet_address:
+                _notify(self.parent, "Could not resolve wallet address for this position", error=True)
+                return
+            if not account_name:
+                _notify(self.parent, "Could not resolve vault account for this address", error=True)
+                return
+
+        # Final confirmation
+        pair = self.position.pair or "this position"
+        do_it = messagebox.askyesno(
+            "Confirm Rebalance",
+            f"Rebalance {pair} ({self.position.position_id}) to a new range?\n\n"
+            f"New range: ticks {new_lower} to {new_upper}\n"
+            f"Slippage tolerance: {slippage}%\n\n"
+            f"This will broadcast multiple transactions on {self._chain_name}. "
+            f"Ensure you have {self._gas_token} for gas.",
+        )
+        if not do_it:
+            return
+
+        self.confirm_btn.configure(state="disabled", text="REBALANCING...")
+        _notify(self.parent, "Rebalancing position... (multi-TX operation)")
+
+        def _do_rebalance():
+            try:
+                engine = getattr(getattr(self.parent, "gui", self.parent), "lp_engine", None)
+                if engine is None:
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "LP engine not available", error=True))
+                    return
+                password = getattr(getattr(self.parent, "gui", self.parent), "current_password", None)
+                writer = engine.get_writer(self._writer_key, password)
+                if writer is None:
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, f"{self._writer_key.capitalize()} writer not available", error=True))
+                    return
+                if not writer.is_available():
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "Agent not running. Start key_manager_agent with --serve.", error=True))
+                    return
+
+                tx_hashes = writer.rebalance(RebalanceParams(
+                    account=account_name,
+                    position_id=self.position.position_id,
+                    new_tick_lower=new_lower,
+                    new_tick_upper=new_upper,
+                    slippage_pct=slippage,
+                ))
+
+                if tx_hashes:
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent,
+                        f"Rebalance submitted: {len(tx_hashes)} TXs. Last: {tx_hashes[-1][:20]}..."))
+                    # For solana positions the position_id changes after rebalance
+                    # (new NFT mint) — a simple fee refresh won't find the new position;
+                    # trigger a full wallet scan instead
+                    if self._is_solana:
+                        refetch = getattr(self.parent, "_lp_do_fetch", None)
+                        if refetch:
+                            _safe_after(self.parent, 10000, refetch)
+                    else:
+                        refresh = getattr(self.parent, "_lp_refresh_position_fees", None)
+                        if refresh and wallet_address:
+                            _safe_after(self.parent, 8000, lambda: refresh(self.position.position_id, wallet_address))
+                    _safe_after(self.parent, 10000, self.win.destroy)
+                else:
+                    _safe_after(self.parent, 0, lambda: _notify(
+                        self.parent, "Rebalance: no transactions submitted", error=True))
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[rebalance] error: {error_msg}")
+                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
+                    error_msg = (f"Wallet has no {self._gas_token} for gas on {self._chain_name}. "
+                                 f"Send {self._gas_token} to your wallet address. (Details: {error_msg})")
+                elif "nonce too high" in error_msg.lower():
+                    error_msg = f"Transaction rejected (nonce conflict). Wait and retry. (Details: {error_msg})"
+                _safe_after(self.parent, 0, lambda: _notify(
+                    self.parent, f"Rebalance error: {error_msg}", error=True))
+                _safe_after(self.parent, 0, lambda: self.confirm_btn.configure(
+                    state="normal", text="CONFIRM REBALANCE"))
+
+        threading.Thread(target=_do_rebalance, daemon=True).start()
+
+    def _resolve_solana_account(self) -> str:
+        """Return the vault account name that owns this dialog's Solana position NFT.
+
+        Delegates to the LPTab's NFT-ownership resolver (checks the address entry,
+        last-fetched address, then on-chain ownership across vault accounts).
+        Falls back to "first account with any Solana key" if the LPTab helper is
+        unavailable (e.g. called from a context without the tab's position data).
+        """
+        resolver = getattr(self.parent, "_lp_resolve_solana_account_for_position", None)
+        if resolver:
+            result = resolver(self.position)
+            if result:
+                return result
+        # Fallback: first account with any Solana address (legacy behavior)
+        key_manager = getattr(getattr(self.parent, "gui", self.parent), "key_manager", None)
+        if not key_manager:
+            return ""
+        accounts = key_manager.address_db.get("accounts", {})
+        for acct, data in accounts.items():
+            for addr in data.get("addresses", []):
+                coin = (addr.get("coin", "") or "").lower()
+                chain = (addr.get("chain", "") or "").lower()
+                if "solana" in coin or "solana" in chain or coin == "sol" or chain == "sol":
+                    return acct
+        return ""
 
 
 # -- Convenience functions for the main GUI to call --

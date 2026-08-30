@@ -7,7 +7,7 @@ Each venue is implemented as a VenueAdapter in venue_adapters/.
 Read-only by default. Write operations are accessed via get_writer(venue_key).
 Offline by default (caller must check online_mode).
 
-Version: v5.1 (June 2026) - VenueWriter integration + rebalance strategy
+Version: v5.2.5 (August 2026) - VenueWriter integration + rebalance strategy (EVM + Solana)
 """
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field

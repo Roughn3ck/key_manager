@@ -4,7 +4,7 @@
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production-success)]()
 
-**Latest release: [v5.2.3 — Railgun Privacy Integration](https://github.com/Roughn3ck/key_manager/releases/tag/v5.2.3)**
+**Latest release: [v5.3.0 — ColdTrack Foundation + Orca Whirlpool + Railgun + Aerodrome + BSC V3](https://github.com/Roughn3ck/key_manager/releases/tag/v5.3.0)**
 
 ---
 
@@ -53,6 +53,17 @@ No browser. No browser extension. No cloud. Your keys never leave your machine.
 - Shielded balance scanning with POI status tracking
 - Supports Ethereum, Arbitrum, BNB Chain, Polygon, Base, and Optimism
 - Node.js sidecar process (requires Node.js 18+)
+
+**5. ColdTrack (v5.3.0+)** — Financial tracking and reporting layer.
+- Portfolio and account tracking
+- Transaction ledger (multi-currency: USD, CAD, AUD, EUR)
+- LP position tracking with daily snapshots
+- Holdings with cost basis
+- Tax-ready reporting
+
+ColdTrack uses a local SQLite database (`coldtrack.db`) co-located with your vault. Data is synced from your vault via a user-initiated bridge — your private keys and mnemonics never leave the encrypted vault.
+
+**Current status:** Foundation phase — portfolio/account tracking is live. Transaction import, LP tracking, cost basis, and tax reports are in active development.
 
 ---
 

@@ -290,25 +290,51 @@ class LPTab:
             self._lp_update_button_states()
             self._lp_maybe_auto_fetch()
 
-    def _lp_resolve_account_address(self, account_name: str) -> str:
-        """Resolve an account name to its first EVM/HYPE address."""
+    def _lp_resolve_account_address(self, account_name: str, prefer: str = "") -> str:
+        """Resolve an account name to a wallet address.
+
+        Args:
+            account_name: Vault account name.
+            prefer: Optional chain preference — "solana", "evm", etc.
+                    When set, the first address whose coin/chain contains that
+                    substring wins. When empty (default), returns the first
+                    EVM/HYPE address (preserves backward compat for EVM flows).
+
+        Returns:
+            Address string, or "" if not found.
+        """
         if not self.gui.key_manager:
             return ""
         accounts_data = self.gui.key_manager.address_db.get("accounts", {})
         addresses = accounts_data.get(account_name, {}).get("addresses", [])
+        if not addresses:
+            return ""
+
+        prefer = (prefer or "").lower()
+
+        if prefer:
+            for addr in addresses:
+                coin = (addr.get("coin", "") or "").lower()
+                chain = (addr.get("chain", "") or "").lower()
+                if prefer in coin or prefer in chain:
+                    return addr.get("address", "")
+
+        # Default: first EVM/HYPE address (backward compat)
         for addr in addresses:
-            coin = addr.get("coin", "").lower()
-            chain = addr.get("chain", "").lower()
+            coin = (addr.get("coin", "") or "").lower()
+            chain = (addr.get("chain", "") or "").lower()
             if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
                 return addr.get("address", "")
-        return ""
 
-    def _lp_get_current_wallet_address(self) -> str:
+        # Last resort: first address regardless of chain
+        return addresses[0].get("address", "")
+
+    def _lp_get_current_wallet_address(self, prefer: str = "") -> str:
         """Return the wallet address currently selected in the LP tab.
 
         Respects the Address/Account selector: in Account mode, resolves the
-        selected account's first EVM/HYPE address; in Address mode, returns the
-        raw address entry contents.
+        selected account's first EVM/HYPE address (or prefer-matched address);
+        in Address mode, returns the raw address entry contents.
         """
         selector = self._lp_widgets.get("selector_menu")
         mode = selector.get() if selector else "Address"
@@ -316,7 +342,7 @@ class LPTab:
             account_menu = self._lp_widgets.get("account_menu")
             account_name = account_menu.get() if account_menu else ""
             if account_name and account_name != "(no accounts)":
-                return self._lp_resolve_account_address(account_name)
+                return self._lp_resolve_account_address(account_name, prefer=prefer)
             return ""
         entry = self._lp_widgets.get("address_entry")
         return entry.get().strip() if entry else ""
@@ -341,6 +367,82 @@ class LPTab:
             for addr in data.get("addresses", []):
                 if addr.get("address", "").lower() == wallet_address.lower():
                     return acct
+        return ""
+
+    def _lp_resolve_solana_account_for_position(self, position) -> str:
+        """Resolve the vault account that owns a Solana position's NFT.
+
+        Strategy (fast paths first — no RPC):
+          1. If the address entry holds a base58 address, match it to a vault account
+          2. Same check against _lp_last_fetched_address
+          3. Finally, query each vault account's Solana address on-chain and
+             check which one actually holds the position NFT (one
+             getTokenAccountsByOwner call per candidate, bounded by the
+             adapter's 20s timeout per RPC).
+
+        Returns the vault account name, or "" if unresolvable.
+        """
+        key_manager = getattr(self.gui, "key_manager", None)
+        if not key_manager:
+            return ""
+
+        def _is_base58(s: str) -> bool:
+            return bool(s) and not s.startswith("0x") and 32 <= len(s) <= 44
+
+        # Step 1: address entry
+        entry = self._lp_widgets.get("address_entry")
+        wallet_addr = entry.get().strip() if entry else ""
+        if _is_base58(wallet_addr):
+            accounts_data = key_manager.address_db.get("accounts", {})
+            for acct, data in accounts_data.items():
+                for addr in data.get("addresses", []):
+                    if addr.get("address", "") == wallet_addr:
+                        return acct
+
+        # Step 2: last-fetched address (set at fetch time even if the widget changed)
+        fetched_addr = getattr(self, "_lp_last_fetched_address", "")
+        if _is_base58(fetched_addr):
+            accounts_data = key_manager.address_db.get("accounts", {})
+            for acct, data in accounts_data.items():
+                for addr in data.get("addresses", []):
+                    if addr.get("address", "") == fetched_addr:
+                        return acct
+
+        # Step 3: on-chain NFT ownership check across vault accounts
+        position_id = position.position_id or ""
+        mint = position_id.split(":", 1)[1] if ":" in position_id else position_id
+        if not mint:
+            return ""
+
+        accounts_data = key_manager.address_db.get("accounts", {})
+        from venue_adapters.orca_adapter import _solana_rpc_call, _is_solana_address
+        for acct, data in accounts_data.items():
+            for addr in data.get("addresses", []):
+                coin = (addr.get("coin", "") or "").lower()
+                chain = (addr.get("chain", "") or "").lower()
+                if "solana" not in coin and "solana" not in chain and coin != "sol" and chain != "sol":
+                    continue
+                sol_addr = addr.get("address", "")
+                if not sol_addr or not _is_solana_address(sol_addr):
+                    continue
+                try:
+                    result = _solana_rpc_call(
+                        "getTokenAccountsByOwner",
+                        [sol_addr, {"mint": mint}, {"encoding": "jsonParsed"}],
+                    )
+                    if not result or not isinstance(result, dict):
+                        continue
+                    for entry_data in result.get("value", []):
+                        try:
+                            amount = entry_data["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"]
+                            if amount == "1":
+                                print(f"[lp] Resolved Solana account '{acct}' for position {mint[:8]}... via on-chain NFT check")
+                                return acct
+                        except (KeyError, TypeError, AttributeError):
+                            continue
+                except Exception as e:
+                    print(f"[lp] NFT ownership check failed for {acct}: {e}")
+                    continue
         return ""
 
     def _lp_restore_state(self):
@@ -520,6 +622,12 @@ class LPTab:
                 wallet = entry.get("wallet_address", "")
                 if not tid:
                     continue
+                # Convert token_id to int for EVM chains (stored as string in JSON)
+                if venue not in ("Orca", "orca") and isinstance(tid, str):
+                    try:
+                        tid = int(tid)
+                    except ValueError:
+                        pass
                 if venue == "HyperEVM":
                     try:
                         pos = hype_adapter.fetch_evm_position_by_token_id(
@@ -552,6 +660,19 @@ class LPTab:
                         )
                         if pos and not pos.error:
                             # Attach wallet address for display
+                            if wallet:
+                                pos.wallet_address = wallet
+                            positions.append(pos)
+                    except Exception:
+                        pass
+                elif venue in ("Orca", "orca"):
+                    # Orca: tid is the base58 position mint string
+                    try:
+                        from venue_adapters.orca_adapter import OrcaAdapter
+                        pos = OrcaAdapter()._fetch_by_position_mint(
+                            tid, self.gui.price_engine, wallet_address=wallet
+                        )
+                        if pos and not pos.error:
                             if wallet:
                                 pos.wallet_address = wallet
                             positions.append(pos)
@@ -590,15 +711,14 @@ class LPTab:
         threading.Thread(target=_auto_fetch_thread, daemon=True).start()
 
     def _lp_on_loaded_all_saved(self, positions):
-        """Render auto-fetched saved pools, preserving any wallet address context."""
+        """Render auto-fetched saved pools. Keep unfetched saved pools as placeholders."""
         if not positions:
-            return
-        # Use the first position's wallet to update the saved-pools counter
+            positions = []
         scroll = self._lp_widgets.get("scroll")
         if scroll:
             for widget in scroll.winfo_children():
                 widget.destroy()
-        # Deduplicate
+        # Deduplicate fetched positions
         seen = set()
         unique = []
         for pos in positions:
@@ -608,9 +728,71 @@ class LPTab:
                 unique.append(pos)
         for pos in unique:
             self._lp_render_card(pos)
+
+        # Render placeholders for saved pools that failed to fetch
+        all_saved = load_saved_pools(self.gui.key_manager.address_db) if self.gui.key_manager else []
+        for entry in all_saved:
+            tid = entry.get("token_id")
+            venue = entry.get("venue", "HyperEVM")
+            pair = entry.get("pair", "Unknown Pair")
+            pool_address = entry.get("pool_address", "")
+            wallet_address = entry.get("wallet_address", "")
+            if not tid:
+                continue
+            if venue == "HyperEVM":
+                prefix = "hyperevm"
+            elif venue == "Aerodrome":
+                prefix = "base"
+            elif venue in ("Orca", "orca"):
+                prefix = "solana"
+            else:
+                prefix = "bsc"
+            pos_key = f"{venue}:{prefix}:{tid}"
+            # Check if this pool was already rendered as a live card
+            already_rendered = False
+            for pos in unique:
+                if pos.position_id == f"{prefix}:{tid}":
+                    already_rendered = True
+                    break
+            if already_rendered:
+                continue
+            # Render a "fetch failed" placeholder card
+            card = ctk.CTkFrame(scroll, corner_radius=10)
+            card.pack(fill="x", pady=5, padx=5)
+            info = ctk.CTkFrame(card, fg_color="transparent")
+            info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+            ctk.CTkLabel(info, text=f"⚠️ {pair}  ·  {venue}",
+                         font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=("#cccc00", "#cccc00")).pack(anchor="w")
+            ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
+                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+            ctk.CTkLabel(info, text="Fetch failed — live data unavailable. Click Scan Wallet to retry.",
+                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+
+            button_frame = ctk.CTkFrame(card, fg_color="transparent")
+            button_frame.pack(side="right", padx=10, pady=8)
+            class _PlaceholderPos:
+                def __init__(self, position_id, pair, venue):
+                    self.position_id = position_id
+                    self.pair = pair
+                    self.venue = venue
+                    self.pool_id = ""
+            ph_pos = _PlaceholderPos(f"{prefix}:{tid}", pair, venue)
+            ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
+                          font=ctk.CTkFont(size=10),
+                          fg_color=("#dc3545", "#c82333"),
+                          hover_color=("#c82333", "#a71d2a"),
+                          command=lambda pos=ph_pos, card=card: self._lp_remove_pool(pos, card)
+                          ).pack(pady=2)
+
         status = self._lp_widgets.get("status_label")
         if status:
-            status.configure(text=f"Last check: {len(unique)} saved position(s) auto-loaded")
+            fetched = len(unique)
+            total_saved = len(all_saved)
+            if fetched < total_saved:
+                status.configure(text=f"Loaded {fetched}/{total_saved} saved positions. {total_saved - fetched} failed to fetch.")
+            else:
+                status.configure(text=f"Last check: {fetched} saved position(s) auto-loaded")
         self._lp_update_button_states()
 
     def _lp_maybe_auto_fetch(self):
@@ -706,6 +888,12 @@ class LPTab:
                 venue = entry.get("venue", "HyperEVM")
                 if not tid:
                     continue
+                # Convert token_id to int for EVM chains (stored as string in JSON)
+                if venue not in ("Orca", "orca") and isinstance(tid, str):
+                    try:
+                        tid = int(tid)
+                    except ValueError:
+                        pass
                 if venue == "HyperEVM":
                     try:
                         pos = adapter.fetch_evm_position_by_token_id(
@@ -732,6 +920,20 @@ class LPTab:
                             tid, self.gui.price_engine, wallet_address=address
                         )
                         if pos and not pos.error:
+                            positions.append(pos)
+                    except Exception:
+                        pass
+                elif venue in ("Orca", "orca"):
+                    # Orca: tid is the base58 position mint string
+                    try:
+                        from venue_adapters.orca_adapter import OrcaAdapter
+                        pos = OrcaAdapter()._fetch_by_position_mint(
+                            tid, self.gui.price_engine, wallet_address=address
+                        )
+                        if pos and not pos.error:
+                            # Attach wallet address for display
+                            if address:
+                                pos.wallet_address = address
                             positions.append(pos)
                     except Exception:
                         pass
@@ -789,6 +991,12 @@ class LPTab:
                         venue = entry.get("venue", "HyperEVM")
                         if not tid:
                             continue
+                        # Convert token_id to int for EVM chains (stored as string in JSON)
+                        if venue not in ("Orca", "orca") and isinstance(tid, str):
+                            try:
+                                tid = int(tid)
+                            except ValueError:
+                                pass
                         if venue == "HyperEVM":
                             # Skip if already in scanned positions
                             pid = f"hyperevm:{tid}"
@@ -825,6 +1033,20 @@ class LPTab:
                                     positions.append(pos)
                             except Exception:
                                 pass
+                        elif venue in ("Orca", "orca"):
+                            # Orca: tid is the base58 position mint string
+                            pid = f"solana:{tid}"
+                            if any(p.position_id == pid for p in positions):
+                                continue
+                            try:
+                                from venue_adapters.orca_adapter import OrcaAdapter
+                                pos = OrcaAdapter()._fetch_by_position_mint(
+                                    tid, self.gui.price_engine, wallet_address=address
+                                )
+                                if pos and not pos.error:
+                                    positions.append(pos)
+                            except Exception:
+                                pass
                 # v5.2.2: Aerodrome wallet scan cannot enumerate non-sequential
                 # NFTs, so also check gauges for any saved Aerodrome pools.
                 aero_saved = [
@@ -842,6 +1064,35 @@ class LPTab:
                                 positions.append(staked_pos)
                     except Exception:
                         pass
+
+                # v5.2.5: If the wallet being scanned is a raw Solana base58 address,
+                # or the selected account has a Solana key, also scan Orca Whirlpool.
+                # The EVM fetch above only routes to EVM venues when the input is a
+                # 0x address; when the input is already Solana, detect_venue() routes
+                # directly to Orca and we would double-scan — so only run this extra
+                # pass when the primary input was NOT a Solana address.
+                sol_address = ""
+                primary_was_solana = (
+                    address and not address.startswith("0x")
+                )
+                if not primary_was_solana:
+                    # Account mode: resolve the Solana address of the selected account
+                    account_name = self._lp_get_current_account_name()
+                    if account_name:
+                        sol_address = self._lp_resolve_account_address(account_name, prefer="solana")
+
+                if sol_address:
+                    try:
+                        from venue_adapters.orca_adapter import _is_solana_address, OrcaAdapter
+                        if _is_solana_address(sol_address):
+                            sol_positions = OrcaAdapter().fetch_all_positions(
+                                sol_address, online_mode=True, price_engine=self.gui.price_engine
+                            )
+                            for pos in sol_positions:
+                                if pos and not pos.error and pos not in positions:
+                                    positions.append(pos)
+                    except Exception as e:
+                        print(f"[lp_fetch] Orca scan error for {sol_address[:8]}...: {e}")
 
                 # v5.2.2: If full scan found no Aerodrome positions, guide the
                 # user to manually enter their NFT token ID (staked positions
@@ -958,6 +1209,20 @@ class LPTab:
                                 continue
                             try:
                                 pos = k_adapter._fetch_position_by_token_id(
+                                    tid, self.gui.price_engine, wallet_address=address
+                                )
+                                if pos and not pos.error:
+                                    positions.append(pos)
+                            except Exception:
+                                pass
+                        elif venue in ("Orca", "orca"):
+                            # Orca: tid is the base58 position mint string
+                            pid = f"solana:{tid}"
+                            if any(p.position_id == pid for p in positions):
+                                continue
+                            try:
+                                from venue_adapters.orca_adapter import OrcaAdapter
+                                pos = OrcaAdapter()._fetch_by_position_mint(
                                     tid, self.gui.price_engine, wallet_address=address
                                 )
                                 if pos and not pos.error:
@@ -1161,6 +1426,8 @@ class LPTab:
                 adapter_key = "bsc"
             elif adapter_key in ("aerodrome", "base"):
                 adapter_key = "aerodrome"
+            elif adapter_key in ("orca", "solana"):
+                adapter_key = "orca"
             friendly = self.gui.LP_PLATFORM_MAP_reverse.get(adapter_key, venue_key)
             platform_menu.set(friendly)
         # Fetch by token ID (strip venue prefix if present)
@@ -1174,7 +1441,7 @@ class LPTab:
         self._lp_do_fetch_single()
 
     def _lp_on_loaded(self, positions, address):
-        """Render fetched LP positions as cards."""
+        """Render fetched LP positions as cards. Keep unfetched saved pools as placeholders."""
         scroll = self._lp_widgets.get("scroll")
         status = self._lp_widgets.get("status_label")
         refresh_btn = self._lp_widgets.get("refresh_btn")
@@ -1197,8 +1464,67 @@ class LPTab:
             for pos in unique_positions:
                 self._lp_initialize_tracking(pos, address)
                 self._lp_render_card(pos)
+
+        # Render placeholders for saved pools that failed to fetch
+        all_saved = load_saved_pools(self.gui.key_manager.address_db) if self.gui.key_manager else []
+        for entry in all_saved:
+            tid = entry.get("token_id")
+            venue = entry.get("venue", "HyperEVM")
+            pair = entry.get("pair", "Unknown Pair")
+            if not tid:
+                continue
+            if venue == "HyperEVM":
+                prefix = "hyperevm"
+            elif venue == "Aerodrome":
+                prefix = "base"
+            elif venue in ("Orca", "orca"):
+                prefix = "solana"
+            else:
+                prefix = "bsc"
+            # Check if this pool was already rendered as a live card
+            already_rendered = False
+            for pos in unique_positions:
+                if pos.position_id == f"{prefix}:{tid}":
+                    already_rendered = True
+                    break
+            if already_rendered:
+                continue
+            # Render a "fetch failed" placeholder card
+            card = ctk.CTkFrame(scroll, corner_radius=10)
+            card.pack(fill="x", pady=5, padx=5)
+            info = ctk.CTkFrame(card, fg_color="transparent")
+            info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+            ctk.CTkLabel(info, text=f"⚠️ {pair}  ·  {venue}",
+                         font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=("#cccc00", "#cccc00")).pack(anchor="w")
+            ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
+                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+            ctk.CTkLabel(info, text="Fetch failed — live data unavailable. Click Scan Wallet to retry.",
+                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+
+            button_frame = ctk.CTkFrame(card, fg_color="transparent")
+            button_frame.pack(side="right", padx=10, pady=8)
+            class _PlaceholderPos:
+                def __init__(self, position_id, pair, venue):
+                    self.position_id = position_id
+                    self.pair = pair
+                    self.venue = venue
+                    self.pool_id = ""
+            ph_pos = _PlaceholderPos(f"{prefix}:{tid}", pair, venue)
+            ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
+                          font=ctk.CTkFont(size=10),
+                          fg_color=("#dc3545", "#c82333"),
+                          hover_color=("#c82333", "#a71d2a"),
+                          command=lambda pos=ph_pos, card=card: self._lp_remove_pool(pos, card)
+                          ).pack(pady=2)
+
         if status:
-            status.configure(text=f"Last check: {len(unique_positions)} position(s)")
+            fetched = len(unique_positions)
+            total_saved = len(all_saved)
+            if fetched < total_saved:
+                status.configure(text=f"Last check: {fetched}/{total_saved} position(s) — {total_saved - fetched} saved pool(s) failed to fetch")
+            else:
+                status.configure(text=f"Last check: {fetched} position(s)")
         self._lp_update_button_states()
         # v5.1: Update saved-pools counter after rendering live cards
         self._lp_update_saved_pools_count(address)
@@ -1210,6 +1536,21 @@ class LPTab:
         the current position value as the initial deposit. The caller must later
         save the vault to persist changes.
         """
+        if position.position_id.startswith("solana:"):
+            # Orca: token_id is the base58 position mint string
+            mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
+            venue = position.venue or "Orca"
+            if not is_pool_saved(self.gui.key_manager.address_db, mint, venue):
+                return
+            tracking = get_position_tracking(self.gui.key_manager.address_db, mint, venue)
+            if not tracking.get("first_seen_date"):
+                update_position_tracking(
+                    self.gui.key_manager.address_db,
+                    mint,
+                    venue,
+                    current_value_usd=position.current_value_usd,
+                )
+            return
         if not (
             position.position_id.startswith("hyperevm:") or
             position.position_id.startswith("bsc:") or
@@ -1315,7 +1656,8 @@ class LPTab:
         can_manage_lp = position.position_id and (
             position.position_id.startswith("hyperevm:") or
             position.position_id.startswith("bsc:") or
-            position.position_id.startswith("base:")
+            position.position_id.startswith("base:") or
+            position.position_id.startswith("solana:")
         )
 
         if can_manage_lp:
@@ -1352,10 +1694,14 @@ class LPTab:
             copy_btn.pack(side="left", padx=(0, 2))
 
         if can_manage_lp:
-            try:
-                _token_id = int(position.position_id.split(":", 1)[1])
-            except (ValueError, IndexError):
-                _token_id = 0
+            if position.position_id.startswith("solana:"):
+                # Solana: token_id is the base58 position mint string
+                _token_id = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
+            else:
+                try:
+                    _token_id = int(position.position_id.split(":", 1)[1])
+                except (ValueError, IndexError):
+                    _token_id = 0
             _venue = position.venue or "HyperEVM"
             if _token_id and is_pool_saved(self.gui.key_manager.address_db, _token_id, _venue):
                 remove_btn = ctk.CTkButton(button_frame, text="✕ Remove", width=70, height=22,
@@ -1478,27 +1824,34 @@ class LPTab:
                          font=ctk.CTkFont(size=11, weight="bold"),
                          text_color=("#666666", "gray50")).pack(side="left", anchor="w")
 
-        # v5.1.1: Add / Remove / Edit liquidity icons (HyperEVM only for now)
-        if position.position_id and position.position_id.startswith("hyperevm:"):
+        # v5.1.1: Add / Remove / Edit liquidity icons
+        # v5.2.5: Edit (rebalance) is also available for Aerodrome (base:) and
+        # Orca (solana:) positions; Add / Remove remain HyperEVM-only since
+        # their dialogs are HYPE/UBTC-hardcoded.
+        _is_hyperevm_pos = position.position_id and position.position_id.startswith("hyperevm:")
+        _is_base_pos = position.position_id and position.position_id.startswith("base:")
+        _is_solana_pos = position.position_id and position.position_id.startswith("solana:")
+        if _is_hyperevm_pos or _is_base_pos or _is_solana_pos:
             status_label = self._lp_widgets.get("status_label")
 
-            add_btn = ctk.CTkButton(line3_frame, text="+", width=26, height=26,
-                                    font=ctk.CTkFont(size=14, weight="bold"),
-                                    fg_color=("#20c997", "#1aa179"),
-                                    hover_color=("#1aa179", "#158f63"),
-                                    command=lambda pos=position: self._lp_open_add_liquidity(pos))
-            add_btn.pack(side="left", padx=(8, 2), anchor="w")
-            if status_label:
-                _lp_tooltip(add_btn, status_label, "Add Liquidity")
+            if _is_hyperevm_pos:
+                add_btn = ctk.CTkButton(line3_frame, text="+", width=26, height=26,
+                                        font=ctk.CTkFont(size=14, weight="bold"),
+                                        fg_color=("#20c997", "#1aa179"),
+                                        hover_color=("#1aa179", "#158f63"),
+                                        command=lambda pos=position: self._lp_open_add_liquidity(pos))
+                add_btn.pack(side="left", padx=(8, 2), anchor="w")
+                if status_label:
+                    _lp_tooltip(add_btn, status_label, "Add Liquidity")
 
-            remove_btn = ctk.CTkButton(line3_frame, text="−", width=26, height=26,
-                                       font=ctk.CTkFont(size=14, weight="bold"),
-                                       fg_color=("#fd7e14", "#dc6602"),
-                                       hover_color=("#dc6602", "#b85700"),
-                                       command=lambda pos=position: self._lp_open_remove_liquidity(pos))
-            remove_btn.pack(side="left", padx=2, anchor="w")
-            if status_label:
-                _lp_tooltip(remove_btn, status_label, "Remove Liquidity")
+                remove_btn = ctk.CTkButton(line3_frame, text="−", width=26, height=26,
+                                           font=ctk.CTkFont(size=14, weight="bold"),
+                                           fg_color=("#fd7e14", "#dc6602"),
+                                           hover_color=("#dc6602", "#b85700"),
+                                           command=lambda pos=position: self._lp_open_remove_liquidity(pos))
+                remove_btn.pack(side="left", padx=2, anchor="w")
+                if status_label:
+                    _lp_tooltip(remove_btn, status_label, "Remove Liquidity")
 
             edit_btn = ctk.CTkButton(line3_frame, text="✎", width=26, height=26,
                                      font=ctk.CTkFont(size=12),
@@ -1507,7 +1860,8 @@ class LPTab:
                                      command=lambda pos=position: self._lp_open_edit_position(pos))
             edit_btn.pack(side="left", padx=2, anchor="w")
             if status_label:
-                _lp_tooltip(edit_btn, status_label, "Edit Position")
+                tip = "Edit Position" if _is_hyperevm_pos else "Rebalance Position"
+                _lp_tooltip(edit_btn, status_label, tip)
 
         # Suggestion — yellow and bold, at the end
         if position.suggested_action:
@@ -1520,8 +1874,42 @@ class LPTab:
                          font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
 
     def _lp_save_pool(self, position):
-        """Save the current position's public identifiers to saved_pools.json."""
+        """Save the current position's public identifiers to saved_pools."""
         if not position.position_id:
+            return
+        if position.position_id.startswith("solana:"):
+            # Orca positions: token_id is the base58 position mint string
+            mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
+            venue = position.venue or "Orca"
+            wallet_address = self._lp_get_current_wallet_address()
+            if not wallet_address:
+                wallet_address = getattr(self, "_lp_last_fetched_address", "")
+            if not wallet_address:
+                account_name = self._lp_get_current_account_name()
+                if account_name:
+                    wallet_address = self._lp_resolve_account_address(account_name, prefer="solana")
+            if not wallet_address:
+                self.gui.show_notification("Could not resolve wallet address", error=True)
+                return
+            if is_pool_saved(self.gui.key_manager.address_db, mint, venue):
+                self.gui.show_notification("Pool already saved")
+                return
+            pool_address = getattr(position, "pool_id", "") or ""
+            ok = save_pool(
+                self.gui.key_manager.address_db,
+                wallet_address=wallet_address,
+                token_id=mint,         # Base58 string — saved_pools accepts int or str
+                venue=venue,
+                pool_address=pool_address,
+                pair=position.pair or "",
+            )
+            if ok and self.gui.current_password:
+                ok = self.gui.key_manager.save_encrypted_data(self.gui.current_password)
+            if ok:
+                self.gui.show_notification(f"Saved {position.pair} ({venue})")
+                self._lp_do_fetch()
+            else:
+                self.gui.show_notification("Failed to save pool", error=True)
             return
         if not (
             position.position_id.startswith("hyperevm:") or
@@ -1590,6 +1978,8 @@ class LPTab:
                 prefix = "hyperevm"
             elif venue == "Aerodrome":
                 prefix = "base"
+            elif venue in ("Orca", "orca"):
+                prefix = "solana"
             else:
                 prefix = "bsc"
             # Placeholder card
@@ -1598,7 +1988,7 @@ class LPTab:
             info = ctk.CTkFrame(card, fg_color="transparent")
             info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
 
-            header_text = f"\u23F3 {pair}  \u00b7  {venue}"
+            header_text = f"⏳ {pair}  ·  {venue}"
             ctk.CTkLabel(info, text=header_text,
                          font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
             ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
@@ -1607,6 +1997,8 @@ class LPTab:
                 platform_label = "Platform: HyperEVM (Project X)"
             elif venue == "Aerodrome":
                 platform_label = "Platform: Aerodrome (BASE)"
+            elif venue in ("Orca", "orca"):
+                platform_label = "Platform: Orca (Solana)"
             else:
                 platform_label = "Platform: BSC (BNB Chain)"
             ctk.CTkLabel(info, text=platform_label,
@@ -1673,6 +2065,8 @@ class LPTab:
                 prefix = "hyperevm"
             elif venue == "Aerodrome":
                 prefix = "base"
+            elif venue in ("Orca", "orca"):
+                prefix = "solana"
             else:
                 prefix = "bsc"
             card = ctk.CTkFrame(scroll, corner_radius=10)
@@ -1728,8 +2122,8 @@ class LPTab:
     def _lp_reassign_pool_wallet(self, saved_pos, card):
         """Reassign a saved pool to a different wallet address.
 
-        Opens a dialog showing all vault accounts with EVM addresses,
-        letting the user pick the correct account for this pool.
+        Opens a dialog showing all vault accounts with matching-chain
+        addresses, letting the user pick the correct account for this pool.
         """
         from tkinter import messagebox, simpledialog, Toplevel, StringVar
         import tkinter as tk
@@ -1737,25 +2131,38 @@ class LPTab:
         if not self.gui.key_manager:
             return
 
-        # Build a list of vault accounts with EVM addresses
+        # Determine if this is a Solana pool (base58 mint) or EVM pool
+        _is_solana_pool = saved_pos.position_id.startswith("solana:")
+
+        # Build a list of vault accounts with matching-chain addresses
         accounts_data = self.gui.key_manager.address_db.get("accounts", {})
         account_options = []
-        address_map = {}  # display_string -> (account_name, evm_address)
+        address_map = {}  # display_string -> (account_name, wallet_address)
 
         for acct_name in sorted(accounts_data.keys()):
             addresses = accounts_data.get(acct_name, {}).get("addresses", [])
             for addr_entry in addresses:
                 coin = addr_entry.get("coin", "").lower()
                 chain = addr_entry.get("chain", "").lower()
-                if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
-                    evm_addr = addr_entry.get("address", "")
-                    if evm_addr:
-                        display = f"{acct_name} — {evm_addr[:8]}...{evm_addr[-6:]}"
+                wallet_addr = addr_entry.get("address", "")
+                if not wallet_addr:
+                    continue
+                if _is_solana_pool:
+                    # Solana pool: show accounts with Solana addresses
+                    if "solana" in coin or "solana" in chain or coin == "sol" or chain == "sol":
+                        display = f"{acct_name} — {wallet_addr[:10]}...{wallet_addr[-4:]}"
                         account_options.append(display)
-                        address_map[display] = (acct_name, evm_addr)
+                        address_map[display] = (acct_name, wallet_addr)
+                else:
+                    # EVM pool: show accounts with EVM/HYPE addresses
+                    if "evm" in coin or "evm" in chain or "hype" in coin or "hype" in chain:
+                        display = f"{acct_name} — {wallet_addr[:8]}...{wallet_addr[-6:]}"
+                        account_options.append(display)
+                        address_map[display] = (acct_name, wallet_addr)
 
         if not account_options:
-            self.gui.show_notification("No vault accounts with EVM addresses found", error=True)
+            chain_label = "Solana" if _is_solana_pool else "EVM"
+            self.gui.show_notification(f"No vault accounts with {chain_label} addresses found", error=True)
             return
 
         # Also add a manual entry option
@@ -1763,7 +2170,7 @@ class LPTab:
 
         # Show selection dialog
         dialog = Toplevel(self.gui.root)
-        dialog.title("Reassign Pool Wallet")
+        dialog.title(f"Reassign Pool Wallet ({'Solana' if _is_solana_pool else 'EVM'})")
         dialog.geometry("450x350")
         dialog.transient(self.gui.root)
         dialog.grab_set()
@@ -1790,14 +2197,30 @@ class LPTab:
             choice = account_options[sel[0]]
 
             if choice == "Manual address entry...":
-                manual_addr = simpledialog.askstring(
-                    "Manual Address", "Enter the EVM wallet address:",
-                    parent=dialog
-                )
-                if not manual_addr or not manual_addr.strip().startswith("0x") or len(manual_addr.strip()) != 42:
-                    self.gui.show_notification("Invalid address", error=True)
-                    return
-                new_wallet = manual_addr.strip()
+                if _is_solana_pool:
+                    manual_addr = simpledialog.askstring(
+                        "Manual Address", "Enter the Solana wallet address (base58):",
+                        parent=dialog
+                    )
+                    if not manual_addr or not manual_addr.strip():
+                        self.gui.show_notification("Invalid address", error=True)
+                        return
+                    addr = manual_addr.strip()
+                    # Validate Solana base58: 32-44 chars, no 0x prefix, valid characters
+                    from venue_adapters.orca_adapter import _is_solana_address
+                    if not _is_solana_address(addr):
+                        self.gui.show_notification("Invalid Solana address (expected 32-44 base58 characters)", error=True)
+                        return
+                    new_wallet = addr
+                else:
+                    manual_addr = simpledialog.askstring(
+                        "Manual Address", "Enter the EVM wallet address:",
+                        parent=dialog
+                    )
+                    if not manual_addr or not manual_addr.strip().startswith("0x") or len(manual_addr.strip()) != 42:
+                        self.gui.show_notification("Invalid address", error=True)
+                        return
+                    new_wallet = manual_addr.strip()
             else:
                 _, new_wallet = address_map[choice]
 
@@ -1807,7 +2230,11 @@ class LPTab:
                 pos_id = saved_pos.position_id
                 if ":" in pos_id:
                     prefix, tid_str = pos_id.split(":", 1)
-                    tid = int(tid_str)
+                    if prefix == "solana":
+                        # Orca: token_id is the base58 mint string (not an integer)
+                        tid = tid_str
+                    else:
+                        tid = int(tid_str)
                 else:
                     tid = int(pos_id)
 
@@ -1815,6 +2242,8 @@ class LPTab:
                     venue = "Aerodrome"
                 elif prefix == "bsc":
                     venue = "BSC"
+                elif prefix == "solana":
+                    venue = "Orca"
                 else:
                     venue = "HyperEVM"
             except (ValueError, IndexError):
@@ -1852,12 +2281,45 @@ class LPTab:
         """Remove a saved pool from the encrypted vault.
 
         Args:
-            position: Object with position_id ("hyperevm:<token_id>" or
-                "bsc:<token_id>"), venue, pair.
+            position: Object with position_id (e.g. "hyperevm:<token_id>",
+                "bsc:<token_id>", "solana:<position_mint>"), venue, pair.
             card_frame: Optional card widget to destroy directly (used by
                 placeholder cards that are not tracked in position_cards).
         """
-        if not position.position_id or not (
+        if not position.position_id:
+            return
+        if position.position_id.startswith("solana:"):
+            # Orca: token_id is the base58 mint string
+            mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
+            venue = position.venue or "Orca"
+            pair = position.pair or "Unknown"
+            ok = remove_saved_pool(self.gui.key_manager.address_db, mint, venue)
+            if ok and self.gui.current_password:
+                ok = self.gui.key_manager.save_encrypted_data(self.gui.current_password)
+            if ok:
+                self.gui.show_notification(f"Pool removed: {pair} ({mint[:8]}...)")
+                # Remove the card. The card key for Orca positions is f"{venue}:solana:{mint}".
+                if card_frame:
+                    card_frame.destroy()
+                else:
+                    card_key = f"{venue}:solana:{mint}"
+                    cards = self._lp_widgets.get("position_cards", {})
+                    card_frame = cards.pop(card_key, None)
+                    if card_frame:
+                        card_frame.destroy()
+                self._lp_update_saved_pools_count("")
+                scroll = self._lp_widgets.get("scroll")
+                if scroll and not scroll.winfo_children():
+                    ctk.CTkLabel(scroll, text="No LP positions found",
+                                 font=ctk.CTkFont(size=13), text_color=("#555555", "gray60")).pack(pady=20)
+                status = self._lp_widgets.get("status_label")
+                cards = self._lp_widgets.get("position_cards", {})
+                if status:
+                    status.configure(text=f"Last check: {len(cards)} position(s)")
+            else:
+                self.gui.show_notification("Failed to remove pool", error=True)
+            return
+        if not (
             position.position_id.startswith("hyperevm:") or
             position.position_id.startswith("bsc:") or
             position.position_id.startswith("base:")
@@ -2079,6 +2541,10 @@ class LPTab:
             return ("BNB Chain (BSC)", "BNB", "bsc")
         elif position_id.startswith("base:"):
             return ("BASE", "ETH", "aerodrome")
+        elif position_id.startswith("solana:"):
+            # v5.2.5: Orca adapter with write support via OrcaWriter.
+            # Writer available via get_writer("orca") -> OrcaWriter instance.
+            return ("Solana", "SOL", "orca")
         elif position_id.startswith("hyperevm:"):
             return ("HyperEVM", "HYPE", "hyperliquid")
         else:
@@ -2142,6 +2608,23 @@ class LPTab:
     def _lp_compound_fees_dialog(self, position):
         """Show confirmation dialog and compound fees for an LP position."""
         from tkinter import messagebox
+
+        # Solana (Orca) compound is not yet supported — check BEFORE calling the
+        # EVM-only _lp_resolve_wallet_for_position so the user gets the right error
+        if position.position_id.startswith("solana:"):
+            # Resolve account via NFT ownership so the error message is accurate
+            account_name_check = self._lp_resolve_solana_account_for_position(position)
+            if not account_name_check:
+                self.gui.show_notification(
+                    "Could not resolve the vault account that owns this Solana position NFT. "
+                    "Ensure the wallet that owns this position is in your vault.", error=True)
+                return
+            self.gui.show_notification(
+                "Compound fees is not yet implemented on Solana (Orca). "
+                "Use Collect Fees, or the Edit (✎) button to rebalance."
+            )
+            return
+
         wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
         if not wallet_address:
             self.gui.show_notification("Could not resolve wallet address for this position", error=True)
@@ -2230,6 +2713,104 @@ class LPTab:
     def _lp_collect_fees_dialog(self, position):
         """Show confirmation dialog and collect fees for an LP position."""
         from tkinter import messagebox
+
+        # Solana positions resolve via NFT ownership, not just "first account with a Solana key"
+        if position.position_id.startswith("solana:"):
+            account_name = self._lp_resolve_solana_account_for_position(position)
+            if not account_name:
+                self.gui.show_notification(
+                    "Could not resolve the vault account that owns this Solana position NFT. "
+                    "Ensure the wallet that owns this position is in your vault.", error=True)
+                return
+            chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
+
+            # v5.2.5: Pre-flight check — verify the vault account's derived
+            # Solana address actually holds the position NFT before showing
+            # the confirmation dialog. Without this check, the user confirms
+            # the operation, the agent derives a different address from the private
+            # key, and the operation fails with a confusing "wallet X does not
+            # hold the position NFT" error.
+            mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
+            try:
+                from venue_adapters.orca_adapter import _solana_rpc_call, _is_solana_address
+                # Get the derived Solana address from the agent
+                writer_check = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
+                if writer_check and writer_check.is_available():
+                    derived_addr = writer_check._get_solana_address(account_name)
+                    if derived_addr and _is_solana_address(derived_addr):
+                        # Check if this derived address holds the NFT
+                        nft_check = _solana_rpc_call(
+                            "getTokenAccountsByOwner",
+                            [derived_addr, {"mint": mint}, {"encoding": "jsonParsed"}],
+                        )
+                        has_nft = False
+                        if nft_check and isinstance(nft_check, dict):
+                            for entry_data in nft_check.get("value", []):
+                                try:
+                                    amt = entry_data["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"]
+                                    if amt == "1":
+                                        has_nft = True
+                                        break
+                                except (KeyError, TypeError, AttributeError):
+                                    continue
+                        if not has_nft:
+                            self.gui.show_notification(
+                                f"Address mismatch: vault account '{account_name}' derives to "
+                                f"{derived_addr[:6]}...{derived_addr[-4:]}, but the position NFT "
+                                f"is held by a different wallet.\n\n"
+                                f"The private key for Solana in this vault account may not match "
+                                f"the wallet that created this position.\n\n"
+                                f"To fix: re-import the correct Solana private key for "
+                                f"the wallet that owns this position.",
+                                error=True)
+                            return
+            except Exception as e:
+                # Don't block on pre-flight check failures — let the write attempt proceed
+                print(f"[collect_fees] pre-flight NFT check failed (non-fatal): {e}")
+
+            confirm = messagebox.askyesno(
+                "Confirm: Collect Fees",
+                "You are about to collect fees for position:\n"
+                f"  {position.pair} ({position.position_id})\n\n"
+                f"This will spend gas on {chain_name}.\n"
+                f"Ensure your wallet has {gas_token} for gas.\n"
+                "The key_manager_agent must be running and unlocked.\n\n"
+                "Continue?",
+            )
+            if not confirm:
+                return
+            self.gui.show_notification("Collecting fees on Solana...")
+
+            def _do_collect_sol():
+                try:
+                    writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
+                    if writer is None or not writer.is_available():
+                        self.gui.root.after(0, lambda: self.gui.show_notification(
+                            "Agent not running. Start key_manager_agent with --serve.", error=True))
+                        return
+                    tx_hash = writer.collect_fees(CollectFeesParams(
+                        account=account_name,
+                        position_id=position.position_id,
+                    ))
+                    if tx_hash:
+                        self.gui.root.after(0, lambda: self.gui.show_notification(
+                            f"Fees collected. TX: {tx_hash[:24]}..."))
+                        self.gui.root.after(5000, lambda: self._lp_do_fetch())
+                    else:
+                        self.gui.root.after(0, lambda: self.gui.show_notification(
+                            "Collect failed: no tx signature returned", error=True))
+                except Exception as e:
+                    error_msg = str(e)
+                    if "insufficient funds" in error_msg.lower() or "Insufficient" in error_msg:
+                        error_msg = (f"Wallet has no {gas_token} for gas on {chain_name}. "
+                                     f"Send {gas_token} to your Solana address. (Details: {error_msg})")
+                    self.gui.root.after(0, lambda: self.gui.show_notification(
+                        f"Collect error: {error_msg}", error=True))
+                    self.gui.root.after(5000, lambda: self._lp_do_fetch())
+
+            threading.Thread(target=_do_collect_sol, daemon=True).start()
+            return
+
         wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
         if not wallet_address:
             self.gui.show_notification("Could not resolve wallet address for this position", error=True)
@@ -2396,6 +2977,105 @@ class LPTab:
         and fees, effectively closing the position.
         """
         from tkinter import messagebox
+
+        # Solana positions resolve via NFT ownership, not just "first account with a Solana key"
+        if position.position_id.startswith("solana:"):
+            account_name = self._lp_resolve_solana_account_for_position(position)
+            if not account_name:
+                self.gui.show_notification(
+                    "Could not resolve the vault account that owns this Solana position NFT. "
+                    "Ensure the wallet that owns this position is in your vault.", error=True)
+                return
+            chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
+
+            # v5.2.5: Pre-flight check — verify the vault account's derived
+            # Solana address actually holds the position NFT before showing
+            # the confirmation dialog. Without this check, the user confirms
+            # the close, the agent derives a different address from the private
+            # key, and the operation fails with a confusing "wallet X does not
+            # hold the position NFT" error.
+            mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
+            try:
+                from venue_adapters.orca_adapter import _solana_rpc_call, _is_solana_address
+                # Get the derived Solana address from the agent
+                writer_check = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
+                if writer_check and writer_check.is_available():
+                    derived_addr = writer_check._get_solana_address(account_name)
+                    if derived_addr and _is_solana_address(derived_addr):
+                        # Check if this derived address holds the NFT
+                        nft_check = _solana_rpc_call(
+                            "getTokenAccountsByOwner",
+                            [derived_addr, {"mint": mint}, {"encoding": "jsonParsed"}],
+                        )
+                        has_nft = False
+                        if nft_check and isinstance(nft_check, dict):
+                            for entry_data in nft_check.get("value", []):
+                                try:
+                                    amt = entry_data["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"]
+                                    if amt == "1":
+                                        has_nft = True
+                                        break
+                                except (KeyError, TypeError, AttributeError):
+                                    continue
+                        if not has_nft:
+                            self.gui.show_notification(
+                                f"Address mismatch: vault account '{account_name}' derives to "
+                                f"{derived_addr[:6]}...{derived_addr[-4:]}, but the position NFT "
+                                f"is held by a different wallet.\n\n"
+                                f"The private key for Solana in this vault account may not match "
+                                f"the wallet that created this position.\n\n"
+                                f"To fix: re-import the correct Solana private key for "
+                                f"the wallet that owns this position.",
+                                error=True)
+                            return
+            except Exception as e:
+                # Don't block on pre-flight check failures — let the write attempt proceed
+                print(f"[close_position] pre-flight NFT check failed (non-fatal): {e}")
+
+            confirm = messagebox.askyesno(
+                "Confirm: Close Position",
+                "You are about to CLOSE this position completely:\n"
+                f"  {position.pair} ({position.position_id})\n\n"
+                "This will:\n"
+                "  1. Withdraw ALL liquidity from the position\n"
+                "  2. Collect any remaining fees\n"
+                "  3. Burn the position NFT, recovering rent\n\n"
+                f"This will spend gas on {chain_name}.\n"
+                f"Ensure your wallet has {gas_token} for gas.\n"
+                "The key_manager_agent must be running and unlocked.\n\n"
+                "Continue?",
+            )
+            if not confirm:
+                return
+            self.gui.show_notification("Closing position on Solana... (multi-TX operation)")
+
+            def _do_close_sol():
+                try:
+                    writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
+                    if writer is None or not writer.is_available():
+                        self.gui.root.after(0, lambda: self.gui.show_notification(
+                            "Agent not running. Start key_manager_agent with --serve.", error=True))
+                        return
+                    tx_hashes = writer.close_position(position.position_id, account_name)
+                    if tx_hashes:
+                        self.gui.root.after(0, lambda: self.gui.show_notification(
+                            f"Position closed. {len(tx_hashes)} TXs submitted. Refreshing..."))
+                        time.sleep(3)
+                        self.gui.root.after(0, self._lp_do_fetch)
+                    else:
+                        self.gui.root.after(0, lambda: self.gui.show_notification(
+                            "Close position: no transactions submitted", error=True))
+                except Exception as e:
+                    error_msg = str(e)
+                    if "insufficient funds" in error_msg.lower() or "Insufficient" in error_msg:
+                        error_msg = (f"Wallet has no {gas_token} for gas on {chain_name}. "
+                                     f"Send {gas_token} to your Solana address. (Details: {error_msg})")
+                    self.gui.root.after(0, lambda: self.gui.show_notification(
+                        f"Close error: {error_msg}", error=True))
+
+            threading.Thread(target=_do_close_sol, daemon=True).start()
+            return
+
         wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
         if not wallet_address:
             self.gui.show_notification("Could not resolve wallet address for this position", error=True)

@@ -4,9 +4,9 @@ Forge's project rules for working on ColdStack. Read this file at the start of e
 
 ## What This Is
 
-ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.2.3.
+ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.3.0.
 
-Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.2.3.
+Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.3.0.
 
 ## Commands
 
@@ -123,6 +123,55 @@ Real uncollected fees on Project X / HyperEVM are read via a static `eth_call` t
 - **Standard mode** (default): Hides RPC endpoint editing and API key fields. Basic functionality visible.
 - **Advanced mode**: Unlocks custom RPC endpoints, API key configuration, and additional settings.
 - LP fee buttons (Collect/Compound) should show in BOTH modes — fee operations are basic LP management, not advanced features.
+
+## ColdTrack Module (v5.3.0+)
+
+ColdTrack is the financial ledger module — the monetization layer of ColdStack. It lives as a subpackage at `src/coldtrack/` and appears as a tab in the main CTkTabview.
+
+### What It Does
+- Tracks portfolios, accounts, transactions, LP positions, and holdings
+- SQLite database (`coldtrack.db`) co-located with the vault
+- User-initiated sync from vault → ColdTrack DB (controlled disclosure)
+- Multi-currency support (USD, CAD, AUD, EUR)
+- Tax-ready schema (cost basis, realized gains, holding periods)
+
+### What It Does NOT Do (Yet)
+- Transaction import from on-chain (Phase 2 — v5.3.1)
+- LP position tracking with P&L (Phase 3 — v5.3.2)
+- Holdings & cost basis (Phase 4 — v5.3.3)
+- Tax report generation (Phase 5 — v5.3.4)
+
+### Module Layout
+- `src/coldtrack/db.py` — SQLite schema (9 tables), connection management, CRUD
+- `src/coldtrack/importer.py` — Bridge: vault address_db → ColdTrack DB
+- `src/coldtrack/tab.py` — ColdTrack tab UI (CustomTkinter)
+
+### Security
+- ColdTrack DB stores financial data, NOT private keys
+- No signing capability — ColdTrack is read-only
+- Bridge is user-initiated, not automatic
+- Shielded/GSS transactions are excluded by design
+- Private keys and mnemonics NEVER cross the bridge
+
+### Schema
+The schema is v3.0, designed by Kimi (CFO). Full SQL in `kimi/briefs/coldtrack-schema-v3.md`. Key principles:
+- PORTFOLIOS → ACCOUNTS → (TRANSACTIONS, LP_POSITIONS, etc.)
+- Free-text TYPE/CATEGORY/PLATFORM/CHAIN (no CHECK constraints)
+- Multi-currency values per row (VALUE_USD, VALUE_CAD, VALUE_AUD, VALUE_EUR)
+- IS_PRIVACY_SHIELDED flag on ACCOUNTS for GSS
+- TAX_JURISDICTION on PORTFOLIOS (free-text)
+- Schema is additive — new columns are nullable, old data survives
+
+### Adding New ColdTrack Modules
+When adding a new module to `src/coldtrack/`:
+1. Create the module file
+2. Add it to `build_gui_v5.py` as a `--hidden-import`
+3. Update this section
+
+### Module layout (updates)
+- `gui_main_v5.py` — CTkTabview with Wallet / HL1 Vaults / LP Positions / Railgun / ColdTrack tabs; VERSION constant (single source of truth)
+- `coldtrack/` — SQLite ledger subpackage (db.py, importer.py, tab.py)
+- `ed25519_utils.py` — Shared Ed25519 math primitives, base58 encoding, SLIP-0010 HD derivation (used by derivation_engine and key_manager_agent)
 
 ## Coding Conventions
 

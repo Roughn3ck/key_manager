@@ -7,12 +7,14 @@ inside the encrypted vault payload (address_db["saved_pools"]). No private keys.
 Used by the LP tab to auto-load saved positions by token ID, avoiding the
 expensive wallet scan on every refresh.
 
-Version: v5.1 (July 2026) - Encrypted vault integration
+Solana/Orca: token_id holds the base58 position mint string (not an integer).
+
+Version: v5.2.5 (August 2026) - Solana string token_id support
 """
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 def load_saved_pools(address_db: Dict[str, Any], wallet_address: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -45,7 +47,7 @@ def load_saved_pools(address_db: Dict[str, Any], wallet_address: Optional[str] =
 def save_pool(
     address_db: Dict[str, Any],
     wallet_address: str,
-    token_id: int,
+    token_id: Union[int, str],
     venue: str,
     pool_address: Optional[str],
     pair: str,
@@ -89,7 +91,7 @@ def save_pool(
         return False
 
 
-def remove_saved_pool(address_db: Dict[str, Any], token_id: int, venue: str) -> bool:
+def remove_saved_pool(address_db: Dict[str, Any], token_id: Union[int, str], venue: str) -> bool:
     """Remove a saved pool entry by venue + token_id.
 
     The caller must re-encrypt the vault to persist this change.
@@ -111,7 +113,7 @@ def remove_saved_pool(address_db: Dict[str, Any], token_id: int, venue: str) -> 
     return len(address_db["saved_pools"]) != original_len
 
 
-def is_pool_saved(address_db: Dict[str, Any], token_id: int, venue: str) -> bool:
+def is_pool_saved(address_db: Dict[str, Any], token_id: Union[int, str], venue: str) -> bool:
     """Check if a pool is already saved in the decrypted address_db."""
     pools = address_db.get("saved_pools", [])
     if not isinstance(pools, list):
@@ -124,7 +126,7 @@ def is_pool_saved(address_db: Dict[str, Any], token_id: int, venue: str) -> bool
     )
 
 
-def _find_pool_entry(address_db: Dict[str, Any], token_id: int, venue: str) -> Optional[Dict[str, Any]]:
+def _find_pool_entry(address_db: Dict[str, Any], token_id: Union[int, str], venue: str) -> Optional[Dict[str, Any]]:
     """Return the saved pool entry matching venue + token_id, or None."""
     pools = address_db.get("saved_pools", [])
     if not isinstance(pools, list):
@@ -141,7 +143,7 @@ def _find_pool_entry(address_db: Dict[str, Any], token_id: int, venue: str) -> O
 
 def update_saved_pool_wallet(
     address_db: Dict[str, Any],
-    token_id: int,
+    token_id: Union[int, str],
     venue: str,
     new_wallet_address: str,
 ) -> bool:
@@ -166,7 +168,7 @@ def update_saved_pool_wallet(
 
 def update_position_tracking(
     address_db: Dict[str, Any],
-    token_id: int,
+    token_id: Union[int, str],
     venue: str,
     current_value_usd: Optional[float] = None,
     fees_collected_usd: Optional[float] = None,
@@ -214,7 +216,7 @@ def update_position_tracking(
 
 def get_position_tracking(
     address_db: Dict[str, Any],
-    token_id: int,
+    token_id: Union[int, str],
     venue: str,
 ) -> Dict[str, Any]:
     """Get tracking data for a saved pool. Returns empty dict if not found."""

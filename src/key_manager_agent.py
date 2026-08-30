@@ -35,6 +35,7 @@ Security:
   - HTTP mode binds to localhost only
 """
 import argparse
+import base64
 import json
 import os
 import sys
@@ -48,6 +49,35 @@ from typing import Dict, Any, Optional, List
 # Add parent dir to path so we can import crypto_engine
 sys.path.insert(0, str(Path(__file__).parent))
 from crypto_engine import CryptoEngine
+from ed25519_utils import (
+    ED25519_P, ED25519_L, ED25519_G,
+    ed25519_edwards_add, ed25519_scalarmult, ed25519_point_compress,
+    ed25519_clamp, ed25519_privkey_to_pubkey, ed25519_privkey_to_pubkey_hex,
+    b58encode,
+)
+
+# Backward-compatible aliases — the rest of this file uses the old _ prefixed
+# names.  These thin wrappers delegate to the shared ed25519_utils module.
+
+_ed25519_edwards_add = ed25519_edwards_add
+_ed25519_scalarmult = ed25519_scalarmult
+_ed25519_point_compress = ed25519_point_compress
+_ed25519_clamp = ed25519_clamp
+
+
+def _ed25519_privkey_to_pubkey(privkey_hex: str) -> bytes:
+    """Derive a 32-byte Ed25519 public key from a 32-byte private key (hex string).
+
+    Solana HD derivation (via the hdwallet library) produces the 32-byte Ed25519
+    seed directly; this function hashes with SHA-512, clamps, and scalar-multiplies
+    per RFC 8032 to produce the compressed public key.
+    """
+    return ed25519_privkey_to_pubkey_hex(privkey_hex)
+
+
+def _b58encode(data: bytes) -> str:
+    """Encode bytes as base58 (Bitcoin/Solana alphabet)."""
+    return b58encode(data)
 
 
 # ============================================================================
@@ -168,6 +198,71 @@ def private_key_to_address(privkey_hex: str) -> str:
     privkey = int(privkey_hex, 16)
     pubkey = privkey_to_pubkey(privkey)
     return pubkey_to_address(pubkey)
+
+
+# ============================================================================
+# Ed25519 signing — pure Python (no external dependencies)
+# Used for Solana transaction signing.
+# Math primitives (constants, point ops, clamp, pubkey derivation, base58)
+# are imported from ed25519_utils.
+# ============================================================================
+
+
+def _ed25519_sign(privkey_hex: str, message: bytes) -> bytes:
+    """Sign a message with Ed25519. Returns 64-byte signature (R || S)."""
+    privkey_bytes = bytes.fromhex(privkey_hex.replace("0x", ""))
+    if len(privkey_bytes) != 32:
+        raise ValueError("Ed25519 private key must be 32 bytes")
+    h = hashlib.sha512(privkey_bytes).digest()
+    a_scalar = int.from_bytes(_ed25519_clamp(h[:32]), "little")
+    pub_key = _ed25519_point_compress(_ed25519_scalarmult(ED25519_G, a_scalar))
+
+    # r = H(h[32:] || message) mod L
+    r = int.from_bytes(hashlib.sha512(h[32:] + message).digest(), "little") % ED25519_L
+    R_compressed = _ed25519_point_compress(_ed25519_scalarmult(ED25519_G, r))
+
+    # S = (r + H(R || A || M) * a) mod L
+    k = int.from_bytes(
+        hashlib.sha512(R_compressed + pub_key + message).digest(), "little"
+    ) % ED25519_L
+    S = (r + k * a_scalar) % ED25519_L
+
+    return R_compressed + S.to_bytes(32, "little")
+
+
+# ============================================================================
+# Solana base58 + signed transaction construction
+# (base58 encoding imported from ed25519_utils)
+# ============================================================================
+
+
+def _solana_pubkey_from_ed25519(privkey_hex: str) -> str:
+    """Derive a Solana base58 address from an Ed25519 private key (hex string).
+
+    For Solana, the 32-byte Ed25519 public key IS the address (base58 encoded).
+    """
+    return _b58encode(_ed25519_privkey_to_pubkey(privkey_hex))
+
+
+def _solana_sign_message(privkey_hex: str, message_bytes: bytes) -> str:
+    """Sign a Solana compiled transaction message. Returns base64-encoded 64-byte signature."""
+    return base64.b64encode(_ed25519_sign(privkey_hex, message_bytes)).decode()
+
+
+def _solana_build_signed_tx(privkey_hex: str, message_bytes: bytes) -> str:
+    """Build a complete signed Solana transaction from a compiled message.
+
+    Solana wire format (single signer):
+        [compact-u16 num_signatures = 0x01]
+        [64-byte Ed25519 signature]
+        [message bytes]
+
+    Returns the base64-encoded signed transaction ready for sendTransaction.
+    """
+    sig = _ed25519_sign(privkey_hex, message_bytes)
+    # Compact-u16 for signature count: 1 -> b'\x01'. NOT len(sig) (= 64 -> 0x40).
+    signed = b"\x01" + sig + message_bytes
+    return base64.b64encode(signed).decode()
 
 
 # ============================================================================
@@ -525,6 +620,8 @@ class KeyManagerAgent:
                 "pools": list(pools.keys()),
                 "account_count": len(accounts),
                 "address_count": sum(len(a.get("addresses", [])) for a in accounts.values()),
+                "supports": ["EVM secp256k1 (legacy + EIP-1559)",
+                             "Solana Ed25519 (transaction signing)"],
             }
         }
 
@@ -630,6 +727,14 @@ class KeyManagerAgent:
 
         if len(matches) == 1:
             return matches[0]["key"]
+
+        # v5.2.5: When multiple Solana keys match, prefer those with a valid
+        # SLIP-0010 derivation path (m/44'/501'/...'/') over legacy keys that
+        # may have been derived with the wrong BIP44 path (5 levels, unhardened)
+        if chain.upper() == "SOLANA" and len(matches) > 1:
+            slip10_matches = [m for m in matches if m.get("derivation_path", "").startswith("m/44'/501'/")]
+            if slip10_matches:
+                matches = slip10_matches
 
         # Multiple matches — disambiguate by chain_id if available
         if chain.upper() == "EVM" and chain_id is not None:
@@ -943,6 +1048,166 @@ class KeyManagerAgent:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    # ------------------------------------------------------------------
+    # Solana (Ed25519) operations
+    # ------------------------------------------------------------------
+
+    def _solana_rpc(self, rpc_url: str, method: str, params: list) -> Optional[Any]:
+        """Make a single Solana JSON-RPC call. Returns the 'result' field or None."""
+        import urllib.request
+        payload = json.dumps({
+            "jsonrpc": "2.0", "method": method, "params": params, "id": 1,
+        }).encode()
+        req = urllib.request.Request(
+            rpc_url, data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "key-manager-agent/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if isinstance(data, dict) and data.get("error"):
+                    return {"_rpc_error": data["error"]}
+                return data.get("result")
+        except Exception as e:
+            return {"_rpc_error": str(e)}
+
+    def get_solana_address(self, account: str) -> dict:
+        """Get the Solana base58 address for an account. Returns public key only."""
+        self._check_session()
+        try:
+            privkey = self._get_private_key(account, chain="Solana", chain_id=None)
+            return {"status": "ok", "result": {"address": _solana_pubkey_from_ed25519(privkey)}}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def sign_solana_tx(self, account: str, message_b64: str) -> dict:
+        """Sign a Solana compiled transaction message.
+
+        Args:
+            account: Vault account name.
+            message_b64: Base64-encoded compiled Solana transaction message
+                (the bytes that Solana expects to be signed — NOT including the
+                signature-count prefix, which the signed-tx builder adds).
+
+        Returns:
+            {"status": "ok", "result": {"signature_b64", "signed_tx_b64"}} — or an error.
+        """
+        self._check_session()
+        try:
+            message_bytes = base64.b64decode(message_b64)
+            privkey = self._get_private_key(account, chain="Solana", chain_id=None)
+            sig_bytes = _ed25519_sign(privkey, message_bytes)
+            signed_tx_b64 = _solana_build_signed_tx(privkey, message_bytes)
+            return {
+                "status": "ok",
+                "result": {
+                    "signature_b64": base64.b64encode(sig_bytes).decode(),
+                    "signed_tx_b64": signed_tx_b64,
+                },
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def broadcast_solana_tx(self, account: str, message_b64: str,
+                            rpc_url: Optional[str] = None) -> dict:
+        """Sign and broadcast a Solana transaction via sendTransaction.
+
+        Args:
+            account: Vault account name.
+            message_b64: Base64-encoded compiled Solana transaction message.
+            rpc_url: Solana RPC endpoint (defaults to mainnet-beta).
+
+        Returns:
+            {"status": "ok", "result": {"tx_signature": <base58 sig>}} or an error.
+        """
+        self._check_session()
+        try:
+            message_bytes = base64.b64decode(message_b64)
+            privkey = self._get_private_key(account, chain="Solana", chain_id=None)
+            signed_tx_b64 = _solana_build_signed_tx(privkey, message_bytes)
+
+            if not rpc_url:
+                rpc_url = "https://api.mainnet-beta.solana.com"
+
+            result = self._solana_rpc(rpc_url, "sendTransaction", [signed_tx_b64, {"encoding": "base64"}])
+            if isinstance(result, dict) and "_rpc_error" in result:
+                return {"status": "error",
+                        "error": f"Solana RPC error: {result['_rpc_error']}"}
+            if isinstance(result, str):
+                return {"status": "ok", "result": {"tx_signature": result}}
+            return {"status": "error",
+                    "error": f"Unexpected sendTransaction result: {result!r}"}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def broadcast_raw_solana_tx(self, signed_tx_b64: str,
+                                rpc_url: Optional[str] = None) -> dict:
+        """Broadcast a pre-assembled signed Solana transaction via sendTransaction.
+
+        Used by the Orca writer for multi-signer transactions where the wallet
+        is only ONE of several required signatures: the wallet's 64-byte signature
+        is produced by sign_solana_tx(); the writer assembles the full signed
+        transaction (with any additional ephemeral signers like the position mint
+        keypair for openPosition) and submits it here.
+
+        The agent does not inspect or re-sign the payload — it only relays to the
+        RPC endpoint. The private key never leaves the vault.
+
+        Args:
+            signed_tx_b64: Base64-encoded complete signed transaction
+                (compact-u16 sig count + N * 64-byte signatures + message bytes).
+            rpc_url: Solana RPC endpoint (defaults to mainnet-beta).
+
+        Returns:
+            {"status": "ok", "result": {"tx_signature": <base58 sig>}} or an error.
+        """
+        self._check_session()
+        try:
+            if not rpc_url:
+                rpc_url = "https://api.mainnet-beta.solana.com"
+            result = self._solana_rpc(rpc_url, "sendTransaction", [signed_tx_b64, {"encoding": "base64"}])
+            if isinstance(result, dict) and "_rpc_error" in result:
+                return {"status": "error",
+                        "error": f"Solana RPC error: {result['_rpc_error']}"}
+            if isinstance(result, str):
+                return {"status": "ok", "result": {"tx_signature": result}}
+            return {"status": "error",
+                    "error": f"Unexpected sendTransaction result: {result!r}"}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def sign_solana_tx_no_broadcast(self, account: str, message_b64: str) -> dict:
+        """Sign a Solana message and return ONLY the 64-byte signature and pubkey.
+
+        Same as sign_solana_tx, but omits the signed_tx_b64 field. For use by the
+        Orca writer when it needs to assemble multi-signer transactions itself
+        (e.g. openPosition where the position-NFT mint is an ephemeral second signer).
+
+        Args:
+            account: Vault account name.
+            message_b64: Base64-encoded compiled Solana transaction message.
+
+        Returns:
+            {"status": "ok",
+             "result": {"signature_b64", "pubkey_b58", "pubkey_b64"}}
+        """
+        self._check_session()
+        try:
+            message_bytes = base64.b64decode(message_b64)
+            privkey = self._get_private_key(account, chain="Solana", chain_id=None)
+            sig_bytes = _ed25519_sign(privkey, message_bytes)
+            pubkey_bytes = _ed25519_privkey_to_pubkey(privkey)
+            return {
+                "status": "ok",
+                "result": {
+                    "signature_b64": base64.b64encode(sig_bytes).decode(),
+                    "pubkey_b58": _b58encode(pubkey_bytes),
+                    "pubkey_b64": base64.b64encode(pubkey_bytes).decode(),
+                },
+            }
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
     @staticmethod
     def _encode_eip712_type(type_name: str, types: Dict[str, List[Dict[str, str]]]) -> str:
         """Build the EIP-712 type string for a struct (e.g. 'SpotSend(...)' )."""
@@ -1141,6 +1406,23 @@ class KeyManagerAgent:
             )
         elif action == "sign_message":
             return self.sign_message(cmd["account"], cmd["message"], cmd.get("chain", "EVM"))
+        elif action == "get_solana_address":
+            return self.get_solana_address(cmd["account"])
+        elif action == "sign_solana_tx":
+            return self.sign_solana_tx(cmd["account"], cmd.get("message_b64", ""))
+        elif action == "sign_solana_tx_no_broadcast":
+            return self.sign_solana_tx_no_broadcast(cmd["account"], cmd.get("message_b64", ""))
+        elif action == "broadcast_solana_tx":
+            return self.broadcast_solana_tx(
+                cmd["account"],
+                cmd.get("message_b64", ""),
+                cmd.get("rpc_url"),
+            )
+        elif action == "broadcast_raw_solana_tx":
+            return self.broadcast_raw_solana_tx(
+                cmd.get("signed_tx_b64", ""),
+                cmd.get("rpc_url"),
+            )
         elif action == "sign_typed_data":
             return self.sign_typed_data(
                 account=cmd["account"],

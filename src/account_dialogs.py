@@ -52,6 +52,96 @@ def confirm_delete_address(gui, account_name, addr_index):
     ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy, width=100,
                   fg_color="gray30").pack(side="left", padx=10)
 
+
+def show_delete_private_key_dialog(gui, account_name: str, key_index: int):
+    """Confirmation dialog for deleting a single private key from an account.
+
+    Shows the key's metadata (chain, source, derivation path, derived address)
+    but never the key value itself.  Requires password confirmation.
+
+    Args:
+        gui: ColdStackGUI instance.
+        account_name: Name of the account containing the key.
+        key_index: 0-based index into the account's private keys list.
+    """
+    keys = gui.key_manager.show_private_key(account_name)
+    if key_index < 0 or key_index >= len(keys):
+        gui.show_notification("Invalid key index", error=True)
+        return
+
+    entry = keys[key_index]
+    chain = entry.get("chain", "") or "(no chain)"
+    source = entry.get("source", "manual")
+    dpath = entry.get("derivation_path", "")
+    derived_addr = entry.get("derived_address", "")
+
+    # Build metadata summary (never display the key value)
+    meta_parts = [f"[{key_index}] {chain}"]
+    if source == "derived":
+        meta_parts.append("derived")
+    if dpath:
+        meta_parts.append(dpath)
+    if derived_addr:
+        meta_parts.append(f"addr: {derived_addr[:20]}...")
+    key_meta = " | ".join(meta_parts)
+
+    dialog = ctk.CTkToplevel(gui.root)
+    dialog.title("Delete Private Key")
+    dialog.geometry("460x300")
+    dialog.transient(gui.root)
+    dialog.grab_set()
+    gui._center_dialog(dialog)
+
+    ctk.CTkLabel(dialog, text="Delete Private Key",
+                 font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 5))
+    ctk.CTkLabel(dialog, text=f"Account: {account_name}",
+                 font=ctk.CTkFont(size=12), text_color="gray60").pack(pady=(0, 5))
+    ctk.CTkLabel(dialog, text=key_meta,
+                 font=ctk.CTkFont(size=11), text_color="gray50",
+                 wraplength=420).pack(pady=(0, 5))
+    ctk.CTkLabel(dialog, text="This action is permanent and cannot be undone.",
+                 font=ctk.CTkFont(size=12), text_color="orange").pack(pady=(0, 10))
+
+    password_entry = ctk.CTkEntry(
+        dialog, placeholder_text="Enter master password", show="\u2022",
+        width=250, font=ctk.CTkFont(size=12))
+    password_entry.pack(pady=(0, 5))
+    password_entry.focus_set()
+
+    status_label = ctk.CTkLabel(dialog, text="", font=ctk.CTkFont(size=11))
+    status_label.pack(pady=5)
+
+    def do_delete():
+        password = password_entry.get()
+        if not password:
+            status_label.configure(text="Please enter password", text_color="red")
+            return
+        if password != gui.current_password:
+            status_label.configure(text="Invalid password", text_color="red")
+            return
+        try:
+            if gui.key_manager.delete_private_key(account_name, key_index, password):
+                gui.show_notification(f"Private key {key_index} deleted from '{account_name}'")
+                dialog.destroy()
+                # Refresh the account view
+                if gui.current_account == account_name:
+                    gui.select_account(gui.current_pool or "Unassigned", account_name)
+            else:
+                status_label.configure(text="Failed to delete key", text_color="red")
+        except Exception as e:
+            status_label.configure(text=f"Error: {e}", text_color="red")
+
+    password_entry.bind("<Return>", lambda e: do_delete())
+
+    btn_frame = ctk.CTkFrame(dialog, fg_color="transparent")
+    btn_frame.pack(pady=15)
+    ctk.CTkButton(btn_frame, text="Delete Key", command=do_delete, width=120,
+                  fg_color=("#c53030", "#9b2c2c"),
+                  hover_color=("#e53e3e", "#c53030")).pack(side="left", padx=10)
+    ctk.CTkButton(btn_frame, text="Cancel", command=dialog.destroy, width=100,
+                  fg_color="gray30").pack(side="left", padx=10)
+
+
 def show_delete_account_dialog(gui):
     """Dialog to delete an account and all its data."""
     if not gui.current_password:
@@ -397,7 +487,7 @@ def show_add_private_key_dialog(gui):
 
     dialog = ctk.CTkToplevel(gui.root)
     dialog.title("Add Private Key")
-    dialog.geometry("500x470")
+    dialog.geometry("500x620")
     dialog.transient(gui.root)
     dialog.grab_set()
     gui._center_dialog(dialog)
@@ -405,7 +495,7 @@ def show_add_private_key_dialog(gui):
     ctk.CTkLabel(dialog, text="Add Private Key",
                  font=ctk.CTkFont(size=16, weight="bold")).pack(pady=(20, 10))
 
-    form = ctk.CTkFrame(dialog, fg_color="transparent")
+    form = ctk.CTkScrollableFrame(dialog, fg_color="transparent")
     form.pack(pady=10, padx=20, fill="both", expand=True)
 
     # Account dropdown - default to currently selected account
@@ -446,7 +536,8 @@ def show_add_private_key_dialog(gui):
     on_pk_chain_selected()
 
     # Private Key entry (masked)
-    ctk.CTkLabel(form, text="Private Key:").pack(anchor="w")
+    pk_label_widget = ctk.CTkLabel(form, text="Private Key:")
+    pk_label_widget.pack(anchor="w")
     pk_entry = ctk.CTkEntry(form, placeholder_text="Enter private key", show="\u2022",
                             width=420, font=ctk.CTkFont(size=12, family="monospace"))
     pk_entry.pack(fill="x", pady=(0, 10))
@@ -465,8 +556,13 @@ def show_add_private_key_dialog(gui):
     toggle_btn.pack(anchor="w", pady=(0, 10))
 
     # v3: Derive from Mnemonic checkbox
-    derive_var = ctk.CTkCheckBox(form, text="Derive from Mnemonic")
+    derive_var = ctk.CTkCheckBox(form, text="Derive from Mnemonic (uses stored mnemonic)")
     derive_var.pack(anchor="w", pady=(0, 5))
+
+    # v5.2.5: Custom mnemonic checkbox (mutually exclusive with vault derive)
+    custom_mnemonic_var = ctk.CTkCheckBox(
+        form, text="Use Custom Mnemonic (not from vault)")
+    custom_mnemonic_var.pack(anchor="w", pady=(0, 5))
 
     # v3: Derivation fields (hidden by default)
     derive_fields_frame = ctk.CTkFrame(form, fg_color="transparent")
@@ -494,25 +590,47 @@ def show_add_private_key_dialog(gui):
     derive_status.pack(anchor="w")
 
     # Store derived metadata for saving
-    derived_meta = {"path": None, "index": None, "address": None}
+    derived_meta = {"path": None, "index": None, "address": None, "private_key": None}
+
+    # v5.2.5: Mnemonic info label (shows which mnemonic is being used)
+    mnemonic_info_label = ctk.CTkLabel(form, text="", font=ctk.CTkFont(size=10),
+                                        text_color="gray60")
+    # Packed/unpacked dynamically in on_derive_toggle
 
     def on_derive_toggle():
         if derive_var.get():
+            # Uncheck custom mnemonic if it's checked
+            if custom_mnemonic_var.get():
+                custom_mnemonic_var.deselect()
+                on_custom_mnemonic_toggle()
             acct = acct_var.get().strip()
             mnemonic = gui.key_manager.show_mnemonic(acct)
             if not mnemonic:
                 derive_status.configure(text="No mnemonic stored for this account. Add a mnemonic first.", text_color="orange")
                 derive_var.deselect()
                 return
+            # Change the label to show this is mnemonic-derived, not a raw key
+            pk_label_widget.configure(text="Private Key: (derived from mnemonic — read-only)")
+            pk_entry.configure(state="normal")
+            pk_entry.delete(0, "end")
+            word_count = len(mnemonic.split())
+            pk_entry.insert(0, f"{word_count}-word mnemonic (from vault for '{acct}')")
+            pk_entry.configure(state="disabled", placeholder_text="")
+            mnemonic_info_label.configure(
+                text=f"Using stored mnemonic for '{acct}' ({word_count} words)")
+            mnemonic_info_label.pack(anchor="w", pady=(0, 5))
             derive_fields_frame.pack(fill="x", pady=(0, 10))
-            pk_entry.configure(state="disabled")
             derive_status.configure(text="", text_color="gray60")
         else:
+            pk_label_widget.configure(text="Private Key:")
+            mnemonic_info_label.pack_forget()
+            pk_entry.configure(state="normal", placeholder_text="Enter private key")
+            pk_entry.delete(0, "end")
             derive_fields_frame.pack_forget()
-            pk_entry.configure(state="normal")
             derived_meta["path"] = None
             derived_meta["index"] = None
             derived_meta["address"] = None
+            derived_meta["private_key"] = None
 
     derive_var.configure(command=on_derive_toggle)
 
@@ -536,11 +654,127 @@ def show_add_private_key_dialog(gui):
             derived_meta["path"] = result["path"]
             derived_meta["index"] = idx
             derived_meta["address"] = result["address"]
-            derive_status.configure(text=f"Derived: {result['address'][:30]}...", text_color="green")
+            derived_meta["private_key"] = result["private_key"]
+            # For Solana, show base58 private key too (matches Brave export format)
+            if "sol" in chain.lower() or "SOL" in chain:
+                from ed25519_utils import b58encode
+                # Brave/Phantom export 64-byte keypair (seed + pubkey) as base58
+                keypair = bytes.fromhex(result["private_key"]) + bytes.fromhex(result["public_key"])
+                b58_key = b58encode(keypair)
+                derive_status.configure(
+                    text=f"Derived: {result['address'][:30]}... | Key (b58): {b58_key[:20]}...",
+                    text_color="green")
+            else:
+                derive_status.configure(text=f"Derived: {result['address'][:30]}...", text_color="green")
         except Exception as e:
             derive_status.configure(text=f"Error: {e}", text_color="red")
 
     derive_btn_pk.configure(command=do_derive_pk)
+
+    # v5.2.5: Custom mnemonic fields (hidden by default). Derives from a
+    # manually-entered mnemonic rather than the vault's stored one — useful
+    # when the vault mnemonic produces a different key than expected
+    # (e.g. different derivation path used by Phantom vs Solflare).
+    custom_mnemonic_frame = ctk.CTkFrame(form, fg_color="transparent")
+
+    ctk.CTkLabel(custom_mnemonic_frame,
+                 text="Mnemonic (12/24 words, space-separated):").pack(anchor="w")
+    custom_mnemonic_entry = ctk.CTkEntry(
+        custom_mnemonic_frame, placeholder_text="word1 word2 word3 ...",
+        show="\u2022", width=420,
+        font=ctk.CTkFont(size=11, family="monospace"))
+    custom_mnemonic_entry.pack(fill="x", pady=(0, 5))
+
+    ctk.CTkLabel(custom_mnemonic_frame,
+                 text="Derivation Chain:").pack(anchor="w")
+    custom_deriv_chain_var = ctk.StringVar(value=DERIVATION_CHAINS[0])
+    gui._style_combobox()
+    custom_deriv_chain_combo = ttk.Combobox(
+        custom_mnemonic_frame, textvariable=custom_deriv_chain_var,
+        values=DERIVATION_CHAINS, state="readonly",
+        width=55, style="Dark.TCombobox")
+    custom_deriv_chain_combo.pack(fill="x", pady=(0, 5))
+
+    ctk.CTkLabel(custom_mnemonic_frame, text="Address Index:").pack(anchor="w")
+    custom_deriv_index_entry = ctk.CTkEntry(
+        custom_mnemonic_frame, placeholder_text="0", width=100)
+    custom_deriv_index_entry.insert(0, "0")
+    custom_deriv_index_entry.pack(anchor="w", pady=(0, 5))
+
+    derive_custom_btn = ctk.CTkButton(
+        custom_mnemonic_frame, text="Derive Key & Address",
+        width=180, height=30, fg_color=("#fd7e14", "#dc6602"))
+    derive_custom_btn.pack(anchor="w", pady=(0, 5))
+
+    custom_derive_status = ctk.CTkLabel(
+        custom_mnemonic_frame, text="", font=ctk.CTkFont(size=10))
+    custom_derive_status.pack(anchor="w")
+
+    # Store result for custom derivation
+    custom_derived_meta = {"path": None, "index": None, "address": None, "private_key": None}
+
+    def on_custom_mnemonic_toggle():
+        if custom_mnemonic_var.get():
+            # Uncheck vault-derive if it's checked
+            if derive_var.get():
+                derive_var.deselect()
+                on_derive_toggle()  # Reset derive UI
+            custom_mnemonic_frame.pack(fill="x", pady=(0, 10))
+            pk_entry.configure(state="normal")
+            pk_entry.delete(0, "end")
+            pk_entry.configure(state="disabled")
+            pk_label_widget.configure(
+                text="Private Key: (derived from custom mnemonic — read-only)")
+        else:
+            custom_mnemonic_frame.pack_forget()
+            pk_entry.configure(state="normal", placeholder_text="Enter private key")
+            pk_label_widget.configure(text="Private Key:")
+            custom_derived_meta["path"] = None
+            custom_derived_meta["index"] = None
+            custom_derived_meta["address"] = None
+            custom_derived_meta["private_key"] = None
+
+    custom_mnemonic_var.configure(command=on_custom_mnemonic_toggle)
+
+    def do_derive_custom():
+        mnemonic = custom_mnemonic_entry.get().strip()
+        if not mnemonic:
+            custom_derive_status.configure(
+                text="Enter a mnemonic phrase", text_color="red")
+            return
+        chain = custom_deriv_chain_var.get()
+        try:
+            idx = int(custom_deriv_index_entry.get() or "0")
+        except ValueError:
+            idx = 0
+        try:
+            result = DerivationEngine.derive_from_mnemonic(
+                mnemonic, chain, address_index=idx)
+            pk_entry.configure(state="normal")
+            pk_entry.delete(0, "end")
+            pk_entry.insert(0, result["private_key"])
+            pk_entry.configure(state="disabled")
+            custom_derived_meta["path"] = result["path"]
+            custom_derived_meta["index"] = idx
+            custom_derived_meta["address"] = result["address"]
+            custom_derived_meta["private_key"] = result["private_key"]
+            # For Solana, show base58 private key too (matches Brave export format)
+            if "sol" in chain.lower() or "SOL" in chain:
+                from ed25519_utils import b58encode
+                # Brave/Phantom export 64-byte keypair (seed + pubkey) as base58
+                keypair = bytes.fromhex(result["private_key"]) + bytes.fromhex(result["public_key"])
+                b58_key = b58encode(keypair)
+                custom_derive_status.configure(
+                    text=f"Derived: {result['address'][:44]}... | Key (b58): {b58_key[:20]}...",
+                    text_color="green")
+            else:
+                custom_derive_status.configure(
+                    text=f"Derived: {result['address'][:44]}...",
+                    text_color="green")
+        except Exception as e:
+            custom_derive_status.configure(text=f"Error: {e}", text_color="red")
+
+    derive_custom_btn.configure(command=do_derive_custom)
 
     # Warning label
     ctk.CTkLabel(form,
@@ -563,22 +797,47 @@ def show_add_private_key_dialog(gui):
             chain_label = ""
         else:
             chain_label = selected_chain
-        private_key = pk_entry.get().strip()
-        if not account or not private_key:
-            status_label.configure(text="Account and private key are required", text_color="red")
-            return
         try:
-            # v3: Include derivation metadata if derived from mnemonic
-            if derive_var.get() and derived_meta["path"]:
+            # v5.2.5: Custom mnemonic derivation — only the derived private
+            # key is saved (encrypted); the custom mnemonic is never stored.
+            if custom_mnemonic_var.get():
+                if not custom_derived_meta["private_key"]:
+                    status_label.configure(
+                        text="Derive a key from your custom mnemonic first", text_color="red")
+                    return
+                private_key = custom_derived_meta["private_key"]
                 success = gui.key_manager.add_private_key(
                     account, private_key, gui.current_password, chain_label,
                     source="derived",
-                    derivation_path=derived_meta["path"],
-                    address_index=derived_meta["index"],
-                    derived_address=derived_meta["address"])
+                    derivation_path=custom_derived_meta["path"],
+                    address_index=custom_derived_meta["index"],
+                    derived_address=custom_derived_meta["address"])
             else:
-                success = gui.key_manager.add_private_key(
-                    account, private_key, gui.current_password, chain_label)
+                # v5.2.5: Vault-mnemonic derive must run "Derive Key" first —
+                # the entry holds descriptive text until a key is derived.
+                # Store/use the key in derived_meta (mirrors custom path) to
+                # avoid CTkEntry placeholder bugs returning empty string.
+                if derive_var.get():
+                    if not derived_meta["private_key"]:
+                        status_label.configure(
+                            text="Click 'Derive Key' to derive the private key first",
+                            text_color="red")
+                        return
+                    private_key = derived_meta["private_key"]
+                    success = gui.key_manager.add_private_key(
+                        account, private_key, gui.current_password, chain_label,
+                        source="derived",
+                        derivation_path=derived_meta["path"],
+                        address_index=derived_meta["index"],
+                        derived_address=derived_meta["address"])
+                else:
+                    # Raw private key path — read from the entry widget
+                    private_key = pk_entry.get().strip()
+                    if not account or not private_key:
+                        status_label.configure(text="Account and private key are required", text_color="red")
+                        return
+                    success = gui.key_manager.add_private_key(
+                        account, private_key, gui.current_password, chain_label)
             if success:
                 gui.show_notification(f"Private key added to '{account}'")
                 dialog.destroy()
@@ -630,7 +889,14 @@ def show_derivation_dialog(gui, account_name):
     # Derivation path (auto-populated, editable)
     ctk.CTkLabel(form, text="Derivation Path:").pack(anchor="w")
     path_entry = ctk.CTkEntry(form, width=420, font=ctk.CTkFont(size=12, family="monospace"))
-    path_entry.pack(fill="x", pady=(0, 10))
+    path_entry.pack(fill="x", pady=(0, 5))
+    path_hint = ctk.CTkLabel(
+        form,
+        text="Tip: If the derived address doesn't match your wallet, "
+             "try a different Solana variant from the chain dropdown",
+        font=ctk.CTkFont(size=10), text_color="gray60"
+    )
+    path_hint.pack(anchor="w", pady=(0, 5))
 
     def update_path(event=None):
         ch = chain_var.get()
@@ -672,8 +938,14 @@ def show_derivation_dialog(gui, account_name):
             idx = int(index_entry.get() or "0")
         except ValueError:
             idx = 0
+        # v5.2.5: Read the custom derivation path if the user modified it.
+        # The path is used for reporting and may also encode account/address
+        # indices for Solana variants.
+        custom_path = path_entry.get().strip() or None
         try:
-            result = DerivationEngine.derive_from_mnemonic(mnemonic, ch, address_index=idx)
+            result = DerivationEngine.derive_from_mnemonic(
+                mnemonic, ch, path=custom_path, address_index=idx
+            )
             last_result["data"] = result
             addr_label.configure(text=f"Address: {result['address']}", text_color="#51cf94")
             # SECURITY: Never display the derived private key. Show a masked

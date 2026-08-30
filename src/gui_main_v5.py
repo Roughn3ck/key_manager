@@ -2,8 +2,11 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.2.3 (August 2026) - Railgun Privacy Integration
+Version: v5.3.0 (August 2026) - ColdTrack + Orca Whirlpool + Railgun + Aerodrome + BSC V3
 """
+
+# Single source of truth for version — update this when bumping versions
+VERSION = "5.3.0"
 import sys
 import os
 
@@ -113,11 +116,13 @@ from account_dialogs import (
     show_add_address_dialog, show_add_mnemonic_dialog, show_add_private_key_dialog,
     show_derivation_dialog, show_derive_all_chains_dialog, _save_derived_to_account,
     show_init_vault_dialog, show_change_password_dialog, show_import_dialog,
+    show_delete_private_key_dialog,
 )
 from vault_tab import VaultTab
 from lp_tab import LPTab
 # v5.2.3: Railgun privacy tab
 from railgun_tab import RailgunTab
+from coldtrack.tab import ColdTrackTab
 # v5.1: Vault tracker imports
 from vault_tracker import HyperliquidVaultTracker, VaultPosition
 # BackupEngine import removed — backups are deprecated; users copy
@@ -283,6 +288,13 @@ class PortableKeyManager:
         self.address_db = self._manager.address_db
         return result
 
+    def delete_private_key(self, account_name: str, key_index: int, password: str) -> bool:
+        """Delegate to underlying KeyManager."""
+        self._manager.address_db = self.address_db
+        result = self._manager.delete_private_key(account_name, key_index, password)
+        self.address_db = self._manager.address_db
+        return result
+
 
 # Use the portable version
 KeyManager = PortableKeyManager
@@ -307,6 +319,7 @@ class ColdStackGUI:
         "HyperEVM (Project X)": "hyperliquid",
         "BSC (BNB Chain)": "bsc",
         "Aerodrome (BASE)": "aerodrome",
+        "Orca (Solana)": "orca",
     }
     # Reverse map for converting adapter keys to friendly display names.
     LP_PLATFORM_MAP_reverse = {v: k for k, v in LP_PLATFORM_MAP.items()}
@@ -349,6 +362,9 @@ class ColdStackGUI:
 
         # v5.2.3: Railgun tab instance (created after login)
         self.railgun_tab: Optional[RailgunTab] = None
+
+        # v5.3.0: ColdTrack tab instance (created after login)
+        self.coldtrack_tab: Optional[ColdTrackTab] = None
 
         # v5.1: Embedded key_manager_agent HTTP server
         self._agent_server: Optional[Any] = None
@@ -403,7 +419,7 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text="v5.2.4 - ColdStack | Railgun Sidecar + Aerodrome + BSC V3",
+            text=f"v{VERSION} - ColdStack | Orca Whirlpool + Railgun Sidecar + Aerodrome + BSC V3",
             font=ctk.CTkFont(size=11),
             text_color="gray60"
         )
@@ -636,6 +652,7 @@ class ColdStackGUI:
         vaults_tab = self.tabview.add("HL1 Vaults")
         lp_tab = self.tabview.add("LP Positions")
         railgun_tab = self.tabview.add("Railgun")
+        coldtrack_tab = self.tabview.add("ColdTrack")
 
         # Vault tab: existing two-panel layout
         main_container = ctk.CTkFrame(vault_tab, corner_radius=0)
@@ -668,6 +685,11 @@ class ColdStackGUI:
             self.railgun_tab = RailgunTab(self)
         self.railgun_tab.create_tab(railgun_tab)
 
+        # v5.3.0: ColdTrack tab
+        if not hasattr(self, 'coldtrack_tab') or self.coldtrack_tab is None:
+            self.coldtrack_tab = ColdTrackTab(self)
+        self.coldtrack_tab.create_tab(coldtrack_tab)
+
         # v5.1: Tab change callback for auto-fetching saved pools
         self.tabview.configure(command=self._on_tab_changed)
 
@@ -692,6 +714,9 @@ class ColdStackGUI:
                     self.lp_tab._lp_auto_fetched = True
                     # Only preload saved pools (fast, silent) — don't trigger full scan
                     self.lp_tab._lp_preload_saved_only(addr)
+        elif current_tab == "ColdTrack":
+            if hasattr(self, 'coldtrack_tab') and self.coldtrack_tab is not None:
+                self.coldtrack_tab.on_tab_selected()
 
     def create_left_panel(self, parent):
         """Create left panel with scrollable account list organized by pool."""
@@ -947,7 +972,7 @@ class ColdStackGUI:
                 release_url = data.get("html_url", "https://github.com/Roughn3ck/key_manager/releases")
                 release_name = data.get("name", "Latest Release")
 
-                current_version = "5.2.2"
+                current_version = VERSION
                 latest_version = latest_tag.lstrip("v")
 
                 # Simple version comparison (handles major.minor[.patch])
@@ -1330,81 +1355,78 @@ class ColdStackGUI:
             self.show_notification(f"Failed to copy: {str(e)}", error=True)
 
     def show_notification(self, message, error=False):
-        """Show a notification toast. Errors persist until dismissed; success auto-dismisses."""
-        # Cancel any existing notification timer
+        """Show a notification toast. Errors use a scrollable textbox (copyable);
+        success auto-dismisses."""
         if self._notification_timer is not None:
             self.root.after_cancel(self._notification_timer)
             self._notification_timer = None
 
-        # Destroy any existing close button
+        if hasattr(self, '_notification_textbox') and self._notification_textbox is not None:
+            self._notification_textbox.place_forget()
+            self._notification_textbox = None
         if hasattr(self, '_notification_close_btn') and self._notification_close_btn is not None:
             self._notification_close_btn.place_forget()
             self._notification_close_btn = None
-
-        # Create notification label if it doesn't exist
-        if self._notification_label is None:
-            self._notification_label = ctk.CTkLabel(
-                self.root,
-                text="",
-                font=ctk.CTkFont(size=12),
-                corner_radius=8,
-                height=30,
-                padx=15
-            )
-
-        # Style based on error or success
-        if error:
-            self._notification_label.configure(
-                text=f"\u2717 {message}",
-                text_color="#ff6b6b",
-                fg_color=("#3a1a1a", "#3a1a1a")
-            )
-        else:
-            self._notification_label.configure(
-                text=f"\u2713 {message}",
-                text_color="#51cf94",
-                fg_color=("#1a3a2a", "#1a3a2a")
-            )
-
-        # Place notification at bottom center, above status bar
-        self._notification_label.place(relx=0.5, rely=0.93, anchor="center")
-        self._notification_label.lift()
+        if self._notification_label is not None:
+            self._notification_label.place_forget()
 
         if error:
-            # Error notifications persist — add a close button to the right of the label
+            # Use a CTkTextbox for errors — allows selection and copy
+            if not hasattr(self, '_notification_textbox') or self._notification_textbox is None:
+                self._notification_textbox = ctk.CTkTextbox(
+                    self.root,
+                    font=ctk.CTkFont(size=12),
+                    height=120,
+                    width=700,
+                    corner_radius=8,
+                    fg_color=("#3a1a1a", "#3a1a1a"),
+                    text_color="#ff6b6b",
+                    wrap="word",
+                )
+            self._notification_textbox.configure(state="normal")
+            self._notification_textbox.delete("1.0", "end")
+            self._notification_textbox.insert("1.0", f"✗ {message}")
+            self._notification_textbox.configure(state="normal")  # Keep editable for selection/copy
+            self._notification_textbox.place(relx=0.5, rely=0.88, anchor="center")
+            self._notification_textbox.lift()
+
+            # Close button
             self._notification_close_btn = ctk.CTkLabel(
-                self.root,
-                text="\u2715",
-                font=ctk.CTkFont(size=14, weight="bold"),
-                text_color="#ff6b6b",
-                fg_color=("#3a1a1a", "#3a1a1a"),
-                corner_radius=8,
-                width=30,
-                height=30,
-                cursor="hand2"
-            )
-            # Fixed offset fallback for reliable placement
-            close_x = 200
+                self.root, text="✕", font=ctk.CTkFont(size=14, weight="bold"),
+                text_color="#ff6b6b", fg_color=("#3a1a1a", "#3a1a1a"),
+                corner_radius=8, width=30, height=30, cursor="hand2")
+            close_x = 360
             try:
-                close_x = self._notification_label.winfo_reqwidth() // 2 + 25
+                close_x = self._notification_textbox.winfo_reqwidth() // 2 + 25
             except Exception:
                 pass
-            self._notification_close_btn.place(relx=0.5, rely=0.93, anchor="center", x=close_x)
+            self._notification_close_btn.place(relx=0.5, rely=0.88, anchor="center", x=close_x)
             self._notification_close_btn.lift()
             self._notification_close_btn.bind("<Button-1>", lambda e: self._dismiss_notification())
-            # Do NOT set auto-dismiss timer for errors
         else:
-            # Success notifications auto-dismiss after 3 seconds
+            # Success — use the existing CTkLabel (auto-dismiss)
+            if self._notification_label is None:
+                self._notification_label = ctk.CTkLabel(
+                    self.root, text="", font=ctk.CTkFont(size=12),
+                    corner_radius=8, height=30, padx=15)
+            self._notification_label.configure(
+                text=f"✓ {message}", text_color="#51cf94", fg_color=("#1a3a2a", "#1a3a2a"))
+            self._notification_label.place(relx=0.5, rely=0.93, anchor="center")
+            self._notification_label.lift()
             self._notification_timer = self.root.after(3000, self._dismiss_notification)
 
     def _dismiss_notification(self):
         """Dismiss the current notification."""
         if self._notification_label is not None:
             self._notification_label.place_forget()
+        if hasattr(self, '_notification_textbox') and self._notification_textbox is not None:
+            self._notification_textbox.place_forget()
         if hasattr(self, '_notification_close_btn') and self._notification_close_btn is not None:
             self._notification_close_btn.place_forget()
             self._notification_close_btn = None
-        self._notification_timer = None
+        if self._notification_timer is not None:
+            self.root.after_cancel(self._notification_timer)
+            self._notification_timer = None
 
     def start_session_timer(self):
         """Start the 5-minute session timer."""
@@ -1497,18 +1519,39 @@ class ColdStackGUI:
             meta = f" | {' '.join(meta_parts)}" if meta_parts else ""
             link = " \U0001F517" if (source == "derived" and account_name in self.key_manager.address_db.get("mnemonics", {})) else ""
             if chain:
-                display_lines.append(f"[{chain}]{meta}{link} Key: {key_val}")
+                line = f"[{chain}]{meta}{link} Key: {key_val}"
             else:
-                display_lines.append(f"[No Chain Specified]{meta}{link} Key: {key_val}")
+                line = f"[No Chain Specified]{meta}{link} Key: {key_val}"
+            # For Solana keys, also show the base58-encoded version
+            # (matches Brave/Phantom export format)
+            if "sol" in chain.lower() or "SOL" in chain:
+                try:
+                    from ed25519_utils import b58encode, ed25519_privkey_to_pubkey
+                    # Brave/Phantom export 64-byte keypair (seed + pubkey) as base58
+                    priv_bytes = bytes.fromhex(key_val)
+                    pub_bytes = ed25519_privkey_to_pubkey(priv_bytes)
+                    b58_key = b58encode(priv_bytes + pub_bytes)
+                    line += f"\n    Base58: {b58_key}"
+                except Exception:
+                    pass
+            display_lines.append(line)
         full_display = "\n".join(display_lines)
 
         # Store for reveal/hide/copy operations
         self._pk_display_text = full_display
 
         # Private key display (initially hidden)
+        # Height accounts for base58 lines (each Solana key adds an extra line)
+        height_per_key = 25
+        total_lines = 0
+        for entry in keys:
+            total_lines += 1  # main line
+            chain = entry.get("chain", "")
+            if "sol" in chain.lower() or "SOL" in chain:
+                total_lines += 1  # base58 line
         self.pk_display = ctk.CTkTextbox(
             pk_frame,
-            height=max(60, 25 * len(keys) + 20),
+            height=max(60, height_per_key * total_lines + 20),
             font=ctk.CTkFont(size=12, family="monospace"),
             state="disabled"
         )
@@ -1555,6 +1598,36 @@ class ColdStackGUI:
             fg_color="gray30"
         )
         self.pk_hide_button.pack(side="left", padx=5)
+
+        # Per-key delete buttons (v5.2.5-hotfix5)
+        delete_frame = ctk.CTkFrame(pk_frame, fg_color="transparent")
+        delete_frame.pack(pady=(0, 15), padx=20, fill="x")
+
+        ctk.CTkLabel(delete_frame, text="Delete individual keys:",
+                     font=ctk.CTkFont(size=11), text_color="gray60").pack(anchor="w", pady=(0, 5))
+
+        for idx, entry in enumerate(keys):
+            chain_label = entry.get("chain", "") or "(no chain)"
+            source_label = entry.get("source", "manual")
+            dpath = entry.get("derivation_path", "")
+            btn_text = f"[{idx}] {chain_label} ({source_label})"
+            if dpath:
+                btn_text += f" {dpath}"
+            # Truncate for display
+            if len(btn_text) > 60:
+                btn_text = btn_text[:57] + "..."
+            del_btn = ctk.CTkButton(
+                delete_frame,
+                text=btn_text + "  \U0001F525",
+                command=lambda i=idx, acct=account_name: show_delete_private_key_dialog(self, acct, i),
+                width=380,
+                height=28,
+                font=ctk.CTkFont(size=11),
+                fg_color=("#c53030", "#9b2c2c"),
+                hover_color=("#e53e3e", "#c53030"),
+                anchor="w",
+            )
+            del_btn.pack(anchor="w", pady=1)
 
     def reveal_private_key(self, account_name):
         """Reveal all private keys with password re-entry."""
@@ -2391,6 +2464,11 @@ class ColdStackGUI:
             self.lp_tab._lp_auto_fetched = False
         self.lp_tab = None
 
+        # v5.3.0: Clear ColdTrack tab state
+        if self.coldtrack_tab is not None:
+            self.coldtrack_tab._widgets = {}
+        self.coldtrack_tab = None
+
         # v5.1: Clear vault tracker state
         self.vault_tracker = None
         if self.vault_tab is not None:
@@ -2598,6 +2676,10 @@ class ColdStackGUI:
     def show_delete_account_dialog(self):
         """Delegate to account_dialogs."""
         return show_delete_account_dialog(self)
+
+    def show_delete_private_key_dialog(self, account_name, key_index):
+        """Delegate to account_dialogs."""
+        return show_delete_private_key_dialog(self, account_name, key_index)
 
     def show_add_account_dialog(self):
         """Delegate to account_dialogs."""

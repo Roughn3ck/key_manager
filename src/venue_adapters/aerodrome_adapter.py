@@ -99,6 +99,7 @@ WETH_BASE = "0x4200000000000000000000000000000000000006"
 USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
 AERO_TOKEN = "0x940181a94A35A4569E4529A3CDfB74e38FD98631"
 CBBTC_BASE = "0xcbB45146687557Fd9B6F8cB1E2D51a65F3B1D1c1"
+G3_TOKEN_BASE = "0xcf67815cce72e682eb4429eca46843bed81ca739"
 
 # ---------------------------------------------------------------------------
 # Token registries
@@ -109,6 +110,7 @@ TOKEN_DECIMALS = {
     USDC_BASE.lower(): 6,
     AERO_TOKEN.lower(): 18,
     CBBTC_BASE.lower(): 8,
+    G3_TOKEN_BASE.lower(): 18,
 }
 
 TOKEN_SYMBOLS = {
@@ -116,6 +118,7 @@ TOKEN_SYMBOLS = {
     USDC_BASE.lower(): "USDC",
     AERO_TOKEN.lower(): "AERO",
     CBBTC_BASE.lower(): "cbBTC",
+    G3_TOKEN_BASE.lower(): "G3",
 }
 
 CANONICAL_SYMBOLS = {

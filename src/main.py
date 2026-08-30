@@ -367,6 +367,37 @@ class KeyManager:
             addresses.pop(index)
             return self.save_encrypted_data(password)
         return False
+
+    def delete_private_key(self, account_name: str, key_index: int, password: str) -> bool:
+        """Delete a single private key entry by index from an account.
+
+        Args:
+            account_name: Account name.
+            key_index: 0-based index into the private keys list.
+            password: Vault password for re-encryption.
+
+        Returns:
+            True if the key was found and deleted, False otherwise.
+        """
+        pk_store = self.address_db.get("private_keys", {})
+        keys = pk_store.get(account_name)
+        if keys is None:
+            return False
+        # Handle legacy single-string format
+        if isinstance(keys, str):
+            # Only one key, only index 0 can delete it
+            if key_index == 0:
+                del pk_store[account_name]
+                return self.save_encrypted_data(password)
+            return False
+        # List format
+        if 0 <= key_index < len(keys):
+            keys.pop(key_index)
+            # If list is now empty, remove the account entry entirely
+            if not keys:
+                del pk_store[account_name]
+            return self.save_encrypted_data(password)
+        return False
     
     def import_csv(self, csv_path: str, password: str) -> tuple:
         """Import addresses from a CSV file.
@@ -788,6 +819,28 @@ def delete_address(ctx, account: str, index: int):
         console.print(f"[green]✓ Address {index} deleted from {account}[/green]")
     else:
         console.print("[red]Failed to delete address. Check account name and index.[/red]")
+        sys.exit(1)
+
+
+@cli.command()
+@click.argument('account')
+@click.argument('key_index', type=int)
+@click.pass_context
+def delete_key(ctx, account: str, key_index: int):
+    """Delete a private key at the given index from an account.
+
+    Use 'show-keys <account>' to see the index of each key.
+    """
+    manager, password = get_manager_with_session(ctx)
+
+    if not password:
+        console.print("[red]No active session. Please unlock the vault first: key_manager unlock[/red]")
+        sys.exit(1)
+
+    if manager.delete_private_key(account, key_index, password):
+        console.print(f"[green]✓ Private key {key_index} deleted from '{account}'[/green]")
+    else:
+        console.print("[red]Failed to delete private key. Check account name and index.[/red]")
         sys.exit(1)
 
 

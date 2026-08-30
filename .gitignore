@@ -4,6 +4,7 @@ address_database.json
 *.key
 *.csv
 *.encrypted
+coldtrack.db
 
 # Build artifacts
 dist/
