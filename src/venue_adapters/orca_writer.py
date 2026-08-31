@@ -86,6 +86,10 @@ DISC_DECREASE_LIQUIDITY = _anchor_disc("decrease_liquidity")
 DISC_INCREASE_LIQUIDITY = _anchor_disc("increase_liquidity")
 DISC_OPEN_POSITION = _anchor_disc("open_position")
 DISC_CLOSE_POSITION = _anchor_disc("close_position")
+# closePositionWithTokenExtensions — for Token-2022 position NFTs
+# (Orca's current UI mints Token-2022 NFTs with metadata extension; legacy
+#  closePosition is SPL-only and rejects them with AccountOwnedByWrongProgram)
+DISC_CLOSE_POSITION_TE = bytes.fromhex("01b6873b9b1963df")
 DISC_SWAP = _anchor_disc("swap")
 DISC_COLLECT_REWARD = _anchor_disc("collect_reward")
 
@@ -651,6 +655,12 @@ class OrcaWriter(VenueWriter):
                 f"Wallet {wallet} does not hold the position NFT for {pos['position_mint']}"
             )
         token_prog = self._get_token_program(pos["position_mint"])
+        # Token-2022 position NFTs (Orca's current UI) require the dedicated
+        # closePositionWithTokenExtensions instruction — same account layout,
+        # different discriminator, token program MUST be Token-2022.
+        disc = (DISC_CLOSE_POSITION_TE
+                if token_prog == TOKEN_2022_PROGRAM_ID
+                else DISC_CLOSE_POSITION)
         whirlpool_prog = _b58decode(WHIRLPOOL_PROGRAM)
         accounts = [
             _AccountMeta(wallet_b, True, False),
@@ -660,7 +670,7 @@ class OrcaWriter(VenueWriter):
             _AccountMeta(_b58decode(pos_token_acct), False, True),
             _AccountMeta(_b58decode(token_prog), False, False),
         ]
-        return whirlpool_prog, accounts, DISC_CLOSE_POSITION
+        return whirlpool_prog, accounts, disc
 
     def _build_open_position_ix(self, wallet: str, pool: Dict[str, Any],
                                  tick_lower: int, tick_upper: int,

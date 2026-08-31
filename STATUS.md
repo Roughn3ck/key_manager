@@ -1,8 +1,33 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.0 (ColdTrack Foundation + Orca Whirlpool + Railgun + Aerodrome + BSC V3)
-**Last Updated:** 2026-08-30
+**Current Version:** v5.3.1 (Orca Token-2022 Close Position Fix)
+**Last Updated:** 2026-08-31
+
+
+---
+
+## v5.3.1 - Orca Token-2022 Close Position Fix (2026-08-31)
+
+### Summary
+Hotfix for Orca Whirlpool close position. Positions opened via Orca's current UI mint Token-2022 position NFTs (with metadata extension); the legacy `closePosition` instruction types `position_mint` as SPL Token-only and rejects them with `AccountOwnedByWrongProgram` (3007). The Orca writer now selects the dedicated `closePositionWithTokenExtensions` instruction when the position NFT belongs to Token-2022 — identical account layout, Token-2022 token program required; the close burns the NFT and closes both the token account and the mint account (rent reclaimed).
+
+### Fixed
+- **Orca close position on Token-2022 NFTs** — discriminator `01b6873b9b1963df` selected when the position mint's owning program is Token-2022; SPL positions continue on legacy `closePosition` (`7b86510031446262`). The decrease-liquidity and collectFees steps were already Token-2022-compatible; only the close instruction changed.
+- Root-cause evidence and instruction details: `coldstack-orca-token2022-close-instruction-fix.md`
+
+### Files Changed
+- `src/venue_adapters/orca_writer.py` — `DISC_CLOSE_POSITION_TE` constant + conditional discriminator in `_build_close_position_ix`
+- `src/gui_main_v5.py` — VERSION bump to 5.3.1
+- `AGENTS.md` — production version refs updated; ColdTrack roadmap phase tags shifted (this hotfix took the v5.3.1 slot)
+- `README.md` — latest-release link updated to v5.3.1
+- `STATUS.md` — this entry
+
+### Verification
+- `python -m py_compile` passes for all modified files
+- EXE rebuild is a Windows PE32+ build; GUI header shows v5.3.1
+- Orca fetch and SPL-token positions unaffected; ColdTrack and all other tabs present
+- Live G3 Token-2022 position closed cleanly (NFT burned, token account + mint closed, rent reclaimed)
 
 ---
 

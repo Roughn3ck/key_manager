@@ -4,9 +4,9 @@ Forge's project rules for working on ColdStack. Read this file at the start of e
 
 ## What This Is
 
-ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.3.0.
+ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.3.1.
 
-Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.3.0.
+Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.3.1.
 
 ## Commands
 
@@ -136,10 +136,10 @@ ColdTrack is the financial ledger module — the monetization layer of ColdStack
 - Tax-ready schema (cost basis, realized gains, holding periods)
 
 ### What It Does NOT Do (Yet)
-- Transaction import from on-chain (Phase 2 — v5.3.1)
-- LP position tracking with P&L (Phase 3 — v5.3.2)
-- Holdings & cost basis (Phase 4 — v5.3.3)
-- Tax report generation (Phase 5 — v5.3.4)
+- Transaction import from on-chain (Phase 2 — v5.3.2)
+- LP position tracking with P&L (Phase 3 — v5.3.3)
+- Holdings & cost basis (Phase 4 — v5.3.4)
+- Tax report generation (Phase 5 — v5.3.5)
 
 ### Module Layout
 - `src/coldtrack/db.py` — SQLite schema (9 tables), connection management, CRUD
