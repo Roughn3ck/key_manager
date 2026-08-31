@@ -3,7 +3,7 @@ echo ========================================
 echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting ColdStack v5.3.0...
+echo Starting ColdStack v5.3.1...
 echo.
 coldstack.exe
 pause

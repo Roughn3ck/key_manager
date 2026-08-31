@@ -614,15 +614,15 @@ class RailgunTab:
 
     def _on_shield(self):
         """Open shield dialog — public → private."""
-        self.gui.show_notification("Shield dialog — coming in v5.3.0")
+        self.gui.show_notification("Shield dialog — coming soon")
 
     def _on_unshield(self):
         """Open unshield dialog — private → public."""
-        self.gui.show_notification("Unshield dialog — coming in v5.3.0")
+        self.gui.show_notification("Unshield dialog — coming soon")
 
     def _on_transfer(self):
         """Open private transfer dialog — 0zk → 0zk."""
-        self.gui.show_notification("Transfer dialog — coming in v5.3.0")
+        self.gui.show_notification("Transfer dialog — coming soon")
 
     # ─── Cleanup ───
 

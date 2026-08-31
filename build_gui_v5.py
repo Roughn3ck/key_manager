@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PyInstaller build script for ColdStack GUI v5.3.0.
+PyInstaller build script for ColdStack GUI v5.3.1.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v5.3.0 (August 2026) - ColdTrack + Orca Whirlpool + Railgun + Aerodrome + BSC V3
+Version: v5.3.1 (August 2026) - ColdTrack + Orca Whirlpool + Railgun + Aerodrome + BSC V3
 Builds: src/gui_main_v5.py
 Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
 
@@ -11,7 +11,7 @@ Changes from build_gui_v5.py (v5.2.3):
   1. New hidden imports: coldtrack, coldtrack.db, coldtrack.importer, coldtrack.tab
   2. --collect-submodules=coldtrack
   3. Ed25519 utils module
-  4. Version strings updated to v5.3.0
+  4. Version strings updated to v5.3.1 (post-release chore: launch banner, build script strings, railgun stub wording)
 
 WARNING: After ANY source change, rebuild: python build_gui_v5.py
 """
@@ -212,7 +212,7 @@ echo ========================================
 echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting ColdStack v5.3.0...
+echo Starting ColdStack v5.3.1...
 echo.
 coldstack.exe
 pause
@@ -271,7 +271,7 @@ def main():
     print(f"Working directory: {os.getcwd()}")
 
     print("=" * 60)
-    print("ColdStack v5.3.0 - Portable EXE Builder")
+    print("ColdStack v5.3.1 - Portable EXE Builder")
     print("ColdTrack + Orca Whirlpool + Railgun + Aerodrome + BSC V3")
     print("=" * 60)
 
