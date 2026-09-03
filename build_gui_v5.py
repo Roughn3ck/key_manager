@@ -212,7 +212,7 @@ echo ========================================
 echo   ColdStack - Secure Crypto Key Vault
 echo ========================================
 echo.
-echo Starting ColdStack v5.3.1...
+echo Starting ColdStack v5.3.2...
 echo.
 coldstack.exe
 pause

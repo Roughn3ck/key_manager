@@ -211,60 +211,6 @@ router.get('/status', async (req, res) => {
         providers,
         ppoiNodes: sidecarState.ppoiNodes,
     });
-// ─── POST /engine/load-provider ───
-// Retry loading a single chain's provider without full engine restart.
-// Body: { chain: "ethereum" | "arbitrum" | "bsc" | "polygon" | "base" | "optimism" }
-router.post('/load-provider', async (req, res) => {
-    try {
-        const { chain } = req.body;
-        if (!chain) {
-            return res.status(400).json({ status: 'error', error: 'chain is required' });
-        }
-        const networkName = COLDSTACK_TO_RAILGUN[chain];
-        if (!networkName) {
-            return res.status(400).json({ status: 'error', error: `Unknown chain: "${chain}"` });
-        }
-
-        // RPC config must exist (set during engine init)
-        if (!sidecarState.rpcConfig) {
-            return res.status(400).json({ status: 'error', error: 'No RPC config loaded. Initialize engine first.' });
-        }
-
-        const chainConfig = sidecarState.rpcConfig[chain];
-        if (!chainConfig) {
-            return res.status(400).json({ status: 'error', error: `No RPC config for chain "${chain}"` });
-        }
-
-        const providerConfig = buildProviderConfig(chain, chainConfig);
-        if (!providerConfig) {
-            return res.status(400).json({ status: 'error', error: `Could not build provider config for "${chain}"` });
-        }
-
-        console.log(`[engine] Reloading provider for ${chain} (${networkName})...`);
-        const pollingInterval = 1000 * 60 * 5;
-        const fees = await loadProvider(providerConfig, networkName, pollingInterval);
-
-        sidecarState.loadedProviders.set(chain, {
-            chainId: providerConfig.chainId,
-            pollingInterval,
-        });
-        if (fees) {
-            sidecarState.fees.set(chain, {
-                deposit: fees.deposit,
-                withdraw: fees.withdraw,
-                nft: fees.nft,
-            });
-        }
-        sidecarState.providerErrors.delete(chain);
-        console.log(`[engine] Provider reloaded for ${chain}: fees=${JSON.stringify(fees)}`);
-
-        res.json({ status: 'ok', chain, fees: fees || null });
-    } catch (err) {
-        const chain = req.body?.chain || 'unknown';
-        sidecarState.providerErrors.set(chain, err.message);
-        console.error(`[engine] Failed to reload provider for ${chain}: ${err.message}`);
-        res.status(500).json({ status: 'error', chain, error: err.message });
-    }
 });
 
 export default router;

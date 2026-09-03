@@ -124,6 +124,18 @@ class RailgunSidecar:
 
     # ─── Engine API ───
 
+    def reload_provider(self, chain: str) -> Dict[str, Any]:
+        """Retry loading a single chain's provider without restarting the engine.
+
+        Args:
+            chain: ColdStack chain name (ethereum, arbitrum, bsc, polygon, base, optimism)
+
+        Returns:
+            Dict with status, chain, fees
+        """
+        payload = {"chain": chain}
+        return self._request("POST", "/engine/load-provider", payload, timeout=self.LONG_TIMEOUT)
+
     def init_engine(
         self,
         rpc_config: Dict[str, Dict[str, Any]],
@@ -178,42 +190,32 @@ class RailgunSidecar:
 
     # ─── Transfer API ───
 
-    def shielded_transfer(
+    def shield(
         self,
         chain: str,
         from_wallet_id: str,
         to_address: str,
         token_address: str,
         amount: str,
-        memo_text: Optional[str] = None
+        signing_mnemonic: str
     ) -> Dict[str, Any]:
-        """Execute a 0zk→0zk private transfer."""
+        """Shield tokens (public → private).
+
+        Args:
+            chain: ColdStack chain name (ethereum, arbitrum, bsc, polygon, base, optimism)
+            from_wallet_id: Railgun wallet ID of the shielded wallet
+            to_address: 0zk destination address
+            token_address: ERC-20 contract address
+            amount: Amount in base units (string)
+            signing_mnemonic: BIP39 mnemonic of the public wallet holding the tokens
+        """
         payload = {
             "chain": chain,
             "fromWalletId": from_wallet_id,
             "toAddress": to_address,
             "tokenAddress": token_address,
             "amount": amount,
-        }
-        if memo_text:
-            payload["memoText"] = memo_text
-        return self._request("POST", "/transfer/shielded", payload, timeout=self.LONG_TIMEOUT)
-
-    def shield(
-        self,
-        chain: str,
-        from_public_address: str,
-        to_wallet_id: str,
-        token_address: str,
-        amount: str
-    ) -> Dict[str, Any]:
-        """Shield tokens (public → private)."""
-        payload = {
-            "chain": chain,
-            "fromPublicAddress": from_public_address,
-            "toWalletId": to_wallet_id,
-            "tokenAddress": token_address,
-            "amount": amount,
+            "signingMnemonic": signing_mnemonic,
         }
         return self._request("POST", "/transfer/shield", payload, timeout=self.LONG_TIMEOUT)
 
@@ -221,19 +223,91 @@ class RailgunSidecar:
         self,
         chain: str,
         from_wallet_id: str,
-        to_public_address: str,
+        to_address: str,
         token_address: str,
-        amount: str
+        amount: str,
+        encryption_key: str,
+        signing_mnemonic: str
     ) -> Dict[str, Any]:
-        """Unshield tokens (private → public)."""
+        """Unshield tokens (private → public).
+
+        Args:
+            chain: ColdStack chain name
+            from_wallet_id: Railgun wallet ID of the shielded wallet
+            to_address: Public destination address
+            token_address: ERC-20 contract address
+            amount: Amount in base units (string)
+            encryption_key: Wallet encryption key (from load_wallet)
+            signing_mnemonic: BIP39 mnemonic of the public wallet (signs + receives)
+        """
         payload = {
             "chain": chain,
             "fromWalletId": from_wallet_id,
-            "toPublicAddress": to_public_address,
+            "toAddress": to_address,
             "tokenAddress": token_address,
             "amount": amount,
+            "encryptionKey": encryption_key,
+            "signingMnemonic": signing_mnemonic,
         }
         return self._request("POST", "/transfer/unshield", payload, timeout=self.LONG_TIMEOUT)
+
+    def shielded_transfer(
+        self,
+        chain: str,
+        from_wallet_id: str,
+        to_address: str,
+        token_address: str,
+        amount: str,
+        encryption_key: str,
+        signing_mnemonic: str,
+        memo_text: Optional[str] = None,
+        show_sender: bool = True
+    ) -> Dict[str, Any]:
+        """Execute a 0zk→0zk private transfer.
+
+        Args:
+            chain: ColdStack chain name
+            from_wallet_id: Railgun wallet ID of the sending shielded wallet
+            to_address: 0zk destination address
+            token_address: ERC-20 contract address
+            amount: Amount in base units (string)
+            encryption_key: Wallet encryption key
+            signing_mnemonic: BIP39 mnemonic of the public wallet that pays gas
+            memo_text: Optional encrypted memo
+            show_sender: If True, recipient can see the sender's 0zk address
+        """
+        payload = {
+            "chain": chain,
+            "fromWalletId": from_wallet_id,
+            "toAddress": to_address,
+            "tokenAddress": token_address,
+            "amount": amount,
+            "encryptionKey": encryption_key,
+            "signingMnemonic": signing_mnemonic,
+            "showSenderAddressToRecipient": show_sender,
+        }
+        if memo_text:
+            payload["memoText"] = memo_text
+        return self._request("POST", "/transfer/shielded", payload, timeout=self.LONG_TIMEOUT)
+
+    def get_token_info(self, chain: str, token_address: str) -> Dict[str, Any]:
+        """Fetch ERC-20 token info (symbol, decimals) from the chain.
+
+        Args:
+            chain: ColdStack chain name
+            token_address: ERC-20 contract address
+
+        Returns:
+            Dict with keys: status, symbol, decimals (symbol/decimals may be null)
+        """
+        url = f"{self.base_url}/transfer/token-info?chain={chain}&tokenAddress={token_address}"
+        req = urllib.request.Request(url, method="GET",
+                                      headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.DEFAULT_TIMEOUT) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
 
     # ─── POI API ───
 

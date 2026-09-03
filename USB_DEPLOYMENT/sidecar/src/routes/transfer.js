@@ -194,23 +194,8 @@ router.post('/unshield', async (req, res) => {
         const wallet = createSigningWallet(signingMnemonic, networkName);
         const sendWithPublicWallet = true;
 
-        // ─── Native ETH path: unshield wrapped token, then auto-unwrap ───
-        let effectiveTokenAddress = tokenAddress;
-        let unwrappedInfo = null;
-        let unwrapTxHash = null;
-
-        if (tokenAddress.toUpperCase() === "ETH") {
-            const wrapped = WRAPPED_NATIVE[req.body.chain];
-            if (!wrapped) {
-                return res.status(400).json({ status: 'error', error: `Native ETH unshield not supported on chain "${req.body.chain}"` });
-            }
-            console.log(`[unshield] Native ETH requested → unshielding ${wrapped.symbol} (${wrapped.address}), then auto-unwrap...`);
-            effectiveTokenAddress = wrapped.address;
-            unwrappedInfo = wrapped;
-        }
-
         const erc20AmountRecipients = [
-            serializeERC20Transfer(effectiveTokenAddress, BigInt(amount), toAddress),
+            serializeERC20Transfer(tokenAddress, BigInt(amount), toAddress),
         ];
 
         console.log('[unshield] Step 1: Estimating gas...');
@@ -271,39 +256,16 @@ router.post('/unshield', async (req, res) => {
         await tx.wait();
         console.log(`[unshield] TX confirmed: ${tx.hash}`);
 
-        // ─── Auto-unwrap: convert WETH back to native ETH ───
-        if (unwrappedInfo) {
-            console.log(`[unshield] Step 6: Unwrapping ${unwrappedInfo.symbol} → native ETH...`);
-            // WETH withdraw: selector 0x2e1a7d4d + uint256 amount (32-byte, left-padded)
-            const amountPadded = BigInt(amount).toString(16).padStart(64, '0');
-            const withdrawData = '0x2e1a7d4d' + amountPadded;
-            const unwrapTx = await wallet.sendTransaction({
-                to: unwrappedInfo.address,
-                data: withdrawData,
-            });
-            console.log(`[unshield] Unwrap TX submitted: ${unwrapTx.hash}`);
-            await unwrapTx.wait();
-            console.log(`[unshield] Unwrap TX confirmed: ${unwrapTx.hash}`);
-            unwrapTxHash = unwrapTx.hash;
-        }
-
-        const response = {
+        res.json({
             status: 'ok',
             txHash: tx.hash,
             chain: req.body.chain,
             fromWalletId,
-            tokenAddress: effectiveTokenAddress,
+            tokenAddress,
             amount,
             toAddress,
             gasEstimate: gasEstimate.toString(),
-        };
-        if (unwrappedInfo) {
-            response.unwrapped = true;
-            response.wrappedToken = unwrappedInfo.symbol;
-            response.unwrapTxHash = unwrapTxHash;
-            response.note = "Unshielded wrapped token, then auto-unwrapped to native ETH. Two transactions.";
-        }
-        res.json(response);
+        });
 
     } catch (err) {
         console.error('[unshield] Failed:', err.message);

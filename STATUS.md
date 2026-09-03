@@ -1,13 +1,64 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.1 (Orca Token-2022 Close Position Fix)
-**Last Updated:** 2026-08-31
-
+**Current Version:** v5.3.2 (Railgun Transactions + RPC Endpoint Refresh + Unshield-to-Native)
+**Last Updated:** 2026-09-03
 
 ---
 
-## v5.3.1 - Orca Token-2022 Close Position Fix (2026-08-31)
+## v5.3.2 - Railgun Transactions (September 2026)
+
+### Summary
+v5.3.2 enables full Railgun transactions (shield, unshield, private transfer) with a complete round-trip for native ETH. Critical fixes for a show-stopping `show_mnemonic` crash, dead RPC endpoints, and a 6-chain Railgun overclaim (SDK 7.6.1 supports only 4 chains).
+
+### Fixed
+- **`show_mnemonic` crash** — 4 call sites used `self.gui.show_mnemonic()` (doesn't exist on `ColdStackGUI`); fixed to `self.gui.key_manager.show_mnemonic()` — every Railgun transaction path was silently crashing before showing any message
+- **RPC endpoint refresh** — replaced dead/gated public RPC endpoints (llamarpc, ankr, polygon-rpc) with working public ones (`publicnode.com`, `drpc.org`); Ethereum and Polygon Railgun providers now load
+- **Engine init toString crash** — `SUPPORTED_RAILGUN_NETWORKS` included undefined `Base`/`Optimism` entries (SDK 7.6.1); removed both, engine init no longer crashes on success
+- **Chain reality fix** — Railgun trimmed to 4 chains (Ethereum, Arbitrum, BSC, Polygon); Base/Optimism commented out pending SDK upgrade (wallet>10.4.0 / shared-models>7.6.1)
+
+### New Features
+- **Railgun Shield (public → private)** — dialog wraps native ETH (deposit → WETH) then shields via Railgun proxy; supports both native ETH and standard ERC-20s
+- **Railgun Unshield-to-Native (private → native ETH)** — chains unshield → auto-withdraw (WETH → ETH) in one flow; plain WETH unshield unchanged
+- **Railgun Private Transfer (0zk → 0zk)** — encrypted memo, show-sender toggle, full confirmation summary with human-readable amount + base-unit verification
+- **Railgun provider status display** — per-chain ✓/✗ with error text; "Reload Providers" button retries failed chains without engine restart
+- **Token info endpoint** (`GET /transfer/token-info`) — symbol + decimals for any ERC-20; native ETH returns wrapped-token info
+- **Balance labels** — known wrapped-native tokens (WETH/WBNB/WMATIC) display by symbol instead of truncated address
+- **Wrapped-native addresses** — canonical WETH/WBNB/WMATIC for Ethereum, Arbitrum, BSC, Polygon; verified on-chain
+
+### v5.3.2 Bundled Work (from previous uncommitted prompts)
+- **RPC endpoint refresh** (`rpc_endpoints.json`, `balance_engine.py`, `rpc_config.py`) — all 5 EVM chain defaults replaced with verified live endpoints
+- **Per-mint Orca token program fix** — closePosition ATA creation uses per-mint `token_prog_a`/`token_prog_b` (position NFT vs pool tokens)
+- **Railgun closure bug fixes** — error notification lambda capture (`{e}` → `msg`) prevents silent `NameError` crashes on all 4 Railgun error paths
+- **Add Private Key scroll + custom mnemonic derive** — dialog scrolls when content overflows; custom mnemonic derive stores key in `custom_derived_meta` instead of reading disabled entry
+
+### Files Added
+- `src/railgun_tx_dialogs.py` — Shield/Unshield/Private Transfer dialogs (native ETH support, threaded submit, copyable results)
+- `src/ed25519_utils.py` — shared Ed25519 math primitives, base58, SLIP-0010 derivation
+
+### Files Changed
+- `src/gui_main_v5.py` — VERSION bump to 5.3.2
+- `src/railgun_tab.py` — 4 show_mnemonic fixes; chain lists to 4; balance labels; per-chain provider status; Reload Providers button; hardcoded 6-chain text fixed
+- `src/railgun_tx_dialogs.py` — RAILGUN_CHAINS to 4; ETH as valid token in ShieldDialog; UnshieldDialog native unwrap checkbox + 2-tx status
+- `src/railgun_bridge.py` — transfer methods rewritten to match sidecar contract; reload_provider(); LONG_TIMEOUT for proofs
+- `sidecar/src/routes/engine.js` — `POST /engine/load-provider` (single-chain provider retry); init skips unknown chains gracefully
+- `sidecar/src/routes/transfer.js` — native ETH shield (wrap + shield); unshield-to-native (unshield + auto-unwrap); token-info native support
+- `sidecar/src/networks.js` — trimmed to 4 chains; WRAPPED_NATIVE map with 4 live entries
+- `src/balance_engine.py` + `src/rpc_config.py` + `rpc_endpoints.json` — endpoint refresh
+- `build_gui_v5.py` — railgun_tx_dialogs hidden-import; launch banner v5.3.2
+- `README.md` — latest-release link
+- `STATUS.md` — this entry
+- `AGENTS.md` — version refs
+
+### Verification
+- `python -m py_compile` passes on all modified files
+- Solana test mnemonic produces `HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk` ✅
+- Engine init no longer crashes on Base/Optimism entries
+- Sidecar endpoints verified: `/transfer/token-info?chain=arbitrum&tokenAddress=ETH` returns `{native:true, symbol:"WETH", decimals:18}`
+- EXE builds as Windows PE32+ (156.32 MB)
+- Railgun live test: shield ETH on Arbitrum → confirm Spendable; private transfer → unshield to native ETH
+
+---
 
 ### Summary
 Hotfix for Orca Whirlpool close position. Positions opened via Orca's current UI mint Token-2022 position NFTs (with metadata extension); the legacy `closePosition` instruction types `position_mint` as SPL Token-only and rejects them with `AccountOwnedByWrongProgram` (3007). The Orca writer now selects the dedicated `closePositionWithTokenExtensions` instruction when the position NFT belongs to Token-2022 — identical account layout, Token-2022 token program required; the close burns the NFT and closes both the token account and the mint account (rent reclaimed).

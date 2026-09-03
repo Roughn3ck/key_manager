@@ -16,6 +16,15 @@ import customtkinter as ctk
 
 # Import the Python bridge client
 from railgun_bridge import RailgunSidecar
+from railgun_tx_dialogs import ShieldDialog, UnshieldDialog, TransferDialog
+
+# Keep in sync with sidecar/src/networks.js WRAPPED_NATIVE (SDK 7.6.1 — 4 chains)
+WRAPPED_NATIVE_BY_CHAIN = {
+    "ethereum": ("WETH", "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2"),
+    "arbitrum": ("WETH", "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1"),
+    "bsc":      ("WBNB", "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c"),
+    "polygon":  ("WMATIC", "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270"),
+}
 
 
 class RailgunTab:
@@ -80,6 +89,18 @@ class RailgunTab:
         )
         self._widgets["wallet_status"].pack(side="left")
 
+        # ─── Provider status line (per-chain provider health) ───
+        provider_row = ctk.CTkFrame(status_frame, fg_color="transparent")
+        provider_row.pack(fill="x", padx=15, pady=(0, 10))
+
+        self._widgets["provider_status"] = ctk.CTkLabel(
+            provider_row,
+            text="Providers: —",
+            font=ctk.CTkFont(size=11),
+            text_color="#888888"
+        )
+        self._widgets["provider_status"].pack(anchor="w")
+
         # Action buttons row
         button_row = ctk.CTkFrame(status_frame, fg_color="transparent")
         button_row.pack(fill="x", padx=15, pady=(0, 10))
@@ -119,7 +140,18 @@ class RailgunTab:
             state="disabled",
             command=self._on_refresh_status
         )
-        self._widgets["btn_refresh_status"].pack(side="left")
+        self._widgets["btn_refresh_status"].pack(side="left", padx=(0, 10))
+
+        self._widgets["btn_reload_providers"] = ctk.CTkButton(
+            button_row,
+            text="Reload Providers",
+            width=140,
+            state="disabled",
+            fg_color="#FF9800",
+            hover_color="#F57C00",
+            command=self._on_reload_providers,
+        )
+        self._widgets["btn_reload_providers"].pack(side="left")
 
         # ─── Section 2: Wallet Loading (from vault accounts) ───
         wallet_frame = ctk.CTkFrame(container, corner_radius=8)
@@ -325,7 +357,8 @@ class RailgunTab:
                     else:
                         self.gui.root.after(0, lambda: self.gui.show_notification("Sidecar failed to start", error=True))
                 except Exception as e:
-                    self.gui.root.after(0, lambda: self.gui.show_notification(f"Sidecar error: {e}", error=True))
+                    msg = f"Sidecar error: {e}"
+                    self.gui.root.after(0, lambda: self.gui.show_notification(msg, error=True))
 
             threading.Thread(target=_start, daemon=True).start()
         except Exception as e:
@@ -354,6 +387,7 @@ class RailgunTab:
             self._widgets["btn_stop_sidecar"].configure(state="normal")
             self._widgets["btn_init_engine"].configure(state="normal")
             self._widgets["btn_refresh_status"].configure(state="normal")
+            self._widgets["btn_reload_providers"].configure(state="normal")
         else:
             self._widgets["sidecar_status"].configure(
                 text="Sidecar: Not running", text_color="#888888"
@@ -364,10 +398,12 @@ class RailgunTab:
             self._widgets["wallet_status"].configure(
                 text="Wallet: Not loaded", text_color="#888888"
             )
+            self._widgets["provider_status"].configure(text="Providers: —")
             self._widgets["btn_start_sidecar"].configure(state="normal")
             self._widgets["btn_stop_sidecar"].configure(state="disabled")
             self._widgets["btn_init_engine"].configure(state="disabled")
             self._widgets["btn_refresh_status"].configure(state="disabled")
+            self._widgets["btn_reload_providers"].configure(state="disabled")
             self._widgets["btn_load_wallet"].configure(state="disabled")
             self._widgets["btn_refresh_balances"].configure(state="disabled")
             self._widgets["btn_shield"].configure(state="disabled")
@@ -392,7 +428,8 @@ class RailgunTab:
                 result = self.sidecar.init_engine(rpc_config)
                 self.gui.root.after(0, lambda: self._on_engine_init_done(result))
             except Exception as e:
-                self.gui.root.after(0, lambda: self.gui.show_notification(f"Engine init failed: {e}", error=True))
+                msg = f"Engine init failed: {e}"
+                self.gui.root.after(0, lambda: self.gui.show_notification(msg, error=True))
 
         self.gui.show_notification("Initializing Railgun engine (may take a moment)...")
         threading.Thread(target=_init, daemon=True).start()
@@ -437,7 +474,10 @@ class RailgunTab:
         account_name = self._parse_account_selection(self._selected_account)
 
         # Get the mnemonic from the vault
-        mnemonic = self.gui.show_mnemonic(account_name)
+        if not self.gui.key_manager:
+            self.gui.show_notification("Vault not unlocked", error=True)
+            return
+        mnemonic = self.gui.key_manager.show_mnemonic(account_name)
         if not mnemonic:
             self.gui.show_notification(f"No mnemonic found for account '{account_name}'", error=True)
             return
@@ -453,7 +493,8 @@ class RailgunTab:
                 self._encryption_key = encryption_key
                 self.gui.root.after(0, lambda: self._on_wallet_loaded(result))
             except Exception as e:
-                self.gui.root.after(0, lambda: self.gui.show_notification(f"Wallet load failed: {e}", error=True))
+                msg = f"Wallet load failed: {e}"
+                self.gui.root.after(0, lambda: self.gui.show_notification(msg, error=True))
 
         self.gui.show_notification(f"Loading shielded wallet from '{account_name}'...")
         threading.Thread(target=_load, daemon=True).start()
@@ -490,7 +531,7 @@ class RailgunTab:
             self.gui.show_notification("No wallet loaded", error=True)
             return
 
-        chains = ["ethereum", "arbitrum", "bsc", "polygon", "base", "optimism"]
+        chains = ["ethereum", "arbitrum", "bsc", "polygon"]
 
         def _refresh():
             for chain in chains:
@@ -506,7 +547,8 @@ class RailgunTab:
                 status = self.sidecar.get_balance_status()
                 self.gui.root.after(0, lambda: self._render_balances(status))
             except Exception as e:
-                self.gui.root.after(0, lambda: self.gui.show_notification(f"Balance status failed: {e}", error=True))
+                msg = f"Balance status failed: {e}"
+                self.gui.root.after(0, lambda: self.gui.show_notification(msg, error=True))
 
         self.gui.show_notification("Scanning shielded balances...")
         threading.Thread(target=_refresh, daemon=True).start()
@@ -557,11 +599,19 @@ class RailgunTab:
                 ).pack(fill="x", padx=10)
 
                 for erc20 in erc20_amounts:
-                    token_addr = erc20.get("tokenAddress", "")[:10] + "..."
+                    token_addr = erc20.get("tokenAddress", "")
                     amount = erc20.get("amount", "0")
+                    # Label known wrapped-native tokens with their symbol
+                    token_label = token_addr
+                    for ch, (sym, wrapped_addr) in WRAPPED_NATIVE_BY_CHAIN.items():
+                        if token_addr.lower() == wrapped_addr.lower():
+                            token_label = f"{sym} · {token_addr[:6]}…{token_addr[-4:]}"
+                            break
+                    else:
+                        token_label = f"{token_addr[:10]}..."
                     ctk.CTkLabel(
                         chain_frame,
-                        text=f"    {token_addr}: {amount}",
+                        text=f"    {token_label}: {amount}",
                         font=ctk.CTkFont(size=11),
                         text_color=color,
                         anchor="w"
@@ -610,19 +660,129 @@ class RailgunTab:
                 text="Wallet: Not loaded", text_color="#888888"
             )
 
-    # ─── Transaction Stubs ───
+        # Per-chain provider status line
+        providers = status.get("providers", {})
+        if providers:
+            parts = []
+            for chain, info in sorted(providers.items()):
+                if info.get("error"):
+                    parts.append(f"{chain} ✗ {info['error'][:40]}")
+                else:
+                    parts.append(f"{chain} ✓")
+            self._widgets["provider_status"].configure(
+                text="Providers: " + " · ".join(parts)
+            )
+        else:
+            self._widgets["provider_status"].configure(text="Providers: —")
+
+    # ─── Provider Retry ───
+
+    def _on_reload_providers(self):
+        """Retry failed (or all) provider connections without engine restart."""
+        if not self.sidecar or not self._sidecar_running:
+            self.gui.show_notification("Sidecar not running", error=True)
+            return
+
+        # Determine which chains need reloading
+        try:
+            status = self.sidecar.get_engine_status()
+            providers = status.get("providers", {})
+            failed = [chain for chain, info in providers.items() if info.get("error")]
+        except Exception:
+            failed = []
+
+        # If nothing marked failed, reload all 4
+        if not failed:
+            chains = ["ethereum", "arbitrum", "bsc", "polygon"]
+            self.gui.show_notification(f"No failed providers — reloading all 4 chains...")
+        else:
+            chains = failed
+            self.gui.show_notification(f"Retrying failed providers: {', '.join(chains)}")
+
+        self._widgets["provider_status"].configure(text="Providers: reloading…")
+        self._widgets["btn_reload_providers"].configure(state="disabled")
+
+        def _retry():
+            results = []
+            for chain in chains:
+                try:
+                    result = self.sidecar.reload_provider(chain)
+                    if result.get("status") == "ok":
+                        results.append(f"{chain} ✓")
+                    else:
+                        results.append(f"{chain} ✗ {result.get('error', '?')[:40]}")
+                except Exception as e:
+                    results.append(f"{chain} ✗ {str(e)[:40]}")
+            summary = " · ".join(results)
+            self.gui.root.after(0, lambda s=summary: self._widgets["provider_status"].configure(
+                text=f"Providers: {s}"))
+            self.gui.root.after(0, lambda: self._widgets["btn_reload_providers"].configure(state="normal"))
+            self.gui.root.after(0, self._on_refresh_status)
+
+        threading.Thread(target=_retry, daemon=True).start()
+
+    # ─── Transaction Dialogs ───
 
     def _on_shield(self):
         """Open shield dialog — public → private."""
-        self.gui.show_notification("Shield dialog — coming soon")
+        if not self._validate_tx_preconditions():
+            return
+        account_name = self._parse_account_selection(self._selected_account)
+        dialog = ShieldDialog(
+            gui=self.gui,
+            sidecar=self.sidecar,
+            wallet_id=self._railgun_wallet_id,
+            railgun_address=self._railgun_address,
+            encryption_key=self._encryption_key,
+            account_name=account_name,
+            on_success=lambda r: self._on_refresh_balances(),
+        )
+        dialog.build_ui()
 
     def _on_unshield(self):
         """Open unshield dialog — private → public."""
-        self.gui.show_notification("Unshield dialog — coming soon")
+        if not self._validate_tx_preconditions():
+            return
+        account_name = self._parse_account_selection(self._selected_account)
+        dialog = UnshieldDialog(
+            gui=self.gui,
+            sidecar=self.sidecar,
+            wallet_id=self._railgun_wallet_id,
+            railgun_address=self._railgun_address,
+            encryption_key=self._encryption_key,
+            account_name=account_name,
+            on_success=lambda r: self._on_refresh_balances(),
+        )
+        dialog.build_ui()
 
     def _on_transfer(self):
         """Open private transfer dialog — 0zk → 0zk."""
-        self.gui.show_notification("Transfer dialog — coming soon")
+        if not self._validate_tx_preconditions():
+            return
+        account_name = self._parse_account_selection(self._selected_account)
+        dialog = TransferDialog(
+            gui=self.gui,
+            sidecar=self.sidecar,
+            wallet_id=self._railgun_wallet_id,
+            railgun_address=self._railgun_address,
+            encryption_key=self._encryption_key,
+            account_name=account_name,
+            on_success=lambda r: self._on_refresh_balances(),
+        )
+        dialog.build_ui()
+
+    def _validate_tx_preconditions(self) -> bool:
+        """Validate that sidecar/wallet/account are ready for a transaction."""
+        if not self.sidecar or not self._sidecar_running:
+            self.gui.show_notification("Sidecar not running — start it first", error=True)
+            return False
+        if not self._railgun_wallet_id:
+            self.gui.show_notification("No shielded wallet loaded — load a wallet first", error=True)
+            return False
+        if not self._selected_account or " > " not in self._selected_account:
+            self.gui.show_notification("No vault account selected", error=True)
+            return False
+        return True
 
     # ─── Cleanup ───
 

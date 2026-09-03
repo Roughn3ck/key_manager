@@ -10,10 +10,8 @@ export const COLDSTACK_TO_RAILGUN = {
     "arbitrum": NetworkName.Arbitrum,
     "bsc": NetworkName.BNBChain,
     "polygon": NetworkName.Polygon,
-    // SDK 7.6.1 has no NetworkName.Base/Optimism — restore on SDK upgrade
-    // (wallet >10.4.0 / shared-models >7.6.1)
-    // "base": NetworkName.Base,
-    // "optimism": NetworkName.Optimism,
+    "base": NetworkName.Base,
+    "optimism": NetworkName.Optimism,
 };
 
 /**
@@ -38,9 +36,8 @@ export const WRAPPED_NATIVE = {
     "arbitrum":  { address: "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1", symbol: "WETH" },
     "bsc":       { address: "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c", symbol: "WBNB" },
     "polygon":   { address: "0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270", symbol: "WMATIC" },
-    // SDK 7.6.1 — no Base/Optimism support; keep addresses for future restore
-    // "base":    { address: "0x4200000000000000000000000000000000000006", symbol: "WETH" },
-    // "optimism": { address: "0x4200000000000000000000000000000000000006", symbol: "WETH" },
+    "base":      { address: "0x4200000000000000000000000000000000000006", symbol: "WETH" },
+    "optimism":  { address: "0x4200000000000000000000000000000000000006", symbol: "WETH" },
 };
 
 /**

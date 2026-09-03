@@ -15,11 +15,11 @@ from threading import Thread
 # Default public RPC endpoints (no API keys needed) — legacy flat dict for backward compat.
 # v4.2 uses DEFAULT_RPC_CONFIG (below) which includes fallback URLs and auth references.
 DEFAULT_RPC_ENDPOINTS = {
-    "ethereum": "https://eth.llamarpc.com",
+    "ethereum": "https://ethereum-rpc.publicnode.com",
     "arbitrum": "https://arb1.arbitrum.io/rpc",
     "base": "https://mainnet.base.org",
     "bsc": "https://bsc-dataseed.binance.org",
-    "polygon": "https://polygon-rpc.com",
+    "polygon": "https://polygon-bor-rpc.publicnode.com",
     "optimism": "https://mainnet.optimism.io",
     "hyperliquid": "https://rpc.hyperliquid.xyz/evm",
 }
@@ -27,12 +27,12 @@ DEFAULT_RPC_ENDPOINTS = {
 # v4.2: Full endpoint config with url, auth, and fallback per chain.
 # This is the internal default used when no rpc_config is provided.
 DEFAULT_RPC_CONFIG: Dict[str, Dict[str, Any]] = {
-    "ethereum": {"url": "https://eth.llamarpc.com", "auth": None, "fallback": "https://rpc.ankr.com/eth"},
-    "arbitrum": {"url": "https://arb1.arbitrum.io/rpc", "auth": None, "fallback": "https://rpc.ankr.com/arbitrum"},
-    "base": {"url": "https://mainnet.base.org", "auth": None, "fallback": "https://base.llamarpc.com"},
+    "ethereum": {"url": "https://ethereum-rpc.publicnode.com", "auth": None, "fallback": "https://eth.drpc.org"},
+    "arbitrum": {"url": "https://arb1.arbitrum.io/rpc", "auth": None, "fallback": "https://arbitrum-one-rpc.publicnode.com"},
+    "base": {"url": "https://mainnet.base.org", "auth": None, "fallback": "https://base-rpc.publicnode.com"},
     "bsc": {"url": "https://bsc-dataseed.binance.org", "auth": None, "fallback": "https://bsc-dataseed1.binance.org"},
-    "polygon": {"url": "https://polygon-rpc.com", "auth": None, "fallback": "https://rpc.ankr.com/polygon"},
-    "optimism": {"url": "https://mainnet.optimism.io", "auth": None, "fallback": "https://rpc.ankr.com/optimism"},
+    "polygon": {"url": "https://polygon-bor-rpc.publicnode.com", "auth": None, "fallback": "https://polygon.drpc.org"},
+    "optimism": {"url": "https://mainnet.optimism.io", "auth": None, "fallback": "https://optimism-rpc.publicnode.com"},
     "hyperliquid_evm": {"url": "https://rpc.hyperliquid.xyz/evm", "auth": None, "fallback": None},
     "bitcoin": {"url": "https://blockstream.info/api/address/{address}", "auth": None, "fallback": "https://mempool.space/api/address/{address}"},
     "solana": {"url": "https://api.mainnet-beta.solana.com", "auth": "helius", "fallback": "https://solana-api.projectserum.com"},

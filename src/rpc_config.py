@@ -21,34 +21,34 @@ from typing import Dict, Optional, Any
 # This mirrors the content of rpc_endpoints.json exactly.
 DEFAULT_ENDPOINTS: Dict[str, Dict[str, Any]] = {
     "ethereum": {
-        "url": "https://eth.llamarpc.com",
+        "url": "https://ethereum-rpc.publicnode.com",
         "auth": None,
-        "fallback": "https://rpc.ankr.com/eth",
+        "fallback": "https://eth.drpc.org",
     },
     "arbitrum": {
         "url": "https://arb1.arbitrum.io/rpc",
         "auth": None,
-        "fallback": "https://rpc.ankr.com/arbitrum",
+        "fallback": "https://arbitrum-one-rpc.publicnode.com",
     },
     "base": {
         "url": "https://mainnet.base.org",
         "auth": None,
-        "fallback": "https://base.llamarpc.com",
+        "fallback": "https://base-rpc.publicnode.com",
     },
     "bsc": {
         "url": "https://bsc-dataseed.binance.org/",
         "auth": None,
-        "fallback": "https://rpc.ankr.com/bsc",
+        "fallback": "https://bsc-dataseed1.binance.org",
     },
     "polygon": {
-        "url": "https://polygon-rpc.com",
+        "url": "https://polygon-bor-rpc.publicnode.com",
         "auth": None,
-        "fallback": "https://rpc.ankr.com/polygon",
+        "fallback": "https://polygon.drpc.org",
     },
     "optimism": {
         "url": "https://mainnet.optimism.io",
         "auth": None,
-        "fallback": "https://rpc.ankr.com/optimism",
+        "fallback": "https://optimism-rpc.publicnode.com",
     },
     "hyperliquid_evm": {
         "url": "https://rpc.hyperliquid.xyz/evm",
