@@ -4,7 +4,7 @@
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production-success)]()
 
-**Latest release: [v5.3.2 — Railgun Transactions + Native ETH Shield/Unshield + RPC Endpoint Refresh](https://github.com/Roughn3ck/key_manager/releases/tag/v5.3.2)**
+**Latest release: [v5.3.3 — Railgun Sidecar Syntax Hotfix](https://github.com/Roughn3ck/key_manager/releases/tag/v5.3.3)**
 
 ---
 

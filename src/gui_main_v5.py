@@ -2,11 +2,11 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.3.2 (September 2026) - ColdTrack + Orca Whirlpool + Railgun + Aerodrome + BSC V3
+Version: v5.3.3 (September 2026) - ColdTrack + Orca Whirlpool + Railgun + Aerodrome + BSC V3
 """
 
 # Single source of truth for version — update this when bumping versions
-VERSION = "5.3.2"
+VERSION = "5.3.3"
 import sys
 import os
 

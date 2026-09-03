@@ -1,8 +1,21 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.2 (Railgun Transactions + RPC Endpoint Refresh + Unshield-to-Native)
+**Current Version:** v5.3.3 (Railgun Sidecar Syntax Hotfix)
 **Last Updated:** 2026-09-03
+
+---
+
+## v5.3.3 - Railgun Sidecar Syntax Hotfix (2026-09-03)
+
+### Summary
+Hotfix for a broken `sidecar/src/routes/engine.js` shipped in v5.3.2. The new `POST /engine/load-provider` route was inserted without the preceding `/engine/status` route's closing `});`, making the file syntactically invalid. Sidecar crashed on cold start with a SyntaxError that the GUI never surfaced.
+
+### Fixed
+- **`engine.js` syntax error** — restored the missing `});` closing the `/engine/status` route handler. `node --check` now passes on all 14 sidecar JS files.
+
+### Process
+- Added pre-ship sidecar gate to AGENTS.md: `node --check` on every `sidecar/src/**/*.js`, plus cold-start boot smoke test (`node src/server.js` → health OK ≤30s). Sidecar ships only if it boots cleanly.
 
 ---
 

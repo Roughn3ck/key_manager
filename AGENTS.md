@@ -4,9 +4,9 @@ Forge's project rules for working on ColdStack. Read this file at the start of e
 
 ## What This Is
 
-ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.3.2.
+ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.3.3.
 
-Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.3.2.
+Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder — Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.3.3.
 
 ## Commands
 
@@ -47,6 +47,11 @@ python test_derivation.py               # BIP39 derivation parity across chains
 - Only after the final prompt completes AND the build succeeds
 - Never push broken builds
 - After pushing, verify the repo is clean: `git status`
+
+**Pre-ship verification (sidecar):**
+- Run `node --check sidecar/src/**/*.js` — every sidecar JS file must pass before shipping
+- Boot smoke test: `node src/server.js` from the sidecar dir, poll `http://127.0.0.1:8765/health` until `{"status":"ok"}` (≤30s), then kill
+- The sidecar only ships if it boots cleanly from a cold start
 
 **When NOT to push to git:**
 - Intermediate prompts (each will say "do NOT push")
@@ -136,10 +141,10 @@ ColdTrack is the financial ledger module — the monetization layer of ColdStack
 - Tax-ready schema (cost basis, realized gains, holding periods)
 
 ### What It Does NOT Do (Yet)
-- Transaction import from on-chain (Phase 2 — v5.3.2)
-- LP position tracking with P&L (Phase 3 — v5.3.3)
-- Holdings & cost basis (Phase 4 — v5.3.4)
-- Tax report generation (Phase 5 — v5.3.5)
+- Transaction import from on-chain (Phase 2 — v5.3.3)
+- LP position tracking with P&L (Phase 3 — v5.3.4)
+- Holdings & cost basis (Phase 4 — v5.3.5)
+- Tax report generation (Phase 5 — v5.3.6)
 
 ### Module Layout
 - `src/coldtrack/db.py` — SQLite schema (9 tables), connection management, CRUD

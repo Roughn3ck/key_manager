@@ -211,6 +211,8 @@ router.get('/status', async (req, res) => {
         providers,
         ppoiNodes: sidecarState.ppoiNodes,
     });
+});
+
 // ─── POST /engine/load-provider ───
 // Retry loading a single chain's provider without full engine restart.
 // Body: { chain: "ethereum" | "arbitrum" | "bsc" | "polygon" | "base" | "optimism" }
