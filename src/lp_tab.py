@@ -866,6 +866,30 @@ class LPTab:
             # No saved pools — do full scan immediately (existing behavior).
             self._lp_do_full_scan(address)
 
+    def _lp_saved_entry_is_closed(self, pos, venue: str) -> bool:
+        """Return True if a fetched saved-pool position is closed.
+
+        v5.3.4: the saved-pool fast path bypasses lp_engine's include_closed
+        filter, so closed bookmarks resurrect on every scan. Mirror the
+        main-scan rules here:
+          - EVM venues (HyperEVM/BSC/Base): closed when liquidity == 0.
+          - Orca: closed when liquidity == 0 AND no uncollected fees
+            (mirrors OrcaAdapter.fetch_all_positions).
+
+        Only used when "Include closed" is UNCHECKED.
+        """
+        raw = getattr(pos, "raw_data", None)
+        if not raw or not isinstance(raw, dict):
+            return False
+        if raw.get("liquidity", 0) != 0:
+            return False
+        if venue in ("Orca", "orca"):
+            # Orca closes only when fees are also zero (collect first).
+            fees_earned = getattr(pos, "fees_earned", None)
+            if fees_earned:
+                return False
+        return True
+
     def _lp_fetch_saved_only(self, address: str):
         """Fast-path: fetch only saved-pool positions by token ID (threaded).
 
@@ -880,6 +904,11 @@ class LPTab:
             return
 
         adapter = HyperliquidAdapter()
+
+        # v5.3.4: resurrection filter — when "Include closed" is unchecked,
+        # closed saved positions must not reappear on the fast path either.
+        include_closed_var = self._lp_widgets.get("include_closed_var")
+        include_closed = include_closed_var.get() if include_closed_var else False
 
         def _fast_thread():
             positions = []
@@ -900,7 +929,8 @@ class LPTab:
                             tid, self.gui.price_engine, wallet_address=address
                         )
                         if pos and not pos.error:
-                            positions.append(pos)
+                            if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                positions.append(pos)
                     except Exception:
                         pass
                 elif venue in ("Aerodrome", "aerodrome"):
@@ -910,7 +940,8 @@ class LPTab:
                             tid, self.gui.price_engine, wallet_address=address
                         )
                         if pos and not pos.error:
-                            positions.append(pos)
+                            if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                positions.append(pos)
                     except Exception:
                         pass
                 elif venue in ("BSC", "bsc"):
@@ -920,7 +951,8 @@ class LPTab:
                             tid, self.gui.price_engine, wallet_address=address
                         )
                         if pos and not pos.error:
-                            positions.append(pos)
+                            if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                positions.append(pos)
                     except Exception:
                         pass
                 elif venue in ("Orca", "orca"):
@@ -934,7 +966,8 @@ class LPTab:
                             # Attach wallet address for display
                             if address:
                                 pos.wallet_address = address
-                            positions.append(pos)
+                            if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                positions.append(pos)
                     except Exception:
                         pass
             # v5.2.2: Saved Aerodrome pools may be staked in a gauge, and
@@ -1005,7 +1038,8 @@ class LPTab:
                             try:
                                 pos = hype_adapter.fetch_evm_position_by_token_id(tid, self.gui.price_engine)
                                 if pos and not pos.error:
-                                    positions.append(pos)
+                                    if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                        positions.append(pos)
                             except Exception:
                                 pass
                         elif venue in ("Aerodrome", "aerodrome"):
@@ -1018,7 +1052,8 @@ class LPTab:
                                     tid, self.gui.price_engine, wallet_address=address
                                 )
                                 if pos and not pos.error:
-                                    positions.append(pos)
+                                    if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                        positions.append(pos)
                             except Exception:
                                 pass
                         elif venue in ("BSC", "bsc"):
@@ -1030,7 +1065,8 @@ class LPTab:
                                     tid, self.gui.price_engine, wallet_address=address
                                 )
                                 if pos and not pos.error:
-                                    positions.append(pos)
+                                    if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                        positions.append(pos)
                             except Exception:
                                 pass
                         elif venue in ("Orca", "orca"):
@@ -1044,7 +1080,8 @@ class LPTab:
                                     tid, self.gui.price_engine, wallet_address=address
                                 )
                                 if pos and not pos.error:
-                                    positions.append(pos)
+                                    if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                        positions.append(pos)
                             except Exception:
                                 pass
                 # v5.2.2: Aerodrome wallet scan cannot enumerate non-sequential
@@ -1072,6 +1109,7 @@ class LPTab:
                 # directly to Orca and we would double-scan — so only run this extra
                 # pass when the primary input was NOT a Solana address.
                 sol_address = ""
+                orca_skip_note = ""
                 primary_was_solana = (
                     address and not address.startswith("0x")
                 )
@@ -1080,6 +1118,10 @@ class LPTab:
                     account_name = self._lp_get_current_account_name()
                     if account_name:
                         sol_address = self._lp_resolve_account_address(account_name, prefer="solana")
+                        if not sol_address:
+                            # v5.3.4: make the Orca skip explainable instead of
+                            # mysterious — a missing pool should have a reason.
+                            orca_skip_note = " · Orca skipped (no Solana address for account)"
 
                 if sol_address:
                     try:
@@ -1112,7 +1154,7 @@ class LPTab:
                         "4. Enter that number in the Position ID / NFT ID field and click Fetch Position",
                     ))
 
-                self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address))
+                self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address, orca_skip_note))
             except OfflineError:
                 self.gui.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
             except Exception as e:
@@ -1154,10 +1196,40 @@ class LPTab:
             self._lp_do_filtered_full_scan(address, venue_key)
 
     def _lp_do_filtered_full_scan(self, address: str, venue_key: str):
-        """Full scan filtered to a specific venue (threaded)."""
+        """Full scan filtered to a specific venue (threaded).
+
+        v5.3.4: Orca scans resolve the wallet's Solana address — a 0x EVM
+        address passed to OrcaAdapter.fetch_all_positions silently returns
+        zero results. If no Solana address can be resolved, show a visible
+        skip message instead of silent zeros.
+        """
         status = self._lp_widgets.get("status_label")
-        if status:
-            status.configure(text=f"Fetching positions on {venue_key}...")
+
+        # v5.3.4: Orca scan routing — resolve a Solana address first.
+        if venue_key == "orca":
+            from venue_adapters.orca_adapter import _is_solana_address
+            if not _is_solana_address(address or ""):
+                sol_address = ""
+                # Account mode: resolve the account's Solana address
+                account_name = self._lp_get_current_account_name()
+                if account_name:
+                    sol_address = self._lp_resolve_account_address(account_name, prefer="solana")
+                    if sol_address and _is_solana_address(sol_address):
+                        address = sol_address
+                if not (sol_address and _is_solana_address(sol_address)):
+                    if status:
+                        status.configure(
+                            text="Orca scan skipped — no Solana address saved for this account. "
+                                 "Add the wallet's Solana address to the vault, or scan the "
+                                 "Solana address directly in Address mode.")
+                    self.gui.show_notification(
+                        "Orca scan skipped — no Solana address saved for this account. "
+                        "Add the wallet's Solana address to the vault, or scan the "
+                        "Solana address directly in Address mode.", error=True)
+                    return
+        else:
+            if status:
+                status.configure(text=f"Fetching positions on {venue_key}...")
 
         include_closed = self._lp_widgets.get("include_closed_var")
         include_closed = include_closed.get() if include_closed else False
@@ -1187,7 +1259,8 @@ class LPTab:
                             try:
                                 pos = hype_adapter.fetch_evm_position_by_token_id(tid, self.gui.price_engine)
                                 if pos and not pos.error:
-                                    positions.append(pos)
+                                    if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                        positions.append(pos)
                             except Exception:
                                 pass
                         elif venue in ("Aerodrome", "aerodrome"):
@@ -1200,7 +1273,8 @@ class LPTab:
                                     tid, self.gui.price_engine, wallet_address=address
                                 )
                                 if pos and not pos.error:
-                                    positions.append(pos)
+                                    if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                        positions.append(pos)
                             except Exception:
                                 pass
                         elif venue in ("BSC", "bsc"):
@@ -1212,7 +1286,8 @@ class LPTab:
                                     tid, self.gui.price_engine, wallet_address=address
                                 )
                                 if pos and not pos.error:
-                                    positions.append(pos)
+                                    if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                        positions.append(pos)
                             except Exception:
                                 pass
                         elif venue in ("Orca", "orca"):
@@ -1226,7 +1301,8 @@ class LPTab:
                                     tid, self.gui.price_engine, wallet_address=address
                                 )
                                 if pos and not pos.error:
-                                    positions.append(pos)
+                                    if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                        positions.append(pos)
                             except Exception:
                                 pass
                 # v5.2.2: Aerodrome wallet scan cannot enumerate non-sequential
@@ -1440,8 +1516,15 @@ class LPTab:
             pos_entry.insert(0, raw_id)
         self._lp_do_fetch_single()
 
-    def _lp_on_loaded(self, positions, address):
-        """Render fetched LP positions as cards. Keep unfetched saved pools as placeholders."""
+    def _lp_on_loaded(self, positions, address, orca_skip_note: str = ""):
+        """Render fetched LP positions as cards. Keep unfetched saved pools as placeholders.
+
+        Args:
+            positions: Fetched LPPosition objects.
+            address: The wallet address that was scanned.
+            orca_skip_note: Optional suffix explaining an Orca skip (v5.3.4),
+                e.g. " · Orca skipped (no Solana address for account)".
+        """
         scroll = self._lp_widgets.get("scroll")
         status = self._lp_widgets.get("status_label")
         refresh_btn = self._lp_widgets.get("refresh_btn")
@@ -1522,9 +1605,9 @@ class LPTab:
             fetched = len(unique_positions)
             total_saved = len(all_saved)
             if fetched < total_saved:
-                status.configure(text=f"Last check: {fetched}/{total_saved} position(s) — {total_saved - fetched} saved pool(s) failed to fetch")
+                status.configure(text=f"Last check: {fetched}/{total_saved} position(s) — {total_saved - fetched} saved pool(s) failed to fetch{orca_skip_note}")
             else:
-                status.configure(text=f"Last check: {fetched} position(s)")
+                status.configure(text=f"Last check: {fetched} position(s){orca_skip_note}")
         self._lp_update_button_states()
         # v5.1: Update saved-pools counter after rendering live cards
         self._lp_update_saved_pools_count(address)
@@ -2277,6 +2360,93 @@ class LPTab:
         dialog.bind("<Return>", lambda e: _on_select())
         dialog.bind("<Escape>", lambda e: dialog.destroy())
 
+    def _lp_forget_position(self, position, card_frame=None, notify: str = "Pool removed"):
+        """Shared post-close / manual-remove cleanup for an LP position.
+
+        Removes the saved-pool bookmark (if saved), persists the vault,
+        destroys the position card (both the Orca "solana:" and EVM
+        card-key branches), and refreshes the saved-pools count + status.
+
+        Used by the confirmed close flows (v5.3.4) with a close-appropriate
+        message, and keeps the "Remove Pool" button behavior identical by
+        delegating to _lp_remove_pool.
+
+        Args:
+            position: Object with position_id, venue, pair.
+            card_frame: Optional card widget to destroy directly (used by
+                placeholder cards not tracked in position_cards).
+            notify: User-facing notification message.
+        """
+        if not getattr(position, "position_id", ""):
+            return
+        key_manager = getattr(self.gui, "key_manager", None)
+        if key_manager is None:
+            return
+
+        # Resolve (venue, token_id) the same way for Solana and EVM ids.
+        pid = position.position_id
+        if pid.startswith("solana:"):
+            token_id = pid.split(":", 1)[1] if ":" in pid else pid
+            venue = position.venue or "Orca"
+            prefix = "solana"
+        else:
+            try:
+                token_id = int(pid.split(":", 1)[1])
+            except (ValueError, IndexError, AttributeError):
+                self.gui.show_notification("Could not parse token ID", error=True)
+                return
+            venue = position.venue or "HyperEVM"
+            if pid.startswith("bsc:"):
+                prefix = "bsc"
+            elif pid.startswith("base:"):
+                prefix = "base"
+            else:
+                prefix = "hyperevm"
+
+        removed = remove_saved_pool(key_manager.address_db, token_id, venue)
+        if removed and self.gui.current_password:
+            key_manager.save_encrypted_data(self.gui.current_password)
+
+        # Destroy the card: direct frame, or tracked card via the standard
+        # card key f"{venue}:{prefix}:{token_id}".
+        destroyed = False
+        if card_frame is not None:
+            try:
+                card_frame.destroy()
+                destroyed = True
+            except Exception:
+                card_frame = None
+        if not destroyed:
+            card_key = f"{venue}:{prefix}:{token_id}"
+            cards = self._lp_widgets.get("position_cards", {})
+            card = cards.pop(card_key, None)
+            if card:
+                try:
+                    card.destroy()
+                    destroyed = True
+                except Exception:
+                    pass
+        if not destroyed:
+            # Fallback: some cards are keyed by the raw position_id
+            cards = self._lp_widgets.get("position_cards", {})
+            card = cards.pop(pid, None)
+            if card:
+                try:
+                    card.destroy()
+                except Exception:
+                    pass
+
+        self.gui.show_notification(notify)
+        self._lp_update_saved_pools_count("")
+        scroll = self._lp_widgets.get("scroll")
+        if scroll and not scroll.winfo_children():
+            ctk.CTkLabel(scroll, text="No LP positions found",
+                         font=ctk.CTkFont(size=13), text_color=("#555555", "gray60")).pack(pady=20)
+        status = self._lp_widgets.get("status_label")
+        cards = self._lp_widgets.get("position_cards", {})
+        if status:
+            status.configure(text=f"Last check: {len(cards)} position(s)")
+
     def _lp_remove_pool(self, position, card_frame=None):
         """Remove a saved pool from the encrypted vault.
 
@@ -2288,36 +2458,13 @@ class LPTab:
         """
         if not position.position_id:
             return
+        # v5.3.4: shared cleanup helper — same behavior, one implementation.
         if position.position_id.startswith("solana:"):
-            # Orca: token_id is the base58 mint string
             mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
-            venue = position.venue or "Orca"
             pair = position.pair or "Unknown"
-            ok = remove_saved_pool(self.gui.key_manager.address_db, mint, venue)
-            if ok and self.gui.current_password:
-                ok = self.gui.key_manager.save_encrypted_data(self.gui.current_password)
-            if ok:
-                self.gui.show_notification(f"Pool removed: {pair} ({mint[:8]}...)")
-                # Remove the card. The card key for Orca positions is f"{venue}:solana:{mint}".
-                if card_frame:
-                    card_frame.destroy()
-                else:
-                    card_key = f"{venue}:solana:{mint}"
-                    cards = self._lp_widgets.get("position_cards", {})
-                    card_frame = cards.pop(card_key, None)
-                    if card_frame:
-                        card_frame.destroy()
-                self._lp_update_saved_pools_count("")
-                scroll = self._lp_widgets.get("scroll")
-                if scroll and not scroll.winfo_children():
-                    ctk.CTkLabel(scroll, text="No LP positions found",
-                                 font=ctk.CTkFont(size=13), text_color=("#555555", "gray60")).pack(pady=20)
-                status = self._lp_widgets.get("status_label")
-                cards = self._lp_widgets.get("position_cards", {})
-                if status:
-                    status.configure(text=f"Last check: {len(cards)} position(s)")
-            else:
-                self.gui.show_notification("Failed to remove pool", error=True)
+            self._lp_forget_position(
+                position, card_frame=card_frame,
+                notify=f"Pool removed: {pair} ({mint[:8]}...)")
             return
         if not (
             position.position_id.startswith("hyperevm:") or
@@ -2333,41 +2480,9 @@ class LPTab:
             return
         venue = position.venue or "HyperEVM"
         pair = position.pair or "Unknown"
-        ok = remove_saved_pool(self.gui.key_manager.address_db, token_id, venue)
-        if ok:
-            ok = self.gui.key_manager.save_encrypted_data(self.gui.current_password)
-        if ok:
-            self.gui.show_notification(f"Pool removed: {pair} (#{token_id})")
-            # Remove only this pool's card from the scroll frame — do not trigger
-            # a full wallet rescan.
-            entry = self._lp_widgets.get("address_entry")
-            addr = entry.get().strip() if entry else ""
-            if card_frame:
-                card_frame.destroy()
-            else:
-                if position.position_id.startswith("bsc:"):
-                    position_prefix = "bsc"
-                elif position.position_id.startswith("base:"):
-                    position_prefix = "base"
-                else:
-                    position_prefix = "hyperevm"
-                card_key = f"{venue}:{position_prefix}:{token_id}"
-                cards = self._lp_widgets.get("position_cards", {})
-                card_frame = cards.pop(card_key, None)
-                if card_frame:
-                    card_frame.destroy()
-            self._lp_update_saved_pools_count(addr)
-            scroll = self._lp_widgets.get("scroll")
-            status = self._lp_widgets.get("status_label")
-            cards = self._lp_widgets.get("position_cards", {})
-            remaining = len(cards)
-            if scroll and not scroll.winfo_children():
-                ctk.CTkLabel(scroll, text="No LP positions found",
-                             font=ctk.CTkFont(size=13), text_color=("#555555", "gray60")).pack(pady=20)
-            if status:
-                status.configure(text=f"Last check: {remaining} position(s)")
-        else:
-            self.gui.show_notification("Failed to remove pool", error=True)
+        self._lp_forget_position(
+            position, card_frame=card_frame,
+            notify=f"Pool removed: {pair} (#{token_id})")
 
     def _lp_clear_single(self):
         """Clear the position entry, rendered cards, and status label (v5.1)."""
@@ -3058,10 +3173,42 @@ class LPTab:
                         return
                     tx_hashes = writer.close_position(position.position_id, account_name)
                     if tx_hashes:
+                        # v5.3.4: post-close verification — closePosition burns
+                        # the NFT and closes the position PDA. Poll until the
+                        # position account is gone (or ~10s deadline) before
+                        # claiming success / removing the card.
+                        from venue_adapters.orca_adapter import (
+                            _get_account_data,
+                            _derive_position_address,
+                        )
+                        mint = (position.position_id.split(":", 1)[1]
+                                if ":" in position.position_id else position.position_id)
                         self.gui.root.after(0, lambda: self.gui.show_notification(
-                            f"Position closed. {len(tx_hashes)} TXs submitted. Refreshing..."))
-                        time.sleep(3)
-                        self.gui.root.after(0, self._lp_do_fetch)
+                            f"Close TXs submitted ({len(tx_hashes)}). Waiting for on-chain confirmation..."))
+                        confirmed = False
+                        verifiable = False
+                        deadline = time.time() + 10
+                        pos_addr = _derive_position_address(mint)
+                        if pos_addr:
+                            verifiable = True
+                            while time.time() < deadline:
+                                if _get_account_data(pos_addr) is None:
+                                    confirmed = True
+                                    break
+                                time.sleep(2)
+                        if confirmed:
+                            self.gui.root.after(0, lambda: self._lp_forget_position(
+                                position, notify="Position closed \u2713 confirmed on-chain"))
+                        elif verifiable:
+                            self.gui.root.after(0, lambda: self.gui.show_notification(
+                                f"Close TXs submitted but position still on-chain — verify. "
+                                f"({len(tx_hashes)} TXs)", error=True))
+                        else:
+                            # Could not derive the position PDA — cannot verify.
+                            # Keep the card and ask the user to verify manually.
+                            self.gui.root.after(0, lambda: self.gui.show_notification(
+                                f"Close TXs submitted ({len(tx_hashes)}) but closure could "
+                                f"not be verified on-chain — check the position on Orca.", error=True))
                     else:
                         self.gui.root.after(0, lambda: self.gui.show_notification(
                             "Close position: no transactions submitted", error=True))
@@ -3116,15 +3263,62 @@ class LPTab:
                     return
                 tx_hashes = writer.close_position(position.position_id, account_name)
                 if tx_hashes:
+                    # v5.3.4: fire-and-forget is gone. Wait for each receipt
+                    # and verify business-level closure before touching the UI.
+                    self.gui.root.after(0, lambda: self.gui.show_notification(
+                        f"Closing position… waiting for on-chain confirmation ({len(tx_hashes)} TX)"))
+                    receipt_errs = []
+                    for tx_hash in tx_hashes:
+                        try:
+                            receipt = writer._wait_for_tx_receipt(
+                                tx_hash, timeout=120, poll_interval=2.0)
+                            if receipt is None:
+                                receipt_errs.append(tx_hash)
+                        except RuntimeError as e:
+                            # Reverted on-chain — _wait_for_tx_receipt raises.
+                            receipt_errs.append(f"{tx_hash} reverted: {e}")
+                            break
+                    if receipt_errs:
+                        for err in receipt_errs:
+                            print(f"[close_position] receipt problem: {err}")
+                        unconfirmed = [e for e in receipt_errs if "reverted" not in e]
+                        reverted = [e for e in receipt_errs if "reverted" in e]
+                        if reverted:
+                            self.gui.root.after(0, lambda r=reverted[0]: self.gui.show_notification(
+                                f"Close TX reverted on-chain — position NOT closed. "
+                                f"TX: {r.split()[0]}…", error=True))
+                        else:
+                            self.gui.root.after(0, lambda: self.gui.show_notification(
+                                f"Close TX unconfirmed after 120s — check the explorer. "
+                                f"TX: {unconfirmed[0][:20]}…", error=True))
+                        # Keep the card — never claim success without receipts.
+                        return
                     if len(tx_hashes) == 2:
-                        self.gui.root.after(0, lambda: self.gui.show_notification(
-                            "Position closed. 2 TXs submitted (decrease + collect). Refreshing..."))
+                        # Full close: both receipts confirmed. Verify liquidity
+                        # is actually gone before removing the card.
+                        token_id = None
+                        try:
+                            token_id = int(position.position_id.split(":", 1)[1])
+                        except (ValueError, IndexError, AttributeError):
+                            token_id = None
+                        liquidity = 0
+                        if token_id is not None:
+                            try:
+                                liquidity = writer._get_position_liquidity(token_id)
+                            except Exception as e:
+                                print(f"[close_position] post-close liquidity read failed: {e}")
+                                liquidity = 0
+                        if liquidity > 0:
+                            self.gui.root.after(0, lambda: self.gui.show_notification(
+                                "Liquidity still on-chain — retry Close or Collect Fees", error=True))
+                            return
+                        self.gui.root.after(0, lambda: self._lp_forget_position(
+                            position, notify="Position closed ✓ confirmed on-chain"))
                     elif len(tx_hashes) == 1:
+                        # Partial close (collect failed) — keep the card.
                         self.gui.root.after(0, lambda: self.gui.show_notification(
                             "Partially closed: liquidity removed but collect failed. "
-                            "Retry 'Collect Fees' to withdraw funds. Refreshing..."))
-                    time.sleep(3)
-                    self.gui.root.after(0, lambda: self._lp_do_fetch())
+                            "Retry 'Collect Fees' to withdraw funds."))
                 else:
                     self.gui.root.after(0, lambda: self.gui.show_notification(
                         "Close position: no transactions submitted", error=True))

@@ -192,6 +192,26 @@ class BSCWriter(VenueWriter):
         # Default to PancakeSwap V3 if not found
         return PANCAKE_V3_POSITION_MANAGER
 
+    def _get_position_liquidity(self, token_id: int) -> int:
+        """Read the current liquidity of a position from its Position Manager.
+
+        Args:
+            token_id: The NFT token ID of the position.
+
+        Returns:
+            The liquidity amount as an integer, or 0 if unreadable.
+        """
+        position_manager = self._find_position_manager(token_id)
+        data = SELECTOR_POSITIONS + _pad_int_to_64(token_id)
+        result = _bsc_rpc_call("eth_call", [{"to": position_manager, "data": data}, "latest"])
+        if not result or not isinstance(result, str) or len(result) < 2 + 32 * 13:
+            return 0
+        try:
+            body = result[2:]
+            return int(body[448:512], 16)
+        except (ValueError, IndexError):
+            return 0
+
     # ------------------------------------------------------------------
     # Write operations
     # ------------------------------------------------------------------

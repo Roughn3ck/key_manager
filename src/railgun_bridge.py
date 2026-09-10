@@ -26,7 +26,7 @@ class RailgunSidecar:
     DEFAULT_PORT = 8765
     DEFAULT_TIMEOUT = 30  # seconds for regular requests
     LONG_TIMEOUT = 120    # seconds for proof generation, transfers
-    STARTUP_TIMEOUT = 30  # seconds to wait for sidecar to come online
+    STARTUP_TIMEOUT = 90  # seconds to wait for sidecar to come online (v5.3.4: 30s was too tight for cold Rust/proof-artifact startup)
 
     def __init__(self, port: int = DEFAULT_PORT):
         self.port = port
@@ -385,16 +385,31 @@ class RailgunSidecar:
         return False
 
     def _read_logs(self) -> None:
-        """Read sidecar stdout/stderr in a background thread."""
+        """Read sidecar stdout/stderr in background threads.
+
+        v5.3.4: stderr is now captured too — a sidecar crash (e.g. a syntax
+        error on cold start) previously vanished because only stdout was
+        read, leaving the user with "Sidecar failed to start" and zero
+        diagnostic output.
+        """
         if not self._process:
             return
-        while self._process and self._process.poll() is None:
+
+        def _pump(stream, tag):
             try:
-                line = self._process.stdout.readline()
-                if line:
-                    print(f"[SIDECAR] {line.decode('utf-8', errors='replace').rstrip()}")
+                while self._process and self._process.poll() is None:
+                    line = stream.readline()
+                    if line:
+                        print(f"[SIDECAR] {line.decode('utf-8', errors='replace').rstrip()}")
             except Exception:
-                break
+                pass
+
+        threading.Thread(
+            target=_pump, args=(self._process.stdout, "out"),
+            daemon=True, name="sidecar-logs-stdout").start()
+        threading.Thread(
+            target=_pump, args=(self._process.stderr, "err"),
+            daemon=True, name="sidecar-logs-stderr").start()
 
     def _find_sidecar_dir(self) -> Optional[Path]:
         """Find the sidecar directory relative to the ColdStack root."""

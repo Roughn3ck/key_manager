@@ -237,6 +237,18 @@ router.post('/load-provider', async (req, res) => {
             return res.status(400).json({ status: 'error', error: `No RPC config for chain "${chain}"` });
         }
 
+        // Guard: if this chain's provider is already loaded successfully,
+        // do not reload — reload tears down listeners and re-syncs state.
+        if (sidecarState.loadedProviders.has(chain)) {
+            const existing = sidecarState.loadedProviders.get(chain);
+            const existingErr = sidecarState.providerErrors.get(chain);
+            if (existing && !existingErr) {
+                const fees = sidecarState.fees.get(chain) || null;
+                console.log(`[engine] Provider for ${chain} already loaded — skipping reload`);
+                return res.json({ status: 'ok', chain, fees, alreadyLoaded: true });
+            }
+        }
+
         const providerConfig = buildProviderConfig(chain, chainConfig);
         if (!providerConfig) {
             return res.status(400).json({ status: 'error', error: `Could not build provider config for "${chain}"` });

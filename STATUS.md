@@ -1,8 +1,36 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.3 (Railgun Sidecar Syntax Hotfix)
-**Last Updated:** 2026-09-03
+**Current Version:** v5.3.4 (Orca Scan Routing + Close Confirmation)
+**Last Updated:** 2026-09-10
+
+---
+
+## v5.3.4 - Orca Scan Routing + Close Confirmation (2026-09-10)
+
+### Summary
+LP tab close flows now verify on-chain confirmation before claiming success or removing cards, Orca scans resolve the wallet's Solana address instead of silently returning zero results for EVM addresses, and closed saved pools no longer resurrect on scans. Carries over the four EXE-rebuild items deferred from v5.3.3.
+
+### Fixed
+- **EVM close confirmation (HyperEVM / BSC / Base)** — close no longer fire-and-forget: each TX receipt is waited on (120s, revert-aware), then business-level closure is verified (on-chain liquidity == 0) before the card is removed. Reverted/unconfirmed TXs keep the card. Removed the blind `time.sleep(3)` + refetch.
+- **Solana close confirmation (Orca)** — after close, the GUI polls up to 10s until the position PDA account is gone (closePosition burns the NFT); card removal is gated on that check.
+- **Orca scan routing** — filtered Orca scans resolve the account's Solana address (Account mode) or show a visible skip message; a 0x address passed to OrcaAdapter silently returned `[]`. Full scans append an "Orca skipped (no Solana address for account)" note to the status line when applicable.
+- **Closed-position resurrection filter** — saved-pool merge (`_lp_do_full_scan`, `_lp_do_filtered_full_scan`) and the saved-only fast path now skip closed positions (liquidity == 0; Orca also requires zero uncollected fees) when "Include closed" is unchecked. Bookmarks are only deleted on confirmed close, never by scans.
+- **Sidecar stderr capture** — `railgun_bridge._read_logs` now pumps stderr as well as stdout, so sidecar crash output is visible in the GUI log (v5.3.3 lesson).
+- **STARTUP_TIMEOUT 30s → 90s** — the sidecar needed 27s on the dev machine at boot; 30s was too tight for slower disks/cold artifact caches.
+- **`/engine/load-provider` guard** — retrying an already-loaded healthy chain now returns `alreadyLoaded: true` instead of tearing down listeners and re-syncing.
+- **callbacks.js `chain=[object Object]`** — already fixed via `chain?.toString?.()`; verified during this train (no change needed).
+
+### Process
+- Added `_get_position_liquidity` to `bsc_writer` / `aerodrome_writer` (parity with hyperliquid_writer) for post-close liquidity verification.
+- `_lp_remove_pool` refactored onto the shared `_lp_forget_position` helper (same behavior, one implementation); close flows use the same helper for card removal + bookmark cleanup.
+
+### Files Changed
+- `src/lp_tab.py` — close confirmation (EVM + Solana), Orca scan routing, resurrection filter, `_lp_forget_position` helper
+- `src/venue_adapters/bsc_writer.py`, `src/venue_adapters/aerodrome_writer.py` — `_get_position_liquidity`
+- `src/railgun_bridge.py` — stderr capture, STARTUP_TIMEOUT 90s
+- `sidecar/src/routes/engine.js` — already-loaded provider guard
+- `src/gui_main_v5.py` — VERSION 5.3.4
 
 ---
 
