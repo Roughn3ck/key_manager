@@ -1,8 +1,33 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.4 (Orca Scan Routing + Close Confirmation)
+**Current Version:** v5.3.5 (Orca Valuation + Fee Math)
 **Last Updated:** 2026-09-10
+
+---
+
+## v5.3.5 - Orca Valuation + Fee Math (2026-09-10)
+
+### Summary
+Fixes two Orca valuation bugs verified live against mainnet ground truth (K&P SOL/cbBTC position, cross-checked with Orca's UI to the dollar): unlisted mints silently priced at $0 (a $1,305 cbBTC leg vanished), and pending fees charged for ALL pool trading while the position was out of range (~70x overestimate: $630.91 shown vs $8.91 real).
+
+### Fixed
+- **Unlisted mints silently price at $0** — cbBTC added to `SOLANA_TOKENS` (SOL/cbBTC pair now renders with both legs priced); `_canonical_symbol` is now case-insensitive on miss so mixed-case symbols like "cbBTC" route through price_engine's PEGGED map to BTC. Verified: F98SmN… value $402 → **$1,714** (Orca UI ~$1,712, within 0.2%).
+- **Jupiter mint-price fallback (general)** — any unlisted mint now prices via the Jupiter lite API by MINT (`lite-api.jup.ag/price/v3`, public, no key), 5s timeout, 60s module-level cache. A leg that even Jupiter cannot price shows the raw amount with an "⚠ unpriced" marker on the card — never a silent $0.
+- **Pending fees charged out-of-range trading (~70x)** — `_compute_fees_owed` now computes feeGrowthInside via Whirlpool tick arrays (port of the HyperEVM adapter's V3 pattern): reads fee_growth_outside for both boundary ticks from the TickArray PDA (`[b"tick_array", whirlpool, start_index]` string seeds, 88 ticks/array, 113-byte entries; layout verified empirically against mainnet) and applies the V3 inside-growth rules mod 2^128. Verified: F98SmN… fees $630.98 → **$8.92** (Orca UI $8.91; split 0.0433 SOL + 0.0000575 cbBTC). Applied to BOTH call sites — position fetch and `fetch_fees_earned` (live fee refresh + `_record_fees`), so vault/ColdTrack fee records are corrected too.
+- **Graceful degradation** — missing/unreadable tick arrays (or uninitialized boundary ticks) fall back to the old global approximation flagged "⚠ fees estimated"; never crashes the scan.
+
+### Verification (live gates, 2026-09-10)
+- F98SmN… (SOL/cbBTC): fees **$8.92** vs Orca UI $8.91 — PASS (was $630.98)
+- F98SmN…: value **$1,714.02** vs Orca UI ~$1,712 — PASS (was $402.32)
+- `fetch_fees_earned` path returns the same corrected split
+- Missing tick-array pool → estimate fallback flagged, no crash
+- Unpriceable mint → None → "⚠ unpriced" marker with raw amount
+- Jupiter mint-price fallback live-verified (cbBTC $78.3k), cached
+
+### Files Changed
+- `src/venue_adapters/orca_adapter.py` — cbBTC mint + canonical mapping, Jupiter mint-price fallback + unpriced markers, tick-array feeGrowthInside fee math
+- `src/gui_main_v5.py` — VERSION 5.3.5
 
 ---
 

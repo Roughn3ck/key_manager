@@ -266,6 +266,9 @@ SOLANA_TOKENS: Dict[str, Dict[str, Any]] = {
     "9n4nbM75f5Ui33ZbPYXnS91Fr6hCqK9UfXoL6uRz5gS": {"symbol": "WSOL", "decimals": 9},
     "JUPyiwrYJFskUPiHa7hkeR8VUtAeFoSYbKedZNsDvCN": {"symbol": "JUP", "decimals": 6},
     "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263": {"symbol": "BONK", "decimals": 5},
+    # v5.3.5: Coinbase wrapped BTC on Solana — was silently pricing at $0
+    # (truncated-mint symbol → price engine miss → whole leg vanished).
+    "cbbtcf3aa214zXHbiAZQwf4122FBYbraNdFqgw4iMij": {"symbol": "cbBTC", "decimals": 8},
 }
 
 # Canonical symbol mapping for USD price lookup
@@ -273,6 +276,10 @@ _CANONICAL_SYMBOLS = {
     "WSOL": "SOL",
     "WETH": "ETH",
     "WBTC": "BTC",
+    # v5.3.5: adapter-side mapping — price_engine.PEGGED_TOKENS has the
+    # mixed-case key "cbBTC", but convert_balance_to_fiat uppercases the
+    # symbol ("CBBTC") and would miss it. Mapping here routes cbBTC → BTC.
+    "CBBTC": "BTC",
     "USDC": "USD",
     "USDT": "USD",
     "USDC.e": "USD",
@@ -286,6 +293,15 @@ def _get_sol_token_symbol(mint: str) -> str:
     # On-chain fallback: read the SPL mint account and look up Metaplex metadata.
     # For v5.2.5 we skip Metaplex parsing (binary TLV) and return a truncated mint.
     return mint[:4] + "..." + mint[-4:]
+
+
+def _is_fallback_symbol(symbol: str) -> bool:
+    """Return True if a symbol is the truncated-mint fallback (e.g. 'cbbt…iMij').
+
+    v5.3.5: used to decide whether a leg needs the mint-based Jupiter price
+    fallback — a truncated mint string will never be priced by the engine.
+    """
+    return bool(symbol) and "..." in symbol
 
 
 def _get_sol_token_decimals(mint: str) -> int:
@@ -303,15 +319,89 @@ def _get_sol_token_decimals(mint: str) -> int:
 
 
 def _canonical_symbol(symbol: str) -> str:
-    """Map wrapper / bridged tokens to canonical price symbols."""
-    return _CANONICAL_SYMBOLS.get(symbol, symbol)
+    """Map wrapper / bridged tokens to canonical price symbols.
+
+    Case-insensitive on the first lookup miss: the map is keyed
+    case-sensitively, but price_engine uppercases symbols internally, so a
+    mixed-case symbol like "cbBTC" must still resolve to its canonical
+    form ("BTC") for pricing.
+    """
+    if symbol in _CANONICAL_SYMBOLS:
+        return _CANONICAL_SYMBOLS[symbol]
+    return _CANONICAL_SYMBOLS.get(symbol.upper(), symbol)
 
 
-def _usd_value(amount: Optional[float], symbol: str, price_engine: Optional[PriceEngine]) -> Optional[float]:
-    """Convert a token amount to USD using the shared price engine."""
+# ---------------------------------------------------------------------------
+# v5.3.5: Jupiter lite mint-price fallback
+# When a leg's symbol is the truncated-mint fallback, the price engine can
+# never price it. The Jupiter lite API prices by MINT instead, rescuing the
+# leg from silent $0. Module-level cache, 60s TTL, 5s timeout, stdlib only.
+# ---------------------------------------------------------------------------
+
+JUPITER_LITE_PRICE_URL = "https://lite-api.jup.ag/price/v3"
+_JUPITER_PRICE_TTL = 60.0
+_jupiter_price_cache: Dict[str, Tuple[float, Optional[float]]] = {}  # mint -> (ts, usd_price)
+
+
+def get_jupiter_mint_price(mint: str) -> Optional[float]:
+    """Fetch a mint's USD price via the Jupiter lite API (public, no key).
+
+    GET {JUPITER_LITE_PRICE_URL}?ids={mint} → {mint: {"usdPrice": <num>, ...}}
+
+    Cached for 60s. Returns None if unpriceable (caller must NOT silently
+    zero the leg — surface an "unpriced" marker instead).
+    """
+    if not mint:
+        return None
+    now = time.time()
+    cached = _jupiter_price_cache.get(mint)
+    if cached and (now - cached[0]) < _JUPITER_PRICE_TTL:
+        return cached[1]
+    url = f"{JUPITER_LITE_PRICE_URL}?ids={mint}"
+    price: Optional[float] = None
+    try:
+        req = urllib.request.Request(
+            url, headers={"Content-Type": "application/json", "User-Agent": "ColdStack/5.3.5"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        if isinstance(data, dict):
+            entry = data.get(mint)
+            if isinstance(entry, dict):
+                raw = entry.get("usdPrice")
+                if raw is not None:
+                    price = float(raw)
+    except Exception:
+        price = None
+    _jupiter_price_cache[mint] = (now, price)
+    return price
+
+
+def _usd_value(
+    amount: Optional[float],
+    symbol: str,
+    price_engine: Optional[PriceEngine],
+    mint: str = "",
+) -> Optional[float]:
+    """Convert a token amount to USD using the shared price engine.
+
+    v5.3.5: when the symbol is the truncated-mint fallback (unlistable),
+    prices the leg by MINT via the Jupiter lite API. Returns None when the
+    leg is genuinely unpriceable so callers can mark it "⚠ unpriced"
+    instead of silently valuing it at $0.
+    """
     if amount is None or amount <= 0 or not price_engine:
         return None
-    return price_engine.convert_balance_to_fiat(amount, _canonical_symbol(symbol), currency="usd")
+    canonical = _canonical_symbol(symbol)
+    value = price_engine.convert_balance_to_fiat(amount, canonical, currency="usd")
+    if value is not None:
+        return value
+    # Fallback: mint-based pricing via Jupiter for unlisted mints
+    if mint and _is_fallback_symbol(symbol):
+        jup_price = get_jupiter_mint_price(mint)
+        if jup_price is not None:
+            return amount * jup_price
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +579,100 @@ def _tick_to_price(tick: int, decimals_a: int, decimals_b: int) -> float:
     return raw * (10 ** (decimals_a - decimals_b))
 
 
+# ---------------------------------------------------------------------------
+# v5.3.5: Tick-array fee math (feeGrowthInside)
+# Ported from the HyperEVM adapter's V3 pattern; Orca specifics:
+#   - TickArray PDA seeds: [b"tick_array", whirlpool, start_index]
+#     (string seed format verified live by orca_writer's working swaps)
+#   - TICK_ARRAY_SIZE = 88 ticks per array
+#   - Anchor layout: 8B discriminator + 4B start_tick_index + 88 x 113B
+#     Tick entries. Entry i = (tick - start) // tick_spacing.
+#   - Tick entry: initialized bool(1) + liquidity_net i128(16) +
+#     liquidity_gross u128(16) + fee_growth_outside_a u128(16) +
+#     fee_growth_outside_b u128(16) + reward_growths_outside 3xu128(48) = 113B
+# The layout was verified empirically against mainnet (v5.3.5 gate).
+# ---------------------------------------------------------------------------
+
+TICK_ARRAY_SIZE = 88
+_TICK_ARRAY_DISC_LEN = 8
+_TICK_ARRAY_START_LEN = 4
+_TICK_ENTRY_SIZE = 113
+_TICK_ENTRY_FIRST_OFFSET = 12  # discriminator(8) + start_tick_index(4)
+
+
+def _tick_array_start_index_for(tick: int, tick_spacing: int) -> int:
+    """Compute the start_tick_index of the TickArray containing `tick`.
+
+    Each TickArray covers TICK_ARRAY_SIZE * tick_spacing ticks. Python's //
+    is floor division, which matches whirlpool-math's negative-tick behavior
+    (start indices are multiples of the span, floored toward -inf).
+    """
+    span = TICK_ARRAY_SIZE * tick_spacing
+    return (tick // span) * span
+
+
+def _derive_tick_array_address_adapter(whirlpool: str, start_tick_index: int) -> Optional[str]:
+    """Derive the TickArray PDA for a given start_tick_index (adapter-side).
+
+    Seeds: [b"tick_array", whirlpool_bytes, str(start_tick_index).encode()].
+    The string-seed format is verified live by orca_writer's swap path.
+    """
+    try:
+        seeds = [
+            b"tick_array",
+            _b58decode(whirlpool),
+            str(start_tick_index).encode("utf-8"),
+        ]
+        pda, _ = _find_program_address(seeds, _b58decode(WHIRLPOOL_PROGRAM_ID))
+        return _b58encode(pda) if pda else None
+    except (KeyError, ValueError):
+        return None
+
+
+def _read_tick_fee_growth_outside_solana(
+    whirlpool: str,
+    tick: int,
+    tick_spacing: int,
+) -> Optional[Tuple[int, int, bool]]:
+    """Read (fee_growth_outside_a, fee_growth_outside_b, initialized) for a tick.
+
+    Reads the Whirlpool TickArray PDA containing `tick` and decodes the tick
+    entry at offset 12 + i*113 (i = (tick - start) // tick_spacing).
+
+    Returns None when the tick-array account is missing or undecodable —
+    callers fall back to the global approximation (flagged as estimate).
+    """
+    try:
+        start_index = _tick_array_start_index_for(tick, tick_spacing)
+        ta_addr = _derive_tick_array_address_adapter(whirlpool, start_index)
+        if not ta_addr:
+            return None
+        data = _get_account_data(ta_addr)
+        if not data or len(data) < 12:
+            return None
+        ta_start = struct.unpack_from("<i", data, 8)[0]
+        # Entry offset within this tick array
+        i = (tick - ta_start) // tick_spacing
+        if i < 0 or i >= TICK_ARRAY_SIZE:
+            return None
+        offset = _TICK_ENTRY_FIRST_OFFSET + i * _TICK_ENTRY_SIZE
+        if offset + _TICK_ENTRY_SIZE > len(data):
+            return None
+        initialized = data[offset] != 0
+        base = offset + 1  # skip the initialized bool
+        # Anchor TickInfo layout (verified empirically against mainnet, v5.3.5):
+        #   [0] initialized bool(1), [1:17] liquidity_net i128, [17:33] liquidity_gross u128,
+        #   [33:49] fee_growth_outside_a u128, [49:65] fee_growth_outside_b u128, [65:113] rewards
+        lo, hi = struct.unpack_from("<QQ", data, base + 32)
+        fg_out_a = lo + (hi << 64)
+        lo2, hi2 = struct.unpack_from("<QQ", data, base + 48)
+        fg_out_b = lo2 + (hi2 << 64)
+        return fg_out_a, fg_out_b, initialized
+    except Exception as e:
+        print(f"[orca-fees] tick-array read failed for tick {tick}: {e}")
+        return None
+
+
 def _compute_fees_owed(
     liquidity: int,
     fee_owed_a: int,
@@ -497,25 +681,108 @@ def _compute_fees_owed(
     fee_growth_checkpoint_b: int,
     fee_growth_global_a: int,
     fee_growth_global_b: int,
-) -> Tuple[int, int]:
+    tick_current: Optional[int] = None,
+    tick_lower: Optional[int] = None,
+    tick_upper: Optional[int] = None,
+    tick_spacing: Optional[int] = None,
+    whirlpool: Optional[str] = None,
+) -> Tuple[int, int, bool]:
     """Compute total uncollected fees for a position (raw integer amounts).
 
-    Total = accrued_since_last_update + already_owed.
-    Growth accumulators are Q64.64; the delta is shifted right by 64 bits after
-    multiplying by liquidity — matching the on-chain update math.
+    v5.3.5: computes feeGrowthInside via tick arrays (exact, mirrors the
+    Whirlpool program's get_fee_growth_inside) instead of charging the
+    position for all global pool trading while it is out of range. The old
+    global-minus-checkpoint approximation is exact only for positions that
+    stay in range — it overestimated out-of-range fees by ~70x in the field.
 
-    Note: Orca's on-chain fee accounting also reads tick-array data to compute
-    feeGrowthInside when the position is out of range at the current tick. For
-    v5.2.5 (read-only display), we use the simpler global-minus-checkpoint
-    approximation which is exact for in-range positions and conservative
-    (slightly overestimates) for out-of-range ones.
+    Growth accumulators are Q64.64: the delta is shifted right by 64 bits
+    after multiplying by liquidity — matching the on-chain update math.
+
+    When tick-array data is unavailable (missing account / RPC failure),
+    falls back to the global approximation and returns ``estimated=True``
+    so callers can flag the value as an estimate. Never raises.
+
+    Args:
+        liquidity: Position liquidity (plain u128, not Q64.64).
+        fee_owed_a / fee_owed_b: Fees already tracked by the position.
+        fee_growth_checkpoint_*: Position's stored inside-growth checkpoints.
+        fee_growth_global_*: Pool's global growth accumulators (Q64.64).
+        tick_current / tick_lower / tick_upper: Tick indices for inside math.
+        tick_spacing: Pool tick spacing (tick-array geometry).
+        whirlpool: Pool address (tick-array PDA derivation).
+
+    Returns:
+        (fee_a_raw, fee_b_raw, estimated) where estimated is True when the
+        tick arrays were unavailable and the global approximation was used.
     """
     MOD = 1 << 128  # accumulators are u128
-    delta_a = (fee_growth_global_a - fee_growth_checkpoint_a) % MOD
-    delta_b = (fee_growth_global_b - fee_growth_checkpoint_b) % MOD
-    accrued_a = (liquidity * delta_a) >> 64
-    accrued_b = (liquidity * delta_b) >> 64
-    return fee_owed_a + accrued_a, fee_owed_b + accrued_b
+
+    def _accrued(checkpoint: int, fg_global: int, inside: Optional[int]) -> Tuple[int, bool]:
+        if inside is None:
+            # Fallback: global approximation (exact only while in range).
+            delta = (fg_global - checkpoint) % MOD
+            return (liquidity * delta) >> 64, True
+        delta = (inside - checkpoint) % MOD
+        return (liquidity * delta) >> 64, False
+
+    inside_a: Optional[int] = None
+    inside_b: Optional[int] = None
+    context_ok = None not in (tick_current, tick_lower, tick_upper, tick_spacing, whirlpool)
+    if context_ok and liquidity > 0:
+        lower_out = _read_tick_fee_growth_outside_solana(
+            whirlpool, tick_lower, tick_spacing  # type: ignore[arg-type]
+        )
+        upper_out = _read_tick_fee_growth_outside_solana(
+            whirlpool, tick_upper, tick_spacing  # type: ignore[arg-type]
+        )
+        if lower_out is not None and upper_out is not None:
+            out_low_a, out_low_b, low_init = lower_out
+            out_up_a, out_up_b, up_init = upper_out
+            if low_init and up_init:
+                inside_a = _compute_fee_growth_inside_u128(
+                    tick_current, tick_lower, tick_upper,  # type: ignore[arg-type]
+                    fee_growth_global_a, out_low_a, out_up_a,
+                )
+                inside_b = _compute_fee_growth_inside_u128(
+                    tick_current, tick_lower, tick_upper,  # type: ignore[arg-type]
+                    fee_growth_global_b, out_low_b, out_up_b,
+                )
+            else:
+                # Boundary tick not initialized — outside values are
+                # meaningless; use the approximation and flag it.
+                print(f"[orca-fees] boundary tick uninitialized for {whirlpool[:8]}... — estimate fallback")
+
+    accrued_a, est_a = _accrued(fee_growth_checkpoint_a, fee_growth_global_a, inside_a)
+    accrued_b, est_b = _accrued(fee_growth_checkpoint_b, fee_growth_global_b, inside_b)
+    return fee_owed_a + accrued_a, fee_owed_b + accrued_b, (est_a or est_b)
+
+
+def _compute_fee_growth_inside_u128(
+    tick_current: int,
+    tick_lower: int,
+    tick_upper: int,
+    fg_global: int,
+    fg_out_lower: int,
+    fg_out_upper: int,
+) -> int:
+    """Compute feeGrowthInside for one token (Uniswap V3 / Whirlpool rules).
+
+    All arithmetic mod 2^128 (Orca growth accumulators are u128).
+    Per whirlpool-math get_fee_growth_inside:
+      - below = outside(lower) if current >= lower, else global - outside(lower)
+      - above = outside(upper) if current < upper, else global - outside(upper)
+      - inside = global - below - above
+    """
+    MOD = 1 << 128
+    if tick_current >= tick_lower:
+        below = fg_out_lower % MOD
+    else:
+        below = (fg_global - fg_out_lower) % MOD
+    if tick_current < tick_upper:
+        above = fg_out_upper % MOD
+    else:
+        above = (fg_global - fg_out_upper) % MOD
+    return (fg_global - below - above) % MOD
 
 
 def _compute_holdings(
@@ -694,7 +961,9 @@ class OrcaAdapter(VenueAdapter):
         dec_a = _get_sol_token_decimals(pool["token_mint_a"])
         dec_b = _get_sol_token_decimals(pool["token_mint_b"])
 
-        fee_a_raw, fee_b_raw = _compute_fees_owed(
+        # v5.3.5: feeGrowthInside-aware fee math (tick arrays), with graceful
+        # fallback to the global approximation. Matches _fetch_position_at_address.
+        fee_a_raw, fee_b_raw, _estimated = _compute_fees_owed(
             liquidity=position["liquidity"],
             fee_owed_a=position["fee_owed_a"],
             fee_owed_b=position["fee_owed_b"],
@@ -702,12 +971,21 @@ class OrcaAdapter(VenueAdapter):
             fee_growth_checkpoint_b=position["fee_growth_checkpoint_b"],
             fee_growth_global_a=pool["fee_growth_global_a"],
             fee_growth_global_b=pool["fee_growth_global_b"],
+            tick_current=pool["tick_current"],
+            tick_lower=position["tick_lower"],
+            tick_upper=position["tick_upper"],
+            tick_spacing=pool["tick_spacing"],
+            whirlpool=position["whirlpool"],
         )
         symbol_a = _get_sol_token_symbol(pool["token_mint_a"])
         symbol_b = _get_sol_token_symbol(pool["token_mint_b"])
+        # v5.3.5: for fallback (truncated-mint) symbols, key the dict by the
+        # actual mint so downstream USD pricing can route via Jupiter.
+        key_a = pool["token_mint_a"] if _is_fallback_symbol(symbol_a) else symbol_a
+        key_b = pool["token_mint_b"] if _is_fallback_symbol(symbol_b) else symbol_b
         return {
-            symbol_a: fee_a_raw / (10 ** dec_a),
-            symbol_b: fee_b_raw / (10 ** dec_b),
+            key_a: fee_a_raw / (10 ** dec_a),
+            key_b: fee_b_raw / (10 ** dec_b),
         }
 
     # -- Internal helpers ---------------------------------------------------
@@ -805,6 +1083,8 @@ class OrcaAdapter(VenueAdapter):
         fees_earned: Dict[str, float] = {}
         fees_earned_usd: Optional[float] = None
         position_value_usd: Optional[float] = None
+        unpriced_legs: List[str] = []
+        fee_estimate_note: str = ""
 
         if pool:
             current_tick = pool["tick_current"]
@@ -831,8 +1111,9 @@ class OrcaAdapter(VenueAdapter):
             if amt_b_h > 0:
                 deposit_amounts[symbol_b] = amt_b_h
 
-            # Fees
-            fee_a_raw, fee_b_raw = _compute_fees_owed(
+            # v5.3.5: fees via feeGrowthInside (tick arrays) with graceful
+            # fallback to the global approximation, flagged as an estimate.
+            fee_a_raw, fee_b_raw, fees_estimated = _compute_fees_owed(
                 liquidity=position["liquidity"],
                 fee_owed_a=position["fee_owed_a"],
                 fee_owed_b=position["fee_owed_b"],
@@ -840,7 +1121,14 @@ class OrcaAdapter(VenueAdapter):
                 fee_growth_checkpoint_b=position["fee_growth_checkpoint_b"],
                 fee_growth_global_a=pool["fee_growth_global_a"],
                 fee_growth_global_b=pool["fee_growth_global_b"],
+                tick_current=current_tick,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                tick_spacing=pool["tick_spacing"],
+                whirlpool=pool_addr,
             )
+            if fees_estimated:
+                fee_estimate_note = "⚠ fees estimated (tick arrays unavailable)"
             fee_a_h = fee_a_raw / (10 ** dec_a)
             fee_b_h = fee_b_raw / (10 ** dec_b)
             if fee_a_h > 0:
@@ -848,17 +1136,37 @@ class OrcaAdapter(VenueAdapter):
             if fee_b_h > 0:
                 fees_earned[symbol_b] = fee_b_h
 
-            # USD values
+            # USD values (v5.3.5: mint-aware + unpriced-leg tracking)
             fees_usd = 0.0
             if price_engine:
-                fees_usd += _usd_value(fee_a_h, symbol_a, price_engine) or 0.0
-                fees_usd += _usd_value(fee_b_h, symbol_b, price_engine) or 0.0
+                fee_val_a = _usd_value(fee_a_h, symbol_a, price_engine, mint=pool["token_mint_a"])
+                fee_val_b = _usd_value(fee_b_h, symbol_b, price_engine, mint=pool["token_mint_b"])
+                if fee_val_a is None and fee_a_h > 0:
+                    unpriced_legs.append(symbol_a)
+                if fee_val_b is None and fee_b_h > 0:
+                    unpriced_legs.append(symbol_b)
+                fees_usd += (fee_val_a or 0.0) + (fee_val_b or 0.0)
             fees_earned_usd = fees_usd if fees_usd > 0 else (0.0 if fees_earned else None)
 
-            val_a = _usd_value(amt_a_h, symbol_a, price_engine) or 0.0
-            val_b = _usd_value(amt_b_h, symbol_b, price_engine) or 0.0
-            total_val = val_a + val_b
+            val_a = _usd_value(amt_a_h, symbol_a, price_engine, mint=pool["token_mint_a"])
+            val_b = _usd_value(amt_b_h, symbol_b, price_engine, mint=pool["token_mint_b"])
+            if val_a is None and amt_a_h > 0:
+                unpriced_legs.append(symbol_a)
+            if val_b is None and amt_b_h > 0:
+                unpriced_legs.append(symbol_b)
+            total_val = (val_a or 0.0) + (val_b or 0.0)
             position_value_usd = total_val if total_val > 0 else None
+
+            # v5.3.5: never silently zero an unpriceable leg — surface a marker.
+            # fees_note renders on the card (lp_tab) even when USD is available.
+            if unpriced_legs:
+                unpriced_note = (
+                    f"⚠ unpriced: {', '.join(sorted(set(unpriced_legs)))} "
+                    f"(amounts shown, no USD price found)"
+                )
+                fee_estimate_note = (
+                    f"{fee_estimate_note} · {unpriced_note}" if fee_estimate_note else unpriced_note
+                )
 
         return LPPosition(
             position_id=f"solana:{position_mint}",
@@ -875,6 +1183,7 @@ class OrcaAdapter(VenueAdapter):
             deposit_amounts=deposit_amounts,
             fees_earned=fees_earned,
             fees_earned_usd=fees_earned_usd,
+            fees_note=fee_estimate_note or None,
             current_value_usd=position_value_usd,
             deposit_value_usd=position_value_usd,
             raw_data={

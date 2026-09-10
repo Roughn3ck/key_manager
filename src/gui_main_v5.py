@@ -6,7 +6,7 @@ Version: v5.3.3 (September 2026) - ColdTrack + Orca Whirlpool + Railgun + Aerodr
 """
 
 # Single source of truth for version — update this when bumping versions
-VERSION = "5.3.4"
+VERSION = "5.3.5"
 import sys
 import os
 
