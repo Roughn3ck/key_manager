@@ -1,8 +1,29 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.5 (Orca Valuation + Fee Math)
-**Last Updated:** 2026-09-10
+**Current Version:** v5.3.6 (Wallet Account Reordering)
+**Last Updated:** 2026-09-11
+
+---
+
+## v5.3.6 - Wallet Screen Account Reordering (2026-09-11)
+
+### Summary
+Accounts on the Wallet screen are now reorderable within their pool group via ▲/▼ buttons on each account row. Order persists in the encrypted vault (the pool's `accounts` list IS the display order, so no schema change).
+
+### New Features
+- **Account reorder within pools** — each account row in the Wallet screen left panel is now `[account button][▲][▼]`; one click = one position swap = one immediate vault save + panel refresh. ▲ disabled on the first account, ▼ disabled on the last (no wraparound, no cross-pool moves; edge guard is defense-in-depth).
+- Selection survives a reorder: `current_account`/`current_pool` keep the right-panel title and view; only the left panel re-renders.
+- Unassigned section unchanged (rendered `sorted()`, no reorder buttons — out of scope by design).
+- Account dropdowns elsewhere (LP tab, vault tab) remain alphabetical — untouched.
+
+### Implementation
+- `refresh_left_panel` refactored: pool accounts render as row frames (transparent) instead of directly-packed buttons; account button style/behavior unchanged (220×35, border, `select_account`).
+- `_move_account_in_pool(pool, account, direction)` helper: index swap ±1 with edge guard, `current_password` guard, `save_encrypted_data` → `refresh_left_panel`.
+- Verified headless: swap semantics (incl. edge no-ops + repeated clicks), vault round-trip persistence after reorder, panel renders ▲/▼ with correct disabled states, helper moves + re-render live.
+
+### Files Changed
+- `src/gui_main_v5.py` — row frames + ▲/▼ buttons, `_move_account_in_pool`, VERSION 5.3.6
 
 ---
 

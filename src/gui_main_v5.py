@@ -6,7 +6,7 @@ Version: v5.3.3 (September 2026) - ColdTrack + Orca Whirlpool + Railgun + Aerodr
 """
 
 # Single source of truth for version — update this when bumping versions
-VERSION = "5.3.5"
+VERSION = "5.3.6"
 import sys
 import os
 
@@ -2016,11 +2016,18 @@ class ColdStackGUI:
             )
             pool_header.pack(pady=(10, 2), anchor="w")
 
-            for account in pool_data.get("accounts", []):
+            # v5.3.6: accounts render as [account button][▲][▼] row frames —
+            # the pool's accounts list order IS the display order.
+            pool_accounts = pool_data.get("accounts", [])
+            for account in pool_accounts:
                 addr_count = len(accounts_data.get(account, {}).get("addresses", []))
                 label = f"{account} ({addr_count})" if addr_count > 0 else account
+
+                row = ctk.CTkFrame(self.left_scrollable_frame, fg_color="transparent")
+                row.pack(pady=2)
+
                 account_btn = ctk.CTkButton(
-                    self.left_scrollable_frame,
+                    row,
                     text=label,
                     command=lambda p=pool_name, a=account: self.select_account(p, a),
                     width=220, height=35, corner_radius=10,
@@ -2030,7 +2037,28 @@ class ColdStackGUI:
                     border_width=1,
                     border_color=("gray60", "gray40")
                 )
-                account_btn.pack(pady=2)
+                account_btn.pack(side="left")
+
+                is_first = account == pool_accounts[0]
+                is_last = account == pool_accounts[-1]
+                up_btn = ctk.CTkButton(
+                    row, text="▲", width=28, height=28, corner_radius=6,
+                    font=ctk.CTkFont(size=11),
+                    fg_color=("gray80", "gray25"), hover_color=("gray65", "gray35"),
+                    text_color=("#1a1a1a", "#dce4ee"),
+                    state="normal" if not is_first else "disabled",
+                    command=lambda p=pool_name, a=account: self._move_account_in_pool(p, a, "up"),
+                )
+                up_btn.pack(side="left", padx=(6, 2))
+                down_btn = ctk.CTkButton(
+                    row, text="▼", width=28, height=28, corner_radius=6,
+                    font=ctk.CTkFont(size=11),
+                    fg_color=("gray80", "gray25"), hover_color=("gray65", "gray35"),
+                    text_color=("#1a1a1a", "#dce4ee"),
+                    state="normal" if not is_last else "disabled",
+                    command=lambda p=pool_name, a=account: self._move_account_in_pool(p, a, "down"),
+                )
+                down_btn.pack(side="left")
 
         # Show unassigned accounts
         all_pool_accounts = set()
@@ -2059,6 +2087,38 @@ class ColdStackGUI:
                     border_color=("gray60", "gray40")
                 )
                 account_btn.pack(pady=2)
+
+    def _move_account_in_pool(self, pool_name: str, account_name: str, direction: str):
+        """Move an account up/down within its pool's display order (v5.3.6).
+
+        The pool's `accounts` list IS the display order rendered by
+        refresh_left_panel. This swaps the account with its neighbour
+        (index±1), saves the vault, and refreshes the panel. Never moves
+        across pools — a swap past the list edge is a no-op (the row's
+        disabled buttons prevent this; the guard is defense-in-depth).
+
+        Args:
+            pool_name: Pool whose account list to mutate.
+            account_name: Account to move.
+            direction: "up" or "down".
+        """
+        if not self.current_password:
+            self.show_notification("Vault not unlocked", error=True)
+            return
+        pools = self.key_manager.address_db.get("pools", {})
+        accounts_list = pools.get(pool_name, {}).get("accounts", [])
+        try:
+            idx = accounts_list.index(account_name)
+        except ValueError:
+            return
+        new_idx = idx - 1 if direction == "up" else idx + 1
+        if new_idx < 0 or new_idx >= len(accounts_list):
+            return  # edge guard — no wraparound, no cross-pool moves
+        accounts_list[idx], accounts_list[new_idx] = accounts_list[new_idx], accounts_list[idx]
+        if self.key_manager.save_encrypted_data(self.current_password):
+            self.refresh_left_panel()
+        else:
+            self.show_notification("Failed to save reordered accounts", error=True)
 
     def _center_dialog(self, dialog):
         """Center a Toplevel dialog over the main window."""
