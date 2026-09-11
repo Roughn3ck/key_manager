@@ -442,10 +442,11 @@ class DerivationEngine:
 
         Official Sui scheme: m/44'/784'/0'/0'/{address_index}' — hdwallet's
         built-in "Sui" (BIP44Derivation + h.address()) produces a different
-        key AND a flag-PREFIXED pubkey; Sui's Ed25519Pure scheme APPENDS the
-        0x00 flag to the 32-byte pubkey before hashing:
-            address = "0x" + blake2b-256(pubkey_32bytes + flag_byte)
-        (flag_byte = the single 0x00 byte)
+        key AND a different address form. The official address hash puts the
+        scheme flag FIRST (v5.3.11 correction — v5.3.7 specified it
+        backwards; sui-types/src/base_types.rs hashes flag then pubkey):
+            address = "0x" + blake2b-256(flag_byte || pubkey_32bytes)
+        (flag_byte = the single 0x00 byte for Ed25519Pure)
 
         v5.3.10: when ``path`` matches the strict 5-level form
         m/44'/784'/A'/B'/I', it is AUTHORITATIVE for derivation — this makes
@@ -500,8 +501,9 @@ class DerivationEngine:
 
         private_key = key.hex()
         pubkey_bytes = ed25519_privkey_to_pubkey(key)
-        # Ed25519Pure scheme flag APPENDED (NUL byte), then blake2b-256
-        digest = hashlib.blake2b(pubkey_bytes + b"\x00", digest_size=32).digest()
+        # Official Sui scheme hashes the flag FIRST: address = blake2b(0x00 || pubkey)
+        # (sui-types/src/base_types.rs: hasher.update([flag]) then hasher.update(pk))
+        digest = hashlib.blake2b(b"\x00" + pubkey_bytes, digest_size=32).digest()
         address = "0x" + digest.hex()
 
         return {
@@ -589,7 +591,8 @@ class DerivationEngine:
             )
 
         # v5.3.7/v5.3.10: Sui uses the official SLIP-0010 Ed25519 scheme
-        # (5 hardened levels, address = blake2b(pubkey + flag)). A user-
+        # (5 hardened levels, address = blake2b(flag || pubkey), flag FIRST
+        # per official sui-types). A user-
         # supplied path that parses as m/44'/784'/A'/B'/I' is authoritative
         # (Suiet account-level derivation); anything else errors loudly.
         if address_type == "sui":

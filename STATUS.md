@@ -1,8 +1,27 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.10 (SUI Suiet Account Paths)
+**Current Version:** v5.3.11 (SUI Address Flag-Order Hotfix)
 **Last Updated:** 2026-09-11
+
+---
+
+## v5.3.11 - Hotfix: SUI Address Flag Order (2026-09-11)
+
+### Summary
+Corrects the SUI address hash flag order: official Sui (and every working mainnet wallet — verified against Suiet live + the official Rust source) hashes the scheme flag FIRST: `address = blake2b(0x00 || pubkey)`. v5.3.7 fixed hdwallet's broken key derivation but specified the flag on the wrong side of the hash input; the v5.3.7 "official vector" came from a reference harness with the same mistake (self-referential validation). Caught via a user ground-truth experiment: importing the public BIP39 test vector into a real Suiet wallet previews `0x5e93a736…`, which is exactly the standard key hashed flag-first.
+
+### Fixed
+- `_derive_sui_slip10`: `blake2b(pubkey + flag)` → `blake2b(flag || pubkey)` — one line of functional code + comment corrections. Nothing else changed: v5.3.10 path parsing, index routing, and the SLIP-0010 key derivation chain are verified correct and untouched.
+- **Practical impact: none on keys** — the private key ColdStack derived and stored is the true controlling key of Suiet's address; only the displayed address was wrong. Users should re-derive and re-save SUI rows saved under the old (flag-appended) address labels.
+
+### Verification (2026-09-11)
+- Vector gates ALL PASS (flag-first): idx0 `0x5e93a736…61f1` (the Suiet-measured anchor), idx1 `0xf7c7a399…8e71f`, Suiet acct-2 `0x082d0992…7167`, Suiet acct-3 `0xf195b51c…c8119`, explicit-default == default, invalid paths still error loudly, SOL regression `HAgk14Jp…` intact.
+- Dialog smoke (v5.3.8 gate): builds fully, 4 buttons, no exception — PASS.
+
+### Files Changed
+- `src/derivation_engine.py` — flag order fix + comments
+- `src/gui_main_v5.py` — VERSION 5.3.11
 
 ---
 
