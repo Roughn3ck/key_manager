@@ -53,6 +53,12 @@ python test_derivation.py               # BIP39 derivation parity across chains
 - Boot smoke test: `node src/server.js` from the sidecar dir, poll `http://127.0.0.1:8765/health` until `{"status":"ok"}` (≤30s), then kill
 - The sidecar only ships if it boots cleanly from a cold start
 
+**Pre-ship verification (dialogs):**
+- Any train that touches a dialog must run a headless widget-construction smoke test (stub gui → build dialog → assert no exception + expected widgets). py_compile cannot catch widget-creation-order bugs (v5.3.8 lesson).
+
+**Deploy (every deploy):**
+- Sync `rpc_endpoints.json` (repo root) next to the EXE in every live portfolio folder, together with the EXE — a stale deployed JSON silently shadows corrected code defaults (v5.3.9 lesson). The loader now self-heals deprecated endpoints, but shipping the current JSON keeps config explicit.
+
 **When NOT to push to git:**
 - Intermediate prompts (each will say "do NOT push")
 - Failed builds

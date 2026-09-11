@@ -1,8 +1,34 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.8 (Derive Dialog Hotfix)
+**Current Version:** v5.3.9 (RPC Config Self-Heal)
 **Last Updated:** 2026-09-11
+
+---
+
+## v5.3.9 - Stale rpc_endpoints.json Self-Heal + Config Sync (2026-09-11)
+
+### Summary
+Fixes the "Could not fetch SUI balance" regression cause after v5.3.7's code-level endpoint fix: stale deployed `rpc_endpoints.json` files silently shadowed corrected code defaults. Adds a loader self-heal for deprecated endpoints, corrects the repo-root JSON, and makes config sync an explicit deploy step.
+
+### Root cause (verified live 2026-09-11)
+v5.3.7 fixed SUI endpoints in code (`rpc_config.DEFAULT_ENDPOINTS`, `balance_engine.SUI_RPC`) but not in `rpc_endpoints.json`. `load_rpc_config` prefers a user file next to the EXE over everything else, so the-pack-portfolio's Sep-3 JSON (sui → deprecated `fullnode.mainnet.sui.io`) silently shadowed the fix; v5.3.7's error detection correctly returned None → "Could not fetch SUI balance". The repo-root JSON was still stale too.
+
+### Fixed
+- **Repo `rpc_endpoints.json`** — sui → publicnode primary + blockpi fallback; `updated` → 2026-09-11; drift diff vs `DEFAULT_ENDPOINTS` run: also fixed a `bsc` trailing-slash mismatch (now NO DRIFT).
+- **Loader self-heal** — `DEPRECATED_ENDPOINTS` map (one evidence-based entry: the dead official Sui fullnode → publicnode). `_selfheal_deprecated_endpoints` sweeps every chosen config's url+fallback fields, substitutes replacements, warns, and rewrites file-based configs in place (only affected entries; `updated` bumped; never crashes — rewrite failure keeps the in-memory fix). Applies to user, bundled, and defaults paths.
+- **Deploy sync lesson** — "sync rpc_endpoints.json on every deploy" added to AGENTS.md; deployed folders now get EXE + JSON together.
+
+### Verification (2026-09-11)
+- Fixture gate: stale file → repaired in memory + rewritten on disk (other entries untouched, version preserved, `updated` bumped); clean file → byte-identical, no rewrite; defaults path → in-memory heal — ALL PASS
+- Live fetch smoke: `fetch_sui_balance(0x0488…b314)` → **1327.885611506 SUI** (non-None float; matches ~1327.89 on-chain)
+- `py_compile` clean; EXE built
+
+### Files Changed
+- `src/rpc_config.py` — DEPRECATED_ENDPOINTS + `_selfheal_deprecated_endpoints`
+- `rpc_endpoints.json` — sui/bsc corrections + updated 2026-09-11
+- `src/gui_main_v5.py` — VERSION 5.3.9
+- `AGENTS.md` — deploy note: sync rpc_endpoints.json on every deploy
 
 ---
 

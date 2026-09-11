@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "updated": "2026-08-31",
+  "updated": "2026-09-11",
   "endpoints": {
     "ethereum": {
       "url": "https://ethereum-rpc.publicnode.com",
@@ -18,7 +18,7 @@
       "fallback": "https://base-rpc.publicnode.com"
     },
     "bsc": {
-      "url": "https://bsc-dataseed.binance.org",
+      "url": "https://bsc-dataseed.binance.org/",
       "auth": null,
       "fallback": "https://bsc-dataseed1.binance.org"
     },
@@ -53,9 +53,9 @@
       "fallback": null
     },
     "sui": {
-      "url": "https://fullnode.mainnet.sui.io",
+      "url": "https://sui-rpc.publicnode.com",
       "auth": null,
-      "fallback": null
+      "fallback": "https://sui.blockpi.network/v1/rpc/public"
     },
     "hyperliquid_l1": {
       "url": "https://api.hyperliquid.xyz/info",
