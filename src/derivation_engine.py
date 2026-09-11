@@ -415,6 +415,27 @@ class DerivationEngine:
         }
 
     @staticmethod
+    def _parse_sui_path(path: Optional[str]) -> Optional[tuple]:
+        """Parse a 5-hardened-level SUI path into (account, external, index).
+
+        Accepts exactly ``m/44'/784'/A'/B'/I'`` (all five hardened; A/B/I
+        are small non-negative integers). B is the change/external flag
+        (0|1 in Suiet's template, but any non-negative value parses here
+        and derives faithfully). Returns None for anything else.
+
+        Used by v5.3.10 to make a user-supplied SUI path authoritative —
+        Suiet's multi-account progression walks the ACCOUNT level
+        (m/44'/784'/K'/0'/0'), which the Address Index field cannot reach.
+        """
+        if not path:
+            return None
+        import re
+        m = re.fullmatch(r"m/44'/784'/(\d+)'/(\d+)'/(\d+)'", path.strip())
+        if not m:
+            return None
+        return int(m.group(1)), int(m.group(2)), int(m.group(3))
+
+    @staticmethod
     def _derive_sui_slip10(mnemonic: str, address_index: int, chain: str,
                             path: str) -> Dict[str, Any]:
         """Derive a Sui key using SLIP-0010 Ed25519 (all-hardened, 5 levels).
@@ -426,26 +447,56 @@ class DerivationEngine:
             address = "0x" + blake2b-256(pubkey_32bytes + flag_byte)
         (flag_byte = the single 0x00 byte)
 
+        v5.3.10: when ``path`` matches the strict 5-level form
+        m/44'/784'/A'/B'/I', it is AUTHORITATIVE for derivation — this makes
+        Suiet account-level addresses (m/44'/784'/K'/0'/0') reachable via
+        the dialog's editable path field. A non-matching path raises
+        ValueError (never a silent fallback to the default — a typo'd path
+        silently deriving the default address is the bug class this kills).
+        The default flow (path == default template) is unchanged.
+
         Args:
             mnemonic: BIP39 mnemonic phrase.
-            address_index: Index for the final hardened level (the official
-                           wallet progression — Address Index steps this).
+            address_index: Index for the final hardened level in the default
+                           flow (the official wallet progression).
             chain: Chain label for the result dict.
-            path: Human-readable path string.
+            path: Path string — authoritative when it parses as
+                  m/44'/784'/A'/B'/I'; display-only otherwise.
 
         Returns:
             Dict with keys: chain, path, address, private_key, public_key.
+
+        Raises:
+            ValueError: If the supplied path is not a valid SUI 5-level
+                        all-hardened path.
         """
         m = MnemonicValidator("english")
         seed = m.to_seed(mnemonic.strip(), passphrase="")
 
-        # SLIP-0010: 5 hardened levels — purpose/coin_type/account/wallet/index
+        parsed = DerivationEngine._parse_sui_path(path)
+        if parsed is not None:
+            acct_level, ext_level, idx_level = parsed
+        else:
+            # Only the exact default template may take the default flow;
+            # anything else the user typed must error loudly.
+            default_path = f"m/44'/784'/0'/0'/{address_index}'"
+            if (path or "").strip() not in ("", default_path):
+                raise ValueError(
+                    f"Invalid SUI derivation path: must be m/44'/784'/A'/B'/I' "
+                    f"(5 hardened levels) — got '{path}'"
+                )
+            acct_level = 0
+            ext_level = 0
+            idx_level = address_index
+            path = default_path
+
+        # SLIP-0010: 5 hardened levels — purpose/coin_type/account/change/index
         key, chain_code = slip10_master_key_from_seed(seed)
         key, chain_code = slip10_derive_hardened(key, chain_code, 44)
         key, chain_code = slip10_derive_hardened(key, chain_code, 784)
-        key, chain_code = slip10_derive_hardened(key, chain_code, 0)
-        key, chain_code = slip10_derive_hardened(key, chain_code, 0)
-        key, chain_code = slip10_derive_hardened(key, chain_code, address_index)
+        key, chain_code = slip10_derive_hardened(key, chain_code, acct_level)
+        key, chain_code = slip10_derive_hardened(key, chain_code, ext_level)
+        key, chain_code = slip10_derive_hardened(key, chain_code, idx_level)
 
         private_key = key.hex()
         pubkey_bytes = ed25519_privkey_to_pubkey(key)
@@ -537,9 +588,10 @@ class DerivationEngine:
                 mnemonic, acct_level, final_level, chain, used_path
             )
 
-        # v5.3.7: Sui uses the official SLIP-0010 Ed25519 scheme (5 hardened
-        # levels, address = blake2b(pubkey + flag)) — hdwallet's built-in
-        # "Sui" produces a different key and a flag-prefixed pubkey.
+        # v5.3.7/v5.3.10: Sui uses the official SLIP-0010 Ed25519 scheme
+        # (5 hardened levels, address = blake2b(pubkey + flag)). A user-
+        # supplied path that parses as m/44'/784'/A'/B'/I' is authoritative
+        # (Suiet account-level derivation); anything else errors loudly.
         if address_type == "sui":
             used_path = path if path else f"m/44'/784'/0'/0'/{address_index}'"
             return DerivationEngine._derive_sui_slip10(

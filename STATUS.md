@@ -1,8 +1,30 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.9 (RPC Config Self-Heal)
+**Current Version:** v5.3.10 (SUI Suiet Account Paths)
 **Last Updated:** 2026-09-11
+
+---
+
+## v5.3.10 - SUI Custom-Path Parsing (Suiet Account-Level Derivation) (2026-09-11)
+
+### Summary
+The SUI derivation path field is now authoritative for derivation. Previously `_derive_sui_slip10` ignored a custom path (display-only), making Suiet account-level addresses (m/44'/784'/K'/0'/0') unreachable — the engine derives the official account-0 of the held phrase, but Suiet's multi-account progression walks the ACCOUNT level.
+
+### Fixed
+- **SUI custom path authoritative** — `_parse_sui_path` accepts exactly `m/44'/784'/A'/B'/I'` (5 hardened levels, regex-strict) and derives those levels faithfully (A=account, B=change flag, I=index — Suiet's template). Invalid paths raise a clear `ValueError` — never a silent fallback to the default (a typo'd path silently deriving the default address was the bug class being killed). Result dict `path` reflects the actually-derived path.
+- **Dialog hint** — path tip now covers both chains: SOL index→account level + legacy path note; SUI index→final level + Suiet account-K path guidance.
+- Default flow unchanged: no path / default template → `m/44'/784'/0'/0'/{index}'`.
+
+### Verification (2026-09-11)
+- Vector gates ALL PASS: idx0 `0x830426b6…` (unchanged), idx1 `0x238c6885…` (unchanged), Suiet acct-2 path `0x170eb76c…`, Suiet acct-3 path `0xced35759…`, explicit-default-path == default, three invalid forms raise (4-level / wrong-coin / unhardened), SOL regression `HAgk14Jp…` intact.
+- Dialog smoke (v5.3.8 gate): builds fully, 4 buttons, no exception — PASS.
+- `do_derive`-pattern flow checks: SUI preview-path idx2 → `0x84fe0338…d4639` (= no-path idx2, consistent); edited Suiet account-2 path → `0x170eb76c…` — both PASS.
+
+### Files Changed
+- `src/derivation_engine.py` — `_parse_sui_path` + authoritative path handling in `_derive_sui_slip10`
+- `src/account_dialogs.py` — path hint text
+- `src/gui_main_v5.py` — VERSION 5.3.10
 
 ---
 

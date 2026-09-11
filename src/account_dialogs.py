@@ -892,8 +892,9 @@ def show_derivation_dialog(gui, account_name):
     path_entry.pack(fill="x", pady=(0, 5))
     path_hint = ctk.CTkLabel(
         form,
-        text="Tip: SOL — the Address Index drives the account level "
-             "(m/44'/501'/{N}'/0'). Edit the path for legacy m/44'/501'/X'/Y' derivation.",
+        text="Tip: SOL — Address Index drives the account level (m/44'/501'/{N}'/0'); "
+             "edit the path for legacy m/44'/501'/X'/Y'. SUI — index drives the final level; "
+             "for Suiet account K use path m/44'/784'/K'/0'/0'.",
         font=ctk.CTkFont(size=10), text_color="gray60"
     )
     path_hint.pack(anchor="w", pady=(0, 5))
