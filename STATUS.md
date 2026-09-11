@@ -1,8 +1,27 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.7 (Derive Cleanup + SUI Fixes)
+**Current Version:** v5.3.8 (Derive Dialog Hotfix)
 **Last Updated:** 2026-09-11
+
+---
+
+## v5.3.8 - Hotfix: Derive Addresses Dialog Widget Order (2026-09-11)
+
+### Summary
+Hotfix for a v5.3.7 regression: the Derive Addresses dialog opened half-built (no Address Index field, no results area, no buttons) due to a widget-creation-order NameError that tkinter silently swallowed in the frozen EXE.
+
+### Fixed
+- **Dialog half-build** — `update_path()` was invoked at dialog-build time before `index_entry` existed (`_read_index()` reads it), raising `NameError: free variable 'index_entry' referenced before assignment` and aborting `show_derivation_dialog` mid-build. Fix: one move — the Address Index widget block (label + entry + insert + pack + the two live-preview bindings) now sits immediately after `path_hint.pack(...)`, BEFORE `_read_index`/`update_path` definitions and their first invocation. No logic changes.
+
+### Process
+- New **runtime smoke gate**: py_compile cannot catch widget-order bugs, so dialog-construction is now exercised headlessly before ship (stub gui → `show_derivation_dialog` → assert no exception, ≥4 buttons, index label present, path populated). This run: SMOKE PASS (buttons: Derive / Save to Account / Derive Another / Close; path `m/44'/60'/0'/0/0`).
+- Sanity scan: the same read-before-create pattern does NOT exist in the other derive dialogs (add-private-key derive / custom-mnemonic — their index entries are created before any direct call site). No changes there.
+- All six derivation vectors re-run unchanged (SUI official, SOL base/dialog/legacy, SUI dialog flow, EVM idx0/idx1) — engine untouched.
+
+### Files Changed
+- `src/account_dialogs.py` — widget-order move only
+- `src/gui_main_v5.py` — VERSION 5.3.8
 
 ---
 

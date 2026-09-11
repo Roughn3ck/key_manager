@@ -898,6 +898,18 @@ def show_derivation_dialog(gui, account_name):
     )
     path_hint.pack(anchor="w", pady=(0, 5))
 
+    # Address index (created BEFORE update_path runs — its first call reads
+    # index_entry; v5.3.8 hotfix: this block was below the call and the
+    # dialog half-built with a NameError)
+    ctk.CTkLabel(form, text="Address Index:").pack(anchor="w")
+    index_entry = ctk.CTkEntry(form, placeholder_text="0", width=100)
+    index_entry.insert(0, "0")
+    index_entry.pack(anchor="w", pady=(0, 10))
+    # v5.3.7: index drives the SOL account level / SUI final level — the
+    # path preview updates live on every index change (bindings below).
+    index_entry.bind("<KeyRelease>", lambda e: update_path())
+    index_entry.bind("<FocusOut>", lambda e: update_path())
+
     def _read_index() -> int:
         """Read the Address Index entry as an int (0 on garbage)."""
         try:
@@ -927,16 +939,6 @@ def show_derivation_dialog(gui, account_name):
 
     chain_combo.bind("<<ComboboxSelected>>", update_path)
     update_path()
-
-    # Address index
-    ctk.CTkLabel(form, text="Address Index:").pack(anchor="w")
-    index_entry = ctk.CTkEntry(form, placeholder_text="0", width=100)
-    index_entry.insert(0, "0")
-    index_entry.pack(anchor="w", pady=(0, 10))
-    # v5.3.7: index drives the SOL account level / SUI final level — the
-    # path preview updates live on every index change (bindings below).
-    index_entry.bind("<KeyRelease>", lambda e: update_path())
-    index_entry.bind("<FocusOut>", lambda e: update_path())
 
     # Results frame
     result_frame = ctk.CTkFrame(form, fg_color="transparent")
