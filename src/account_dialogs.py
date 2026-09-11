@@ -892,17 +892,38 @@ def show_derivation_dialog(gui, account_name):
     path_entry.pack(fill="x", pady=(0, 5))
     path_hint = ctk.CTkLabel(
         form,
-        text="Tip: If the derived address doesn't match your wallet, "
-             "try a different Solana variant from the chain dropdown",
+        text="Tip: SOL — the Address Index drives the account level "
+             "(m/44'/501'/{N}'/0'). Edit the path for legacy m/44'/501'/X'/Y' derivation.",
         font=ctk.CTkFont(size=10), text_color="gray60"
     )
     path_hint.pack(anchor="w", pady=(0, 5))
 
+    def _read_index() -> int:
+        """Read the Address Index entry as an int (0 on garbage)."""
+        try:
+            return int(index_entry.get() or "0")
+        except ValueError:
+            return 0
+
     def update_path(event=None):
+        """Refresh the path preview from the current chain + index.
+
+        v5.3.7: SOL and SUI paths embed the Address Index (SOL: account
+        level, SUI: final level) — the preview updates live on chain change
+        AND index change. Other chains use their static default path.
+        """
         ch = chain_var.get()
         cfg = DerivationEngine.SUPPORTED_CHAINS.get(ch, {})
+        atype = cfg.get("address_type", "")
+        idx = _read_index()
+        if atype == "solana":
+            preview = f"m/44'/501'/{idx}'/0'"
+        elif atype == "sui":
+            preview = f"m/44'/784'/0'/0'/{idx}'"
+        else:
+            preview = cfg.get("path", "")
         path_entry.delete(0, "end")
-        path_entry.insert(0, cfg.get("path", ""))
+        path_entry.insert(0, preview)
 
     chain_combo.bind("<<ComboboxSelected>>", update_path)
     update_path()
@@ -912,6 +933,10 @@ def show_derivation_dialog(gui, account_name):
     index_entry = ctk.CTkEntry(form, placeholder_text="0", width=100)
     index_entry.insert(0, "0")
     index_entry.pack(anchor="w", pady=(0, 10))
+    # v5.3.7: index drives the SOL account level / SUI final level — the
+    # path preview updates live on every index change (bindings below).
+    index_entry.bind("<KeyRelease>", lambda e: update_path())
+    index_entry.bind("<FocusOut>", lambda e: update_path())
 
     # Results frame
     result_frame = ctk.CTkFrame(form, fg_color="transparent")

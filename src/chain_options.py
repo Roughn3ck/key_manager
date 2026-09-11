@@ -8,6 +8,9 @@ from derivation_engine import DerivationEngine
 
 
 # Standardized chain options used across Add Address and Add Private Key dialogs
+# v5.3.7: SOL wallet-compat variants removed — one "SOL (Solana)" entry;
+# the derive dialog's Address Index steps the account level, and legacy
+# "Address N"-style paths remain reachable via the editable path field.
 CHAIN_OPTIONS = [
     "BTC Taproot (bc1p)",
     "BTC SegWit (bc1q)",
@@ -15,11 +18,6 @@ CHAIN_OPTIONS = [
     "EVM (Ethereum / Arbitrum / Base)",
     "EVM Railgun",
     "SOL (Solana)",
-    "SOL (Solana) — Account 1",
-    "SOL (Solana) — Account 2",
-    "SOL (Solana) — Account 3",
-    "SOL (Solana) — Address 1",
-    "SOL (Solana) — Address 2",
     "ZEC (Zcash)",
     "ZEC Transparent",
     "ZEC Orchard",

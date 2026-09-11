@@ -71,9 +71,9 @@ DEFAULT_ENDPOINTS: Dict[str, Dict[str, Any]] = {
         "fallback": None,
     },
     "sui": {
-        "url": "https://fullnode.mainnet.sui.io",
+        "url": "https://sui-rpc.publicnode.com",
         "auth": None,
-        "fallback": None,
+        "fallback": "https://sui.blockpi.network/v1/rpc/public",
     },
     "hyperliquid_l1": {
         "url": "https://api.hyperliquid.xyz/info",

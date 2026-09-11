@@ -37,7 +37,7 @@ DEFAULT_RPC_CONFIG: Dict[str, Dict[str, Any]] = {
     "bitcoin": {"url": "https://blockstream.info/api/address/{address}", "auth": None, "fallback": "https://mempool.space/api/address/{address}"},
     "solana": {"url": "https://api.mainnet-beta.solana.com", "auth": "helius", "fallback": "https://solana-api.projectserum.com"},
     "dash": {"url": "https://insight.dash.org/insight-api/addr/{address}", "auth": None, "fallback": None},
-    "sui": {"url": "https://fullnode.mainnet.sui.io", "auth": None, "fallback": None},
+    "sui": {"url": "https://sui-rpc.publicnode.com", "auth": None, "fallback": "https://sui.blockpi.network/v1/rpc/public"},
     "hyperliquid_l1": {"url": "https://api.hyperliquid.xyz/info", "auth": None, "fallback": None},
     "zcash": {"url": "https://api.blockchair.com/zcash/dashboards/address/{address}", "auth": None, "fallback": None},
     "ripple": {"url": "https://s1.ripple.com:51234", "auth": None, "fallback": "https://s2.ripple.com:51234"},
@@ -51,7 +51,7 @@ DEFAULT_RPC_CONFIG: Dict[str, Dict[str, Any]] = {
 BTC_API = "https://blockstream.info/api/address/{address}"
 SOLANA_RPC = "https://api.mainnet-beta.solana.com"
 DASH_API = "https://insight.dash.org/insight-api/addr/{address}"
-SUI_RPC = "https://fullnode.mainnet.sui.io"
+SUI_RPC = "https://sui-rpc.publicnode.com"
 HYPERLIQUID_L1_API = "https://api.hyperliquid.xyz/info"
 ZCASH_API = "https://api.blockchair.com/zcash/dashboards/address/{address}"
 XRP_RPC = "https://s1.ripple.com:51234"
@@ -555,7 +555,20 @@ class BalanceEngine:
         return None
 
     def _fetch_sui_from_url(self, url: str, address: str) -> Optional[float]:
-        """Fetch SUI balance from a specific URL. Internal helper."""
+        """Fetch SUI balance from a specific URL. Internal helper.
+
+        v5.3.7: the official fullnode.mainnet.sui.io JSON-RPC is deprecated
+        ("Method not found... migrate to gRPC or GraphQL") and previously
+        parsed the error response into a silent 0.0. Now:
+          - primary endpoint is https://sui-rpc.publicnode.com (live-verified
+            2026-09-11, returns totalBalance/coinObjectCount/fundsInAddressBalance)
+          - any JSON-RPC "error" in the response returns None (caller maps
+            None to a visible "Could not fetch SUI balance")
+          - parser prefers "totalBalance", falls back to "coinBalance"
+            (schema differs across node versions); MIST -> SUI (/1e9)
+          - a legitimate zero ("totalBalance":"0" with a valid result)
+            returns 0.0 honestly
+        """
         payload = json.dumps({
             "jsonrpc": "2.0",
             "id": 1,
@@ -565,13 +578,28 @@ class BalanceEngine:
 
         req = urllib.request.Request(url, data=payload, headers={
             "Content-Type": "application/json",
-            "User-Agent": "ColdStack/4.2"
+            "User-Agent": "ColdStack/5.3.7"
         })
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
                 data = json.loads(response.read().decode('utf-8'))
-                total = data.get("result", {}).get("totalBalance", "0")
-                return float(total) / 1e9
+            # v5.3.7: error detection FIRST — never return a balance from
+            # an error response.
+            if not isinstance(data, dict) or "error" in data:
+                err = data.get("error") if isinstance(data, dict) else data
+                print(f"[sui-balance] RPC error from {url}: {json.dumps(err)[:200]}")
+                return None
+            result = data.get("result")
+            if not isinstance(result, dict):
+                print(f"[sui-balance] no result object from {url}")
+                return None
+            total = result.get("totalBalance")
+            if total is None:
+                total = result.get("coinBalance")
+            if total is None:
+                print(f"[sui-balance] no totalBalance/coinBalance in result from {url}")
+                return None
+            return float(total) / 1e9
         except (urllib.error.URLError, json.JSONDecodeError, KeyError, ValueError, Exception):
             return None
 

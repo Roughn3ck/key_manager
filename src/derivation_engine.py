@@ -16,7 +16,7 @@ import hashlib
 
 from hdwallet import HDWallet
 from hdwallet.mnemonics import BIP39Mnemonic
-from hdwallet.cryptocurrencies import Bitcoin, Ethereum, Dash, Solana, Sui
+from hdwallet.cryptocurrencies import Bitcoin, Ethereum, Dash, Solana
 from hdwallet.derivations import (
     BIP44Derivation,
     BIP49Derivation,
@@ -207,53 +207,11 @@ class DerivationEngine:
             "semantic": None,
             "cryptocurrency": "Solana",
         },
-        "SOL (Solana) — Account 1": {
-            "path": "m/44'/501'/1'/0'",
-            "address_type": "solana",
-            "coin_type": 501,
-            "derivation_class": "BIP44",
-            "semantic": None,
-            "cryptocurrency": "Solana",
-            "account_index": 1,
-        },
-        "SOL (Solana) — Account 2": {
-            "path": "m/44'/501'/2'/0'",
-            "address_type": "solana",
-            "coin_type": 501,
-            "derivation_class": "BIP44",
-            "semantic": None,
-            "cryptocurrency": "Solana",
-            "account_index": 2,
-        },
-        "SOL (Solana) — Account 3": {
-            "path": "m/44'/501'/3'/0'",
-            "address_type": "solana",
-            "coin_type": 501,
-            "derivation_class": "BIP44",
-            "semantic": None,
-            "cryptocurrency": "Solana",
-            "account_index": 3,
-        },
-        "SOL (Solana) — Address 1": {
-            "path": "m/44'/501'/0'/1'",
-            "address_type": "solana",
-            "coin_type": 501,
-            "derivation_class": "BIP44",
-            "semantic": None,
-            "cryptocurrency": "Solana",
-            "account_index": 0,
-            "_solana_address_index": 1,
-        },
-        "SOL (Solana) — Address 2": {
-            "path": "m/44'/501'/0'/2'",
-            "address_type": "solana",
-            "coin_type": 501,
-            "derivation_class": "BIP44",
-            "semantic": None,
-            "cryptocurrency": "Solana",
-            "account_index": 0,
-            "_solana_address_index": 2,
-        },
+        # v5.3.7: the six wallet-compat variants ("— Account 1/2/3",
+        # "— Address 1/2") are removed. The Address Index field now drives
+        # the ACCOUNT level (m/44'/501'/{N}'/0' — the Phantom/Solflare
+        # progression); legacy "Address N"-style paths remain reachable by
+        # editing the path to m/44'/501'/X'/Y' in the derive dialog.
         "DASH (Dash)": {
             "path": "m/44'/5'/0'/0/0",
             "address_type": "dash",
@@ -284,12 +242,13 @@ class DerivationEngine:
     }
 
     # Map cryptocurrency names to hdwallet classes
+    # v5.3.7: "Sui" removed — Sui derives via the custom SLIP-0010 path
+    # (_derive_sui_slip10); hdwallet's built-in Sui scheme is wrong.
     _CRYPTO_MAP = {
         "Ethereum": Ethereum,
         "Bitcoin": Bitcoin,
         "Dash": Dash,
         "Solana": Solana,
-        "Sui": Sui,
     }
 
     # Map derivation class names to actual classes
@@ -385,22 +344,48 @@ class DerivationEngine:
             return hdwallet.address()
 
     @staticmethod
-    def _derive_solana_slip10(mnemonic: str, final_index: int,
-                               chain: str, path: str) -> Dict[str, Any]:
+    def _parse_solana_path(path: Optional[str]) -> Optional[tuple]:
+        """Parse a 4-hardened-level Solana path into (account, final) levels.
+
+        Accepts exactly ``m/44'/501'/X'/Y'`` (all four hardened; X/Y are
+        small non-negative integers). Returns None for anything else —
+        including the chain's default path string with unhardened levels.
+
+        Used for legacy compatibility: old "Address N" style derivation
+        (m/44'/501'/0'/N') remains reachable by editing the path field.
+        """
+        if not path:
+            return None
+        parts = path.strip().split("/")
+        if len(parts) != 5 or parts[0] != "m":
+            return None
+        expected = ["44'", "501'"]
+        if parts[1] != expected[0] or parts[2] != expected[1]:
+            return None
+        for p in (parts[3], parts[4]):
+            if not (p.endswith("'") and p[:-1].isdigit()):
+                return None
+        acct = int(parts[3][:-1])
+        final = int(parts[4][:-1])
+        return acct, final
+
+    @staticmethod
+    def _derive_solana_slip10_levels(mnemonic: str, account_level: int,
+                                      final_level: int, chain: str,
+                                      path: str) -> Dict[str, Any]:
         """Derive a Solana key using SLIP-0010 Ed25519 (all-hardened, 4 levels).
 
-        Brave/Phantom wallets use m/44'/501'/{account}'/{0}' — 4 hardened
-        levels.  The generic BIP44Derivation in hdwallet produces
-        m/44'/501'/0'/0/0 (5 levels, unhardened change+address), which
-        yields a different key.
+        Path: m/44'/501'/{account_level}'/{final_level}'.
 
-        This method implements SLIP-0010 directly to produce the standard
-        4-level all-hardened derivation that Solana wallets expect.
+        v5.3.7: generalizes the former _derive_solana_slip10 — the Address
+        Index now drives the ACCOUNT level (final stays 0), and legacy
+        Address-N paths (m/44'/501'/0'/N') are derived by passing
+        (0, N) explicitly.
 
         Args:
             mnemonic: BIP39 mnemonic phrase.
-            final_index: Index for the 4th hardened level (0 for account
-                         variants, address_index for address variants).
+            account_level: 3rd hardened level (the account index).
+            final_level: 4th hardened level (0 in the default flow).
             chain: Chain label for the result dict.
             path: Human-readable path string.
 
@@ -414,18 +399,59 @@ class DerivationEngine:
         key, chain_code = slip10_master_key_from_seed(seed)
         key, chain_code = slip10_derive_hardened(key, chain_code, 44)
         key, chain_code = slip10_derive_hardened(key, chain_code, 501)
-
-        # Level 3: account index from the chain config (0 for base, N for Account N)
-        config = DerivationEngine.SUPPORTED_CHAINS.get(chain, {})
-        acct_idx = config.get("account_index", 0)
-        key, chain_code = slip10_derive_hardened(key, chain_code, acct_idx)
-
-        # Level 4: final hardened index
-        key, chain_code = slip10_derive_hardened(key, chain_code, final_index)
+        key, chain_code = slip10_derive_hardened(key, chain_code, account_level)
+        key, chain_code = slip10_derive_hardened(key, chain_code, final_level)
 
         private_key = key.hex()
         pubkey_bytes = ed25519_privkey_to_pubkey(key)
         address = b58encode(pubkey_bytes)
+
+        return {
+            "chain": chain,
+            "path": path,
+            "address": address,
+            "private_key": private_key,
+            "public_key": pubkey_bytes.hex(),
+        }
+
+    @staticmethod
+    def _derive_sui_slip10(mnemonic: str, address_index: int, chain: str,
+                            path: str) -> Dict[str, Any]:
+        """Derive a Sui key using SLIP-0010 Ed25519 (all-hardened, 5 levels).
+
+        Official Sui scheme: m/44'/784'/0'/0'/{address_index}' — hdwallet's
+        built-in "Sui" (BIP44Derivation + h.address()) produces a different
+        key AND a flag-PREFIXED pubkey; Sui's Ed25519Pure scheme APPENDS the
+        0x00 flag to the 32-byte pubkey before hashing:
+            address = "0x" + blake2b-256(pubkey_32bytes + flag_byte)
+        (flag_byte = the single 0x00 byte)
+
+        Args:
+            mnemonic: BIP39 mnemonic phrase.
+            address_index: Index for the final hardened level (the official
+                           wallet progression — Address Index steps this).
+            chain: Chain label for the result dict.
+            path: Human-readable path string.
+
+        Returns:
+            Dict with keys: chain, path, address, private_key, public_key.
+        """
+        m = MnemonicValidator("english")
+        seed = m.to_seed(mnemonic.strip(), passphrase="")
+
+        # SLIP-0010: 5 hardened levels — purpose/coin_type/account/wallet/index
+        key, chain_code = slip10_master_key_from_seed(seed)
+        key, chain_code = slip10_derive_hardened(key, chain_code, 44)
+        key, chain_code = slip10_derive_hardened(key, chain_code, 784)
+        key, chain_code = slip10_derive_hardened(key, chain_code, 0)
+        key, chain_code = slip10_derive_hardened(key, chain_code, 0)
+        key, chain_code = slip10_derive_hardened(key, chain_code, address_index)
+
+        private_key = key.hex()
+        pubkey_bytes = ed25519_privkey_to_pubkey(key)
+        # Ed25519Pure scheme flag APPENDED (NUL byte), then blake2b-256
+        digest = hashlib.blake2b(pubkey_bytes + b"\x00", digest_size=32).digest()
+        address = "0x" + digest.hex()
 
         return {
             "chain": chain,
@@ -472,9 +498,8 @@ class DerivationEngine:
         coin_type = config["coin_type"]
         default_path = config["path"]
 
-        # v5.2.5: Use per-variant account/address index from config when
-        # available (e.g. "SOL (Solana) — Account 1" has account_index=1).
-        # This overrides the function-level defaults of 0.
+        # v5.3.7: Use per-variant account/address index from config when
+        # available. This overrides the function-level defaults of 0.
         cfg_account_index = config.get("account_index")
         cfg_address_index = config.get("address_index")
         if cfg_account_index is not None and account_index == 0:
@@ -482,27 +507,43 @@ class DerivationEngine:
         if cfg_address_index is not None and address_index == 0:
             address_index = cfg_address_index
 
-        # v5.2.5-hotfix5: Solana uses SLIP-0010 Ed25519 derivation (4 hardened
-        # levels), NOT BIP44Derivation (5 levels with unhardened change/address).
-        # Routing here to ensure Brave/Phantom compatibility.
+        # v5.3.7: Solana uses SLIP-0010 Ed25519 derivation (4 hardened
+        # levels). One dropdown entry "SOL (Solana)"; the Address Index
+        # drives the ACCOUNT level (m/44'/501'/{N}'/0' — the
+        # Phantom/Solflare progression). Legacy "Address N"-style
+        # derivation stays reachable by passing an explicit 4-level path
+        # (m/44'/501'/X'/Y') via the `path` argument.
         if address_type == "solana":
-            # Determine the 4th-level hardened index.  For account variants
-            # (Account N) the path is m/44'/501'/N'/0' — the 4th level is 0.
-            # For address variants (Address N) the path is m/44'/501'/0'/N'
-            # — the 4th level is the address index.
-            sol_idx = config.get("_solana_address_index")
-            if sol_idx is not None:
-                final_index = sol_idx
-            elif cfg_account_index is not None:
-                final_index = 0
-            elif address_index != 0:
-                final_index = address_index
+            custom_path = (path or "").strip()
+            parsed = DerivationEngine._parse_solana_path(custom_path)
+            if parsed is not None:
+                acct_level, final_level = parsed
+                used_path = custom_path
             else:
-                final_index = 0
-            acct_for_path = config.get("account_index", 0)
-            used_path = path if path else f"m/44'/501'/{acct_for_path}'/{final_index}'"
-            return DerivationEngine._derive_solana_slip10(
-                mnemonic, final_index, chain, used_path
+                if custom_path:
+                    # A path was given but is not a 4-hardened-level Solana
+                    # path — fail loudly rather than derive a wrong key.
+                    raise ValueError(
+                        f"Invalid Solana path '{custom_path}'. "
+                        f"Expected m/44'/501'/X'/Y' (4 hardened levels) — "
+                        f"e.g. m/44'/501'/0'/0' or m/44'/501'/0'/1'."
+                    )
+                # Default flow: Address Index drives the ACCOUNT level,
+                # final level stays 0.
+                acct_level = address_index
+                final_level = 0
+                used_path = f"m/44'/501'/{acct_level}'/0'"
+            return DerivationEngine._derive_solana_slip10_levels(
+                mnemonic, acct_level, final_level, chain, used_path
+            )
+
+        # v5.3.7: Sui uses the official SLIP-0010 Ed25519 scheme (5 hardened
+        # levels, address = blake2b(pubkey + flag)) — hdwallet's built-in
+        # "Sui" produces a different key and a flag-prefixed pubkey.
+        if address_type == "sui":
+            used_path = path if path else f"m/44'/784'/0'/0'/{address_index}'"
+            return DerivationEngine._derive_sui_slip10(
+                mnemonic, address_index, chain, used_path
             )
 
         # Build mnemonic object for hdwallet
@@ -527,7 +568,8 @@ class DerivationEngine:
                 address_type, public_key, h
             )
         else:
-            # Solana, Dash, Sui — use hdwallet's built-in address
+            # Dash — use hdwallet's built-in address
+            # (Solana and Sui route to their custom SLIP-0010 paths above)
             address = h.address()
 
         # Build the full path string for the response

@@ -1,8 +1,34 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.6 (Wallet Account Reordering)
+**Current Version:** v5.3.7 (Derive Cleanup + SUI Fixes)
 **Last Updated:** 2026-09-11
+
+---
+
+## v5.3.7 - Derive Addresses Cleanup + SUI Derivation/Balance Fixes (2026-09-11)
+
+### Summary
+Collapses the Solana derive dropdown to one entry (Address Index now drives the account level), fixes SUI derivation to the official scheme (hdwallet's built-in Sui produced a different key — verified with test vectors), and fixes SUI balance fetching (the official JSON-RPC endpoint is deprecated; the parser silently returned 0.0 from error responses).
+
+### Fixed
+- **SOL dropdown collapse** — `SUPPORTED_CHAINS` and `CHAIN_OPTIONS` reduced from 7 Solana entries to one "SOL (Solana)". The derive dialog's Address Index now drives the ACCOUNT level (m/44'/501'/{N}'/0' — the Phantom/Solflare progression) instead of the 4th level. "Derive Another" steps the account level.
+- **Live path preview** — the derive dialog's path preview updates on chain change AND index change: `m/44'/501'/{N}'/0'` for SOL, `m/44'/784'/0'/0'/{N}'` for SUI.
+- **Legacy SOL compat** — an edited path of exactly `m/44'/501'/X'/Y'` (4 hardened levels) derives with account=X, final=Y (old "Address N"-style derivation reachable without dropdown clutter). Non-matching paths raise a clear error, never a wrong key.
+- **SUI derivation (official scheme)** — `_derive_sui_slip10`: SLIP-0010 Ed25519 all-hardened, 5 levels (m/44'/784'/0'/0'/{index}'), address = `0x + blake2b-256(pubkey + 0x00-flag-APPENDED)`. hdwallet's "Sui" removed from `_CRYPTO_MAP` entirely. Hard gates reproduce EXACTLY: abandon×11+about → pubkey `900b4d81…aecf2`, address `0x830426b6…99e60`. SOL regression gate intact: index 0 → `HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk`.
+- **SUI balance fetching** — primary endpoint → `https://sui-rpc.publicnode.com` (live-verified), fallback → `https://sui.blockpi.network/v1/rpc/public` (live-verified). The deprecated `fullnode.mainnet.sui.io` removed. JSON-RPC "error" in any response → None (visible "Could not fetch SUI balance", never a silent 0.0); raw RPC errors logged. Parser prefers `totalBalance`, falls back to `coinBalance`, ÷1e9 MIST→SUI. A legitimate zero shows honestly.
+- `is_balance_supported` already covered "sui" — unchanged.
+
+### Impact / compatibility
+- **SUI addresses previously derived by ColdStack were wrong-scheme** (verified empty on-chain — nothing stranded). After updating, users must re-derive SUI and re-save; the new address will match what Sui wallet apps show.
+- Previously saved SOL vault addresses are unaffected — each stores its own `derivation_path`; no migration.
+
+### Files Changed
+- `src/derivation_engine.py` — SOL variant removal, `_parse_solana_path` + `_derive_solana_slip10_levels`, `_derive_sui_slip10`, sui routing, `_CRYPTO_MAP` cleanup
+- `src/chain_options.py` — CHAIN_OPTIONS Solana variants removed
+- `src/account_dialogs.py` — live path preview (chain + index change), SOL tip text
+- `src/balance_engine.py` + `src/rpc_config.py` — SUI endpoints + error-detecting parser
+- `src/gui_main_v5.py` — VERSION 5.3.7
 
 ---
 
