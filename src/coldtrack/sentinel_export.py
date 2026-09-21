@@ -1,357 +1,432 @@
-"""ColdTrack Sentinel Export bridge.
+"""ColdTrack Sentinel Export — materialize a MERGED ``strategy_view.json``.
 
-Materializes ``strategy_view.json`` from coldtrack.db. This is the producer
-of contract v1; the Argus Sentinel (separate repo) consumes exactly this shape
-via ``loadStrategyData()``. The exporter reads ONLY public portfolio records —
-coldtrack.db holds no keys and the exporter touches no vault data and no
-network. The write is a local atomic file swap (tmp + os.replace) so the
-sentinel's fs.watchFile never observes a partial read.
+A port of Kimi's reference tool ``kimi/coldtax/export_strategy_view.py`` into
+ColdStack's embedded Python runtime. Kimi's tool remains the reference
+implementation for the standalone flow; this adaptation runs Windows-natively
+inside the PyInstaller EXE so the ColdTrack tab can emit the view the Argus
+Sentinel consumes. Credit: Kimi (CFO) — original logic and schema design are hers.
 
-Contract v1 shape (pinned keys):
-  view_version, generated_by, generated_at, source_db   (reserved header)
-  fee_events[], capital_events[]                        (reserved arrays)
-  <POOL_ID> { pool record }                             (sentinel position ids)
-  KP { label, wallet, positions[] }                     (K&P section)
+Contract v1 (pinned by the sentinel's ``loadStrategyData()``):
+  Reserved top-level keys (never pool ids):
+    view_version, generated_by, generated_at, source_db,
+    fee_events, capital_events, pool_groups
+  Anything else is a pool record keyed by its sentinel position id ('G2', 'N1')
+  or the 'KP' container ({ label, wallet, positions[] }).
 
-Anything outside the four header keys + the two event arrays is treated by the
-sentinel as a pool record keyed by its position id. "KP" is just another
-top-level key whose value happens to be the K&P container.
+Contract-format fixes this port applies (per Forge prompt rev 2):
+  * ``fee_events[]`` / ``capital_events[]`` are emitted in **snake_case** with
+    ``position_id`` as the sentinel pool-id **STRING** ('G2', 'KP1'), not raw SQL
+    rows — this lights up the events pipeline (fees-as-events, owner attribution).
+  * KP positions carry ``entry: { usd, date, token0_amt, token1_amt,
+    fees_claimed_usd }`` from LP_POSITIONS — lights up K&P Net P&L enrichment.
+  * ``view_version: 1`` (integer) matching the sentinel's contract version.
+
+Reads ONLY coldtrack.db (no vault, no keys, no network). Registry seam is
+``LP_POSITIONS`` + ``POOL_GROUPS``; events come from ``FEE_EVENTS`` /
+``CAPITAL_EVENTS`` (FK → LP_POSITIONS.ID, mapped to the sentinel pool-id string
+via ACCOUNTS.NAME). The write is an atomic tmp + ``os.replace`` swap so the
+sentinel's fs.watchFile hot-reload never sees a partial read.
+
+Stdlib only (sqlite3, json, os, argparse, datetime, logging, pathlib) — runs
+inside the embedded interpreter.
+
+Usage (module or function):
+    python -m coldtrack.sentinel_export --db A.db --db B.db --out view.json
+    coldtrack export            # via CLI (defaults + ARGUS_DB_PATH env)
 """
+import argparse
+import datetime
 import json
 import logging
 import os
+import sqlite3
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 logger = logging.getLogger(__name__)
 
 # Contract version the sentinel pins (argus_sentinel.js VIEW_CONTRACT_VERSION).
 VIEW_CONTRACT_VERSION = 1
+# Semver of this port, embedded in generated_by. Credit preserved.
+EXPORTER_VERSION = "5.3.13"
+GENERATED_BY = f"ColdTrack Sentinel Export {EXPORTER_VERSION} (port of kimi/coldtax)"
 
-# Semver of this exporter, embedded in generated_by.
-EXPORTER_VERSION = "5.3.12"
-
-# Default export target — the pack layout places the sentinel repo next to the
-# ColdStack repo. Overridable; falls back to the app dir when unwritable.
+# Default merged-view sources: the Pack + K&P portfolio DBs (Kimi's layout).
+_DEFAULT_BASE = Path(r"B:\OpenClaw\.openclaw\workspace\kimi\portfolios")
+DEFAULT_DB_PATHS = [
+    _DEFAULT_BASE / "the-pack-portfolio" / "coldtrack.db",
+    _DEFAULT_BASE / "kitandpaul" / "coldtrack.db",
+]
+# Default view target (pack layout) — the sentinel's read-only input.
 DEFAULT_EXPORT_PATH = Path(r"B:\Blockchain\lp-sentinel\strategy_view.json")
 
-# Top-level keys the sentinel treats as reserved (never pool ids). Pool ids
-# must never collide with these.
+# The K&P wallet recorded in the view (Kimi's tool hardcodes this convention).
+KP_WALLET = "0x8958Bd96896De55bFe31b1A6Eb2B280ebE098509"
+
+# strategy.json consulted only for KP token0/token1 canonical order (Kimi's logic).
+_STRATEGY_JSON = Path(r"B:\Blockchain\lp-sentinel\strategy.json")
+
 RESERVED_KEYS = (
-    "view_version",
-    "generated_by",
-    "generated_at",
-    "source_db",
-    "fee_events",
-    "capital_events",
+    "view_version", "generated_by", "generated_at", "source_db",
+    "fee_events", "capital_events", "pool_groups",
 )
 
 
-class SentinelExporter:
-    """Build and write strategy_view.json from coldtrack.db.
+# ----------------------------------------------------------------------
+# Kimi's loaders (ported — logic preserved)
+# ----------------------------------------------------------------------
 
-    Construction reads the DB (read-only); ``export()`` performs the atomic
-    write. The export never raises for an empty/unconfigured registry — it
-    emits the header + empty arrays and logs a warning.
+def _load_pools(cur: sqlite3.Cursor) -> Dict[str, Dict[str, Any]]:
+    """Genesis/SafetyNET-style pools from Executive Mind (lp_position accounts)."""
+    pools: Dict[str, Dict[str, Any]] = {}
+    rows = _rows_as_dicts(cur.execute("""
+        SELECT lp.*, a.NAME AS account_name
+        FROM LP_POSITIONS lp
+        JOIN ACCOUNTS a ON a.ID = lp.ACCOUNT_ID
+        JOIN PORTFOLIOS p ON p.ID = a.PORTFOLIO_ID
+        WHERE p.NAME = 'Executive Mind' AND a.TYPE = 'lp_position'
+        ORDER BY lp.ID
+    """))
+    for row in rows:
+        key = (row["account_name"] or "").upper()  # g1 -> G1, n1 -> N1
+        if not key:
+            continue
+        config = _parse_notes(row.get("NOTES"))
+        live = "LP Live" if row.get("STATUS") == "active" else "Closed"
+        pools[key] = {
+            "pool_group": config.get("pool_group", ""),
+            "type": "LP_POOL",
+            "quote_asset": row.get("TOKEN_A"),
+            "base_asset": row.get("TOKEN_B"),
+            "symbol": config.get("symbol", ""),
+            "lp_address": config.get("lp_address", ""),
+            "status": live,
+            "current_strategy": {
+                "season_id": config.get("season_id"),
+                "status": live,
+                "type": "LP_POOL",
+                "start_date": row.get("OPENED_DATE") or "",
+                "lp_range_low": row.get("RANGE_LOW"),
+                "lp_range_high": row.get("RANGE_HIGH"),
+                "initial_investment_quote": row.get("AMOUNT_A_ENTRY"),
+                "initial_investment_base": row.get("AMOUNT_B_ENTRY"),
+                "total_usd_value_at_entry": row.get("TOTAL_VALUE_USD_ENTRY"),
+                "venue": row.get("PLATFORM") or "",
+                "network": row.get("CHAIN") or "",
+            },
+            "fee_snapshot": {"check_time": "", "fees_earned_usd": row.get("FEES_EARNED_USD") or 0},
+            "risk_settings": config.get("risk_settings", {
+                "stop_loss_pct": 0.05, "rsi_alert_high": 80, "rsi_alert_low": 20,
+            }),
+            "base_symbol": config.get("base_symbol", ""),
+            "_lp_id": row.get("ID"),  # internal: for event position_id mapping
+        }
+    return pools
+
+
+def _load_kp_positions(cur: sqlite3.Cursor) -> List[Dict[str, Any]]:
+    """Active K&P positions (Kit & Paul portfolio, kitandpaul account).
+
+    Token order: strategy.json token0/token1 is the CANONICAL onchain order;
+    the DB's TOKEN_A/TOKEN_B uses quote-first and may be inverted — load the
+    canonical order from strategy.json keyed by pool/position/address.
+    Positions carry an ``entry`` block (contract requirement — lights up K&P
+    Net P&L enrichment).
     """
+    canonical: Dict[Any, Dict[str, Any]] = {}
+    if _STRATEGY_JSON.exists():
+        try:
+            strat = json.loads(_STRATEGY_JSON.read_text(encoding="utf-8"))
+            for p in strat.get("KP", {}).get("positions", []):
+                canonical[p.get("pool")] = p
+                canonical[p.get("position_id")] = p
+                canonical[p.get("position_address")] = p
+        except (json.JSONDecodeError, OSError):
+            logger.warning("KP canonical: strategy.json unreadable — falling back to DB order.")
 
-    def __init__(self, db: Any, export_path: Optional[Path] = None) -> None:
+    rows = _rows_as_dicts(cur.execute("""
+        SELECT lp.*
+        FROM LP_POSITIONS lp
+        JOIN ACCOUNTS a ON a.ID = lp.ACCOUNT_ID
+        WHERE a.NAME = 'kitandpaul' AND lp.STATUS = 'active'
+        ORDER BY lp.ID
+    """))
+    positions: List[Dict[str, Any]] = []
+    for i, row in enumerate(rows, start=1):
+        config = _parse_notes(row.get("NOTES"))
+        pid_type = row.get("POSITION_ID_TYPE") or ""
+        protocol = {"erc721": "projectx", "numeric_id": "aerodrome",
+                    "solana_position": "orca"}.get(pid_type, "")
+        canon = (canonical.get(row.get("TOKEN_ID"))
+                 or canonical.get(row.get("POOL_ADDRESS"))
+                 or canonical.get(row.get("POSITION_ADDRESS")))
+        pos: Dict[str, Any] = {
+            "id": f"KP{i}",
+            "label": f"{row.get('POOL_NAME')} #{row.get('TOKEN_ID') or ''}".strip(),
+            "venue": row.get("PLATFORM") or "",
+            "protocol": protocol,
+            "chain": row.get("CHAIN") or "",
+            "position_id": row.get("TOKEN_ID"),
+            "pool": row.get("POOL_ADDRESS"),
+            "rpcs": config.get("rpcs", []),
+            "token0": (canon.get("token0") if canon else None) or row.get("TOKEN_A"),
+            "token0_decimals": (canon.get("token0_decimals") if canon else None),
+            "token1": (canon.get("token1") if canon else None) or row.get("TOKEN_B"),
+            "token1_decimals": (canon.get("token1_decimals") if canon else None),
+            "fees": config.get("fees"),
+            # Contract: entry lights up K&P Net P&L.
+            "entry": {
+                "usd": row.get("TOTAL_VALUE_USD_ENTRY"),
+                "date": row.get("OPENED_DATE"),
+                "token0_amt": row.get("AMOUNT_A_ENTRY"),
+                "token1_amt": row.get("AMOUNT_B_ENTRY"),
+                "fees_claimed_usd": (row.get("FEES_CLAIMED_USD")
+                                     if row.get("FEES_CLAIMED_USD") is not None
+                                     else row.get("FEES_EARNED_USD")),
+            },
+            "_lp_id": row.get("ID"),  # internal: event mapping
+        }
+        if pid_type == "solana_position":
+            pos["position_address"] = row.get("POSITION_ADDRESS")
+            pos["whirlpool"] = config.get("whirlpool")
+        if config.get("staked") is not None:
+            pos["staked"] = config["staked"]
+        if row.get("TICK_LOWER") is not None:
+            pos["tick_lower"] = row["TICK_LOWER"]
+            pos["tick_upper"] = row["TICK_UPPER"]
+        positions.append(pos)
+    return positions
+
+
+def _load_groups(cur: sqlite3.Cursor) -> List[Dict[str, Any]]:
+    return _rows_as_dicts(cur.execute("SELECT NAME, LABEL, ICON, NOTES FROM POOL_GROUPS"))
+
+
+# ----------------------------------------------------------------------
+# Contract-fix event loaders (raw SQL rows → snake_case, position_id string)
+# ----------------------------------------------------------------------
+
+def _load_fee_events(
+    cur: sqlite3.Cursor, lp_to_position: Dict[Any, str]
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for r in _rows_as_dicts(cur.execute("SELECT * FROM FEE_EVENTS ORDER BY DATE, ID")):
+        out.append({
+            "position_id": lp_to_position.get(r.get("POSITION_ID")),
+            "date": r.get("DATE"),
+            "token0_amt": r.get("TOKEN_A_AMT"),
+            "token1_amt": r.get("TOKEN_B_AMT"),
+            "value_usd": r.get("VALUE_USD"),
+            "source": (r.get("SOURCE") or "MANUAL").upper(),
+            "tx_hash": r.get("TX_HASH"),
+            "notes": r.get("NOTES") or "",
+        })
+    return out
+
+
+def _load_capital_events(
+    cur: sqlite3.Cursor, lp_to_position: Dict[Any, str]
+) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for r in _rows_as_dicts(cur.execute("""
+        SELECT ce.*, p.NAME AS pf_name
+        FROM CAPITAL_EVENTS ce
+        JOIN ACCOUNTS a ON a.ID = ce.ACCOUNT_ID
+        JOIN PORTFOLIOS p ON p.ID = a.PORTFOLIO_ID
+        ORDER BY ce.DATE, ce.ID
+    """)):
+        out.append({
+            "position_id": lp_to_position.get(r.get("POSITION_ID")),
+            "portfolio": r.get("pf_name"),
+            "owner": r.get("OWNER"),
+            "date": r.get("DATE"),
+            "type": (r.get("TYPE") or "").upper(),
+            "asset": r.get("ASSET"),
+            "amount": r.get("AMOUNT"),
+            "value_usd": r.get("VALUE_USD"),
+            "notes": r.get("NOTES") or "",
+        })
+    return out
+
+
+# ----------------------------------------------------------------------
+# Exporter
+# ----------------------------------------------------------------------
+
+class SentinelExporter:
+    """Build and write the merged ``strategy_view.json``. Construction reads the
+    DB(s) (read-only); ``export()`` performs the atomic write. Never raises for
+    an empty registry — emits header + empty arrays and logs a warning."""
+
+    def __init__(
+        self,
+        db_paths: Optional[Sequence[Any]] = None,
+        export_path: Optional[Any] = None,
+    ) -> None:
         """
         Args:
-            db: ColdTrackDB instance (schema initialized).
-            export_path: override for the output file. None → DEFAULT_EXPORT_PATH,
-                with fallback to <app dir>/strategy_view.json if unwritable.
+            db_paths: coldtrack.db paths (merged view). None → DEFAULT_DB_PATHS,
+                or ``ARGUS_DB_PATH`` env (';'-separated) when set.
+            export_path: view target. None → DEFAULT_EXPORT_PATH.
         """
-        self.db = db
-        self._requested_path = Path(export_path) if export_path else DEFAULT_EXPORT_PATH
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        if db_paths is not None:
+            self.db_paths = [Path(p) for p in db_paths]
+        else:
+            env = os.environ.get("ARGUS_DB_PATH", "").strip()
+            self.db_paths = [Path(x) for x in env.split(";") if x.strip()] \
+                if env else list(DEFAULT_DB_PATHS)
+        self.export_path = Path(export_path) if export_path else DEFAULT_EXPORT_PATH
 
     def export(self) -> Dict[str, Any]:
-        """Build the view and write it atomically. Returns a result summary:
-        { path, pools, fee_events, capital_events, generated_at, fallback }.
-        Never raises for an empty registry.
-        """
+        """Build the view and write it atomically. Returns a result summary."""
         view = self._build_view()
-        target, used_fallback = self._resolve_path()
-        result = {
+        target = self.export_path
+        self._write_atomic(view, target)
+        return {
             "path": str(target),
             "pools": self._pool_count,
+            "kp_positions": self._kp_count,
             "fee_events": len(view["fee_events"]),
             "capital_events": len(view["capital_events"]),
+            "pool_groups": len(view["pool_groups"]),
             "generated_at": view["generated_at"],
-            "fallback": used_fallback,
+            "dbs": [str(p) for p in self.db_paths],
         }
-        self._write_atomic(view, target)
-        return result
 
-    # ------------------------------------------------------------------
-    # View assembly
     # ------------------------------------------------------------------
 
     def _build_view(self) -> Dict[str, Any]:
-        """Assemble the full contract-v1 payload (in memory)."""
-        generated_at = datetime.now(timezone.utc).isoformat()
         view: Dict[str, Any] = {
             "view_version": VIEW_CONTRACT_VERSION,
-            "generated_by": f"ColdTrack Sentinel Export {EXPORTER_VERSION}",
-            "generated_at": generated_at,
+            "generated_by": GENERATED_BY,
+            "generated_at": datetime.datetime.now(datetime.timezone.utc)
+            .isoformat().replace("+00:00", "Z"),
             "source_db": "coldtrack.db",
+            "pool_groups": [],
+            "fee_events": [],
+            "capital_events": [],
         }
+        self._pool_count = 0
+        self._kp_count = 0
+        seen_groups: Dict[str, bool] = {}
+        loaded_any = False
 
-        registry = self.db.get_sentinel_pools()
-        self._pool_count = len(registry)
-        if not registry:
+        for db_path in self.db_paths:
+            if not db_path.exists():
+                logger.warning("Sentinel export: DB not found, skipped: %s", db_path)
+                continue
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            cur = conn.cursor()
+            try:
+                pools = _load_pools(cur)
+                kp_positions = _load_kp_positions(cur)
+
+                # Map LP_POSITIONS.ID → sentinel pool-id string for events.
+                lp_to_pos: Dict[Any, str] = {}
+                for pid, rec in pools.items():
+                    lp_key = rec.pop("_lp_id", None)
+                    if lp_key is not None:
+                        lp_to_pos[lp_key] = pid
+                for pos in kp_positions:
+                    lp_key = pos.pop("_lp_id", None)
+                    if lp_key is not None and "id" in pos:
+                        lp_to_pos[lp_key] = pos["id"]
+
+                for k, v in pools.items():
+                    view[k] = v
+                if kp_positions:
+                    view["KP"] = {
+                        "label": "K&P",
+                        "wallet": KP_WALLET,
+                        "positions": kp_positions,
+                    }
+                    self._kp_count += len(kp_positions)
+                self._pool_count += len(pools)
+
+                for g in _load_groups(cur):
+                    if g["NAME"] not in seen_groups:
+                        seen_groups[g["NAME"]] = True
+                        view["pool_groups"].append(g)
+
+                view["fee_events"].extend(_load_fee_events(cur, lp_to_pos))
+                view["capital_events"].extend(_load_capital_events(cur, lp_to_pos))
+                loaded_any = True
+            finally:
+                conn.close()
+
+        if not loaded_any:
             logger.warning(
-                "Sentinel export: SENTINEL_POOLS is empty — emitting header "
-                "plus empty event arrays only."
+                "Sentinel export: no source DBs readable — emitting header + empty arrays."
             )
-
-        # Map account_id → pool_id for event tagging (position-tagged events).
-        account_to_pool = {
-            row["ACCOUNT_ID"]: row["POOL_ID"]
-            for row in registry
-            if row.get("ACCOUNT_ID") is not None
-        }
-
-        # fee_events — cumulative Σ per pool, also emitted as the event array.
-        fee_sums = self._fee_sums_by_pool(account_to_pool)
-
-        for row in registry:
-            pool_id = row["POOL_ID"]
-            config = self._parse_config(row.get("POSITION_CONFIG"))
-            if pool_id == "KP" or pool_id.upper().startswith("KP"):
-                # K&P section: KP container is emitted once, keyed "KP".
-                continue
-            view[pool_id] = self._build_pool_record(row, config, fee_sums)
-
-        # KP container from registry rows whose id is KP / KP<n>.
-        kp = self._build_kp_section(registry)
-        if kp is not None:
-            view["KP"] = kp
-
-        view["fee_events"] = self._build_fee_events(account_to_pool)
-        view["capital_events"] = self._build_capital_events(account_to_pool)
         return view
-
-    def _build_pool_record(
-        self,
-        row: Dict[str, Any],
-        config: Dict[str, Any],
-        fee_sums: Dict[str, Dict[str, Any]],
-    ) -> Dict[str, Any]:
-        """Compose one pool record: verbatim strategy.json fields from
-        POSITION_CONFIG, with entry data refreshed from LP_POSITIONS and
-        fee_snapshot from the cumulative Σ fee events (backward-compat display).
-        """
-        record: Dict[str, Any] = dict(config)  # verbatim strategy plumbing
-
-        account_id = row.get("ACCOUNT_ID")
-        lp = self._latest_lp_position(account_id) if account_id is not None else None
-
-        cs: Dict[str, Any] = dict(record.get("current_strategy") or {})
-        if lp:
-            cs["lp_range_low"] = lp.get("RANGE_LOW")
-            cs["lp_range_high"] = lp.get("RANGE_HIGH")
-            cs["initial_investment_quote"] = lp.get("AMOUNT_A_ENTRY")
-            cs["initial_investment_base"] = lp.get("AMOUNT_B_ENTRY")
-            cs["total_usd_value_at_entry"] = lp.get("TOTAL_VALUE_USD_ENTRY")
-            if lp.get("OPENED_DATE"):
-                cs["start_date"] = lp["OPENED_DATE"]
-        if row.get("SEASON") is not None:
-            cs["season_id"] = row["SEASON"]
-        cs.setdefault("type", row.get("POSITION_TYPE") or record.get("type"))
-        record["current_strategy"] = cs
-
-        record.setdefault("pool_group", row.get("GROUP_NAME"))
-        record.setdefault("type", row.get("POSITION_TYPE"))
-
-        snap = fee_sums.get(row["POOL_ID"], {"total": 0.0, "check_time": ""})
-        record["fee_snapshot"] = {
-            "check_time": snap["check_time"],
-            "fees_earned_usd": round(snap["total"], 2),
-        }
-        record.setdefault(
-            "risk_settings",
-            {"stop_loss_pct": 0.05, "rsi_alert_high": 80, "rsi_alert_low": 20},
-        )
-        return record
-
-    def _build_kp_section(
-        self, registry: List[Dict[str, Any]]
-    ) -> Optional[Dict[str, Any]]:
-        """Compose the KP container. Positions come from SENTINEL_POOLS rows
-        whose POOL_ID is 'KP<n>'; 'POSITION_CONFIG' is carried verbatim and an
-        optional per-position 'entry' is injected from LP_POSITIONS. A registry
-        row with POOL_ID == 'KP' may supply {label, wallet}."""
-        label = "K&P"
-        wallet = ""
-        positions: List[Dict[str, Any]] = []
-
-        for row in registry:
-            pool_id = row["POOL_ID"]
-            config = self._parse_config(row.get("POSITION_CONFIG"))
-            if pool_id == "KP":
-                label = config.get("label", label)
-                wallet = config.get("wallet", wallet)
-                continue
-            if not pool_id.upper().startswith("KP"):
-                continue
-            pos = dict(config)  # verbatim monitor plumbing
-            pos.setdefault("id", pool_id)
-            lp = self._latest_lp_position(row.get("ACCOUNT_ID"))
-            if lp:
-                pos["entry"] = {
-                    "usd": lp.get("TOTAL_VALUE_USD_ENTRY"),
-                    "date": lp.get("OPENED_DATE"),
-                    "token0_amt": lp.get("AMOUNT_A_ENTRY"),
-                    "token1_amt": lp.get("AMOUNT_B_ENTRY"),
-                    "fees_claimed_usd": lp.get("FEES_CLAIMED_USD")
-                    if lp.get("FEES_CLAIMED_USD") is not None
-                    else lp.get("FEES_EARNED_USD"),
-                }
-            positions.append(pos)
-
-        if not positions and not wallet:
-            return None
-        return {"label": label, "wallet": wallet, "positions": positions}
-
-    def _build_fee_events(
-        self, account_to_pool: Dict[int, str]
-    ) -> List[Dict[str, Any]]:
-        """TRANSACTIONS WHERE TYPE='fee_harvest', position-tagged via the
-        sentinel pool registry. One row per claim, dates ASC."""
-        cur = self.db._conn.cursor()
-        cur.execute(
-            "SELECT * FROM TRANSACTIONS WHERE TYPE = 'fee_harvest' ORDER BY DATE ASC, ID ASC"
-        )
-        events: List[Dict[str, Any]] = []
-        for r in self.db._rows_to_dicts(cur.fetchall()):
-            pool_id = account_to_pool.get(r["ACCOUNT_ID"])
-            if pool_id is None:
-                continue
-            events.append(
-                {
-                    "position_id": pool_id,
-                    "date": r.get("DATE"),
-                    "token0_amt": r.get("AMOUNT"),
-                    "token1_amt": r.get("COUNTERPARTY_AMOUNT"),
-                    "value_usd": r.get("VALUE_USD"),
-                    "source": (r.get("CATEGORY") or "MANUAL").upper(),
-                    "tx_hash": r.get("TX_HASH"),
-                    "notes": r.get("NOTES") or "",
-                }
-            )
-        return events
-
-    def _build_capital_events(
-        self, account_to_pool: Dict[int, str]
-    ) -> List[Dict[str, Any]]:
-        """TRANSACTIONS WHERE TYPE IN ('deposit','withdrawal'). Position-tagged
-        when the account maps to a sentinel pool, else position_id null and the
-        event feeds owner attribution only. Deposits → INJECTION."""
-        cur = self.db._conn.cursor()
-        cur.execute(
-            """SELECT t.*, a.PORTFOLIO_ID AS PF_ID, a.DISPLAY_NAME AS OWNER
-               FROM TRANSACTIONS t
-               JOIN ACCOUNTS a ON a.ID = t.ACCOUNT_ID
-               WHERE t.TYPE IN ('deposit', 'withdrawal')
-               ORDER BY t.DATE ASC, t.ID ASC"""
-        )
-        pf_names = {p["ID"]: p["NAME"] for p in self.db.get_portfolios()}
-        events: List[Dict[str, Any]] = []
-        for r in self.db._rows_to_dicts(cur.fetchall()):
-            pool_id = account_to_pool.get(r["ACCOUNT_ID"])
-            events.append(
-                {
-                    "position_id": pool_id,
-                    "portfolio": pf_names.get(r.get("PF_ID")),
-                    "owner": r.get("OWNER"),
-                    "date": r.get("DATE"),
-                    "type": "INJECTION" if r["TYPE"] == "deposit" else "WITHDRAWAL",
-                    "asset": r.get("ASSET"),
-                    "amount": r.get("AMOUNT"),
-                    "value_usd": r.get("VALUE_USD"),
-                    "notes": r.get("NOTES") or "",
-                }
-            )
-        return events
-
-    # ------------------------------------------------------------------
-    # Helpers
-    # ------------------------------------------------------------------
-
-    def _fee_sums_by_pool(
-        self, account_to_pool: Dict[int, str]
-    ) -> Dict[str, Dict[str, Any]]:
-        """Cumulative Σ fee_harvest events per pool id → fee_snapshot display."""
-        cur = self.db._conn.cursor()
-        cur.execute(
-            "SELECT ACCOUNT_ID, VALUE_USD, DATE FROM TRANSACTIONS "
-            "WHERE TYPE = 'fee_harvest' ORDER BY DATE ASC, ID ASC"
-        )
-        out: Dict[str, Dict[str, Any]] = {}
-        for row in cur.fetchall():
-            pool_id = account_to_pool.get(row["ACCOUNT_ID"])
-            if pool_id is None:
-                continue
-            bucket = out.setdefault(pool_id, {"total": 0.0, "check_time": ""})
-            bucket["total"] += float(row["VALUE_USD"] or 0.0)
-            bucket["check_time"] = row["DATE"] or bucket["check_time"]
-        return out
-
-    def _latest_lp_position(self, account_id: Optional[int]) -> Optional[Dict[str, Any]]:
-        """Most recently opened LP position for an account (entry data source)."""
-        if account_id is None:
-            return None
-        positions = self.db.get_lp_positions(account_id=account_id)
-        return positions[0] if positions else None
-
-    @staticmethod
-    def _parse_config(raw: Optional[str]) -> Dict[str, Any]:
-        """Parse the POSITION_CONFIG JSON blob; tolerate malformed/empty."""
-        if not raw:
-            return {}
-        try:
-            parsed = json.loads(raw)
-            return parsed if isinstance(parsed, dict) else {}
-        except (json.JSONDecodeError, TypeError):
-            logger.warning("Sentinel export: malformed POSITION_CONFIG ignored.")
-            return {}
-
-    def _resolve_path(self) -> tuple:
-        """Pick the write target: requested path, else app-dir fallback."""
-        requested = self._requested_path
-        parent = requested.parent
-        try:
-            parent.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        if os.access(str(parent), os.W_OK):
-            return requested, False
-        app_dir = (
-            Path(sys.executable).parent
-            if getattr(sys, "frozen", False)
-            else Path(__file__).parent.parent.parent
-        )
-        return app_dir / "strategy_view.json", True
 
     @staticmethod
     def _write_atomic(view: Dict[str, Any], target: Path) -> None:
-        """Write tmp then os.replace — the sentinel's fs.watchFile only ever
-        sees a complete file."""
+        target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(target.suffix + ".tmp")
-        payload = json.dumps(view, indent=2)
-        tmp.write_text(payload, encoding="utf-8")
+        tmp.write_text(json.dumps(view, indent=2), encoding="utf-8")
         os.replace(str(tmp), str(target))
 
 
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+
+def _rows_as_dicts(cur: sqlite3.Cursor) -> List[Dict[str, Any]]:
+    cols = [c[0] for c in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def _parse_notes(raw: Optional[str]) -> Dict[str, Any]:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return parsed if isinstance(parsed, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
 def export_sentinel_view(
-    db: Any, export_path: Optional[Path] = None
+    db_paths: Optional[Sequence[Any]] = None,
+    export_path: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Convenience wrapper: build + write the sentinel view, return summary."""
-    return SentinelExporter(db, export_path).export()
+    """Convenience wrapper: build + write the merged view, return summary."""
+    return SentinelExporter(db_paths, export_path).export()
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="coldtrack export",
+        description="Materialize merged strategy_view.json (ColdTrack → Sentinel).",
+    )
+    parser.add_argument(
+        "--db", action="append", dest="dbs", metavar="PATH",
+        help="coldtrack.db path (repeatable, or ';'-separated). "
+             "Defaults to the Pack + K&P DBs or $ARGUS_DB_PATH.",
+    )
+    parser.add_argument(
+        "--out", dest="out", default=None, metavar="PATH",
+        help=f"View target (default: {DEFAULT_EXPORT_PATH})",
+    )
+    args = parser.parse_args(argv)
+
+    db_paths: List[str] = []
+    if args.dbs:
+        for chunk in args.dbs:
+            db_paths.extend([p for p in str(chunk).split(";") if p.strip()])
+
+    logging.basicConfig(level=logging.WARNING, format="%(message)s")
+    result = export_sentinel_view(db_paths or None, args.out)
+    print(f"Wrote {result['path']}")
+    print(f"  view_version: {VIEW_CONTRACT_VERSION}")
+    print(f"  pools: {result['pools']}  KP positions: {result['kp_positions']}")
+    print(f"  pool_groups: {result['pool_groups']}  "
+          f"fee_events: {result['fee_events']}  capital_events: {result['capital_events']}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

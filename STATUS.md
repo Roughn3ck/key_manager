@@ -1,35 +1,38 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.12 (ColdTrack Sentinel Export)
+**Current Version:** v5.3.13 (ColdTrack Sentinel Export — port of Kimi's tool)
 **Last Updated:** 2026-09-21
 
 ---
 
-## v5.3.12 - ColdTrack Sentinel Export Bridge (2026-09-21)
+## v5.3.13 - ColdTrack Sentinel Export Bridge (2026-09-21)
 
 ### Summary
-coldtrack.db becomes the pack's single system of record. The new ColdTrack tab **"Export Sentinel View"** materializes `strategy_view.json` — the contract-v1 payload the Argus Sentinel already consumes (`loadStrategyData()` + `enrichKP()` are shipped and smoke-tested sentinel-side). ColdStack owns the records, the sentinel owns live state; no keys cross the boundary because none exist in the ledger. Schema v3.1 is additive: a new `SENTINEL_POOLS` registry; v3.0 tables are untouched.
+coldtrack.db becomes the pack's single system of record. The ColdTrack tab's **"Export Sentinel View"** now ports **Kimi's reference exporter** (`kimi/coldtax/export_strategy_view.py`) into ColdStack's embedded Python runtime — materializing the merged `strategy_view.json` (Pack G1–G6 + N1 plus K&P positions) that the Argus Sentinel already consumes (`loadStrategyData()` + `enrichKP()` are shipped and smoke-tested sentinel-side). This supersedes the v5.3.12 rev, which had invented a `SENTINEL_POOLS` registry — the v2 rev of the Forge prompt reconciled the design with Kimi's handover: the registry seam is **`LP_POSITIONS` + `POOL_GROUPS`**, and events live in **`FEE_EVENTS` / `CAPITAL_EVENTS`**. Kimi's tool remains the reference implementation; this is an adaptation inside ColdStack, credited to her.
 
-### Added
-- **`src/coldtrack/sentinel_export.py`** — `SentinelExporter`: builds the contract-v1 view (header + pool records keyed by sentinel id + a `KP` container with verbatim POSITION_CONFIG plumbing and per-position `entry`s + `fee_events`/`capital_events` arrays), reads ONLY coldtrack.db (no vault, no network), writes atomically via tmp + `os.replace` (the sentinel's fs.watchFile never sees a partial read). Default target `B:\Blockchain\lp-sentinel\strategy_view.json`, overridable in the tab; falls back to `<app dir>\strategy_view.json` when the sentinel dir is unwritable. Graceful empties: an empty registry emits header + empty arrays and never throws.
-- **`SENTINEL_POOLS` table + CRUD** in `src/coldtrack/db.py` — POOL_ID (sentinel position id), ACCOUNT_ID (FK → ACCOUNTS), GROUP_NAME, POSITION_TYPE, SEASON, POSITION_CONFIG (verbatim strategy.json JSON blob), LAST_UPDATED.
-- **ColdTrack tab** — "Export Sentinel View" button (threaded, non-blocking) + target-path entry + status line (last export time, path, pool/fee/capital event counts).
-- Derivation rules implemented: entry data refreshed from `LP_POSITIONS`; `fee_snapshot` = cumulative Σ fee events (backward-compat display); `fee_events` from `TYPE='fee_harvest'` (position-tagged via registry); `capital_events` from `TYPE IN ('deposit','withdrawal')` (position-tagged when the account maps to a pool, else `position_id: null` feeding owner attribution; deposits → INJECTION, withdrawals → WITHDRAWAL).
+### Changes (net vs. pre-sentinel baseline)
+- **`src/coldtrack/sentinel_export.py`** — `SentinelExporter` (ported logic preserved):
+  - Merges multiple coldtrack DBs (`--db PATH` repeatable / `;`-separated, `$ARGUS_DB_PATH` env fallback, defaults = the Pack + K&P portfolio DBs) into one view.
+  - **Contract-fix outputs** (per the Forge prompt): `fee_events[]`/`capital_events[]` in **snake_case with `position_id` as the sentinel pool-id STRING** ('G2', 'KP1') — lights up the events pipeline; KP positions carry **`entry: {usd, date, token0_amt, token1_amt, fees_claimed_usd}`** — lights up K&P Net P&L; `view_version: 1` (integer); `pool_groups[]` passthrough; reserved keys `view_version, generated_by, generated_at, source_db, fee_events, capital_events, pool_groups`.
+  - Pool records byte-compatible with today's strategy.json shape (G1 11/11 parity, Kimi's bar).
+  - Atomic write tmp + `os.replace`; graceful empties (no readable DBs → header + empty arrays, never throws). Stdlib only (sqlite3/json/os/argparse/datetime) — runs inside the EXE; also usable as `coldtrack export` / module `main`.
+- **`src/coldtrack/db.py`** — schema aligned to **Kimi's v3.0 as-built** (additive, idempotent): adds `FEE_EVENTS`, `CAPITAL_EVENTS`, `POOL_GROUPS` tables and the missing `LP_POSITIONS` identifier columns (`POSITION_ID_TYPE`, `TOKEN_ID`, `POOL_ADDRESS`, `POSITION_ADDRESS`, `TOTAL_VALUE_AUD_ENTRY`) via create-if-missing / add-column-if-missing migration; CRUD helpers for events + pool groups. **No v3.0 tables modified.** (The earlier `SENTINEL_POOLS` table is removed — dead per prompt rev 2.)
+- **ColdTrack tab** — "Export Sentinel View" button (threaded) + target-path entry + status line (last export time, path, pool/KP/group/event counts). The button drives the ported exporter (no vault access; works locked).
 
 ### Verification (2026-09-21)
-- `test_sentinel_export.py` (new) — temp-DB fixtures (G-pool + KP entry + fee_harvest + position deposit + portfolio-level deposit) → export → assert contract shape, mirroring the sentinel's `coldtrack_view_smoke_test.js`: PASS (incl. graceful-empty case, no tmp litter).
-- `test_coldtrack_tab_widgets.py` (new) — headless widget-construction smoke (stub GUI → build tab → expected widgets), per the v5.3.8 lesson: PASS.
-- `python -m py_compile` all touched src/build/test files: PASS.
-- EXE rebuilt (156.36 MB); `rpc_endpoints.json` synced next to the EXE.
+- `test_sentinel_export.py` (rewritten) — two temp DBs (Pack-style G2 pool + `FEE_EVENTS` row + position-tagged `CAPITAL_EVENTS` row + portfolio-level one; kitandpaul KP position with entry) → export → assert merged contract shape (pool record parity, snake_case events with string `position_id`, KP `entry`, `pool_groups` passthrough, reserved keys, atomic write, graceful-empty): **PASS**.
+- Ran the port against Kimi's **real** Pack + K&P DBs: produced 7 Pack pools, 3 active K&P positions, `fee_events` with `position_id: 'G2'`, KP `entry` blocks — matching the sentinel's expected contract end-to-end.
+- `test_coldtrack_tab_widgets.py` — headless widget-construction smoke (v5.3.8 lesson): **PASS**.
+- `python -m py_compile` all touched files: **PASS**.
 
 ### Files Changed
-- `src/coldtrack/db.py` — SENTINEL_POOLS table + CRUD, SCHEMA_VERSION 3.1
-- `src/coldtrack/sentinel_export.py` — NEW (exporter)
-- `src/coldtrack/tab.py` — export button + status line + path entry
-- `src/gui_main_v5.py` — VERSION 5.3.12
-- `build_gui_v5.py` — hidden import `coldtrack.sentinel_export`
-- `test_sentinel_export.py`, `test_coldtrack_tab_widgets.py` — NEW
+- `src/coldtrack/sentinel_export.py` — rewritten (port of `kimi/coldtax/export_strategy_view.py`)
+- `src/coldtrack/db.py` — v3.0-as-built seam (FEE_EVENTS / CAPITAL_EVENTS / POOL_GROUPS + LP_POSITIONS cols), SENTINEL_POOLS removed
+- `src/coldtrack/tab.py` — export button drives the ported exporter
+- `src/gui_main_v5.py` — VERSION 5.3.13
+- `build_gui_v5.py`, `coldstack.spec` — hidden import `coldtrack.sentinel_export`
+- `test_sentinel_export.py` — rewritten to Kimi-schema fixtures; `test_coldtrack_tab_widgets.py` — unchanged
 
 ---
 

@@ -204,9 +204,9 @@ class ColdTrackTab:
         self.gui.show_notification(f"ColdTrack sync failed: {error_msg}", error=True)
 
     def on_export_clicked(self) -> None:
-        """Handle 'Export Sentinel View' button click. Materializes
-        strategy_view.json from coldtrack.db (read-only, no vault access) and
-        writes it atomically. Runs on a worker thread; UI stays responsive."""
+        """Handle 'Export Sentinel View'. Materializes the merged
+        strategy_view.json from the portfolio DB(s) (read-only, no vault access)
+        via the ported Kimi exporter, and writes it atomically. Threaded."""
         raw_path = self._widgets["export_path_entry"].get().strip()
         export_path = Path(raw_path) if raw_path else None
 
@@ -214,20 +214,15 @@ class ColdTrackTab:
         self._widgets["export_status"].configure(text="Exporting sentinel view...")
 
         def _export_thread():
-            db = None
             try:
-                db = ColdTrackDB()
-                db.init_schema()
-                result = SentinelExporter(db, export_path).export()
+                # db_paths=None → DEFAULT_DB_PATHS (Pack + K&P) / $ARGUS_DB_PATH.
+                result = SentinelExporter(None, export_path).export()
                 self._last_export = datetime.now(timezone.utc).strftime(
                     "%Y-%m-%d %H:%M UTC"
                 )
                 self.gui.root.after(0, lambda: self._on_export_complete(result))
             except Exception as e:
                 self.gui.root.after(0, lambda: self._on_export_error(str(e)))
-            finally:
-                if db:
-                    db.close()
 
         threading.Thread(target=_export_thread, daemon=True).start()
 
@@ -237,6 +232,7 @@ class ColdTrackTab:
         self._widgets["export_status"].configure(
             text=(
                 f"Last export {self._last_export} · {result['pools']} pools · "
+                f"{result.get('kp_positions', 0)} KP · "
                 f"{result['fee_events']} fee events · {result['capital_events']} capital events"
             )
         )

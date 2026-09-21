@@ -1,15 +1,16 @@
 """ColdTrack SQLite database layer.
 
 Stores the ledger database (coldtrack.db) co-located with key_vault.encrypted.
-Schema v3.0 — 9 tables, ALL CAPS naming, INTEGER PRIMARY KEY AUTOINCREMENT.
-Schema v3.1 — additive SENTINEL_POOLS registry for the Sentinel export bridge.
+Schema v3.0 — ALL CAPS naming, INTEGER PRIMARY KEY AUTOINCREMENT.
+Includes the Sentinel export seam: LP_POSITIONS identifiers, FEE_EVENTS,
+CAPITAL_EVENTS, POOL_GROUPS (additive, idempotent — Kimi's v3.0 as the target).
 """
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-SCHEMA_VERSION = "3.1"
+SCHEMA_VERSION = "3.1"  # additive-only on top of v3.0: events + POOL_GROUPS + identifier cols
 
 
 class ColdTrackDB:
@@ -208,18 +209,180 @@ class ColdTrackDB:
             PRIMARY KEY (TRANSACTION_ID, TAG_ID)
         );
 
-        -- Schema v3.1 (additive): Sentinel pool registry.
-        CREATE TABLE IF NOT EXISTS SENTINEL_POOLS (
-            POOL_ID         TEXT PRIMARY KEY,
-            ACCOUNT_ID      INTEGER REFERENCES ACCOUNTS(ID),
-            GROUP_NAME      TEXT,
-            POSITION_TYPE   TEXT,
-            SEASON          INTEGER,
-            POSITION_CONFIG TEXT,
-            LAST_UPDATED    TEXT NOT NULL DEFAULT (datetime('now'))
+        -- Schema v3.1 (additive): Sentinel export seam — events + group registry.
+        CREATE TABLE IF NOT EXISTS FEE_EVENTS (
+            ID INTEGER PRIMARY KEY AUTOINCREMENT,
+            POSITION_ID INTEGER NOT NULL REFERENCES LP_POSITIONS(ID),
+            DATE TEXT NOT NULL,
+            TOKEN_A_AMT REAL,
+            TOKEN_B_AMT REAL,
+            VALUE_USD REAL,
+            VALUE_CAD REAL,
+            VALUE_EUR REAL,
+            VALUE_AUD REAL,
+            TX_HASH TEXT,
+            SOURCE TEXT NOT NULL DEFAULT 'MANUAL' CHECK(SOURCE IN ('MANUAL', 'READER', 'HARVEST')),
+            NOTES TEXT,
+            CREATED_AT TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS CAPITAL_EVENTS (
+            ID INTEGER PRIMARY KEY AUTOINCREMENT,
+            ACCOUNT_ID INTEGER NOT NULL REFERENCES ACCOUNTS(ID),
+            POSITION_ID INTEGER REFERENCES LP_POSITIONS(ID),  -- NULL = portfolio-level
+            DATE TEXT NOT NULL,
+            TYPE TEXT NOT NULL CHECK(TYPE IN ('INJECTION', 'WITHDRAWAL')),
+            ASSET TEXT,
+            AMOUNT REAL,
+            VALUE_USD REAL,
+            VALUE_CAD REAL,
+            VALUE_EUR REAL,
+            VALUE_AUD REAL,
+            OWNER TEXT,
+            NOTES TEXT,
+            CREATED_AT TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS POOL_GROUPS (
+            ID INTEGER PRIMARY KEY AUTOINCREMENT,
+            NAME TEXT NOT NULL UNIQUE,
+            LABEL TEXT,
+            ICON TEXT,
+            NOTES TEXT,
+            CREATED_AT TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
         self._conn.commit()
+        self._migrate_lp_position_columns()
+
+    def _migrate_lp_position_columns(self) -> None:
+        """Additively add v3.0-as-built LP_POSITIONS columns that pre-v3.1 DBs
+        lack (idempotent — a missing-column add is the only schema mutation, and
+        it preserves all existing rows)."""
+        wanted = {
+            "POSITION_ID_TYPE": "ALTER TABLE LP_POSITIONS ADD COLUMN POSITION_ID_TYPE TEXT",
+            "TOKEN_ID": "ALTER TABLE LP_POSITIONS ADD COLUMN TOKEN_ID TEXT",
+            "POOL_ADDRESS": "ALTER TABLE LP_POSITIONS ADD COLUMN POOL_ADDRESS TEXT",
+            "POSITION_ADDRESS": "ALTER TABLE LP_POSITIONS ADD COLUMN POSITION_ADDRESS TEXT",
+            "TOTAL_VALUE_AUD_ENTRY": "ALTER TABLE LP_POSITIONS ADD COLUMN TOTAL_VALUE_AUD_ENTRY REAL",
+        }
+        cur = self._conn.cursor()
+        existing = {r[1] for r in cur.execute("PRAGMA table_info(LP_POSITIONS)")}
+        for col, stmt in wanted.items():
+            if col not in existing:
+                cur.execute(stmt)
+        self._conn.commit()
+        # Index seam (idempotent).
+        idx = self._conn.cursor()
+        idx.executescript("""
+        CREATE INDEX IF NOT EXISTS IDX_FEE_EVENTS_POSITION ON FEE_EVENTS(POSITION_ID);
+        CREATE INDEX IF NOT EXISTS IDX_FEE_EVENTS_DATE ON FEE_EVENTS(DATE);
+        CREATE INDEX IF NOT EXISTS IDX_CAPITAL_EVENTS_ACCOUNT ON CAPITAL_EVENTS(ACCOUNT_ID);
+        CREATE INDEX IF NOT EXISTS IDX_CAPITAL_EVENTS_DATE ON CAPITAL_EVENTS(DATE);
+        CREATE INDEX IF NOT EXISTS IDX_CAPITAL_EVENTS_POSITION ON CAPITAL_EVENTS(POSITION_ID);
+        """)
+        self._conn.commit()
+
+    # ------------------------------------------------------------------
+    # SENTINEL SEAM CRUD (schema v3.1) — FEE_EVENTS / CAPITAL_EVENTS / POOL_GROUPS
+    # ------------------------------------------------------------------
+
+    def insert_fee_event(
+        self,
+        position_id: int,
+        date: str,
+        source: str = "MANUAL",
+        **kwargs: Any,
+    ) -> int:
+        """Insert a dated fee claim/harvest event. Returns the event ID."""
+        cur = self._conn.cursor()
+        columns = ["POSITION_ID", "DATE", "SOURCE"]
+        values = [position_id, date, source]
+        for key, val in kwargs.items():
+            if val is not None:
+                columns.append(key.upper())
+                values.append(val)
+        placeholders = ", ".join(["?"] * len(columns))
+        cur.execute(
+            f"INSERT INTO FEE_EVENTS ({', '.join(columns)}) VALUES ({placeholders})",
+            values,
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_fee_events(self, position_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Fetch fee events (dates ASC), optionally for one LP position."""
+        cur = self._conn.cursor()
+        if position_id is not None:
+            cur.execute(
+                "SELECT * FROM FEE_EVENTS WHERE POSITION_ID = ? ORDER BY DATE ASC, ID ASC",
+                (position_id,),
+            )
+        else:
+            cur.execute("SELECT * FROM FEE_EVENTS ORDER BY DATE ASC, ID ASC")
+        return self._rows_to_dicts(cur.fetchall())
+
+    def insert_capital_event(
+        self,
+        account_id: int,
+        date: str,
+        type: str,
+        position_id: Optional[int] = None,
+        **kwargs: Any,
+    ) -> int:
+        """Insert an owner injection/withdrawal. Returns the event ID."""
+        cur = self._conn.cursor()
+        columns = ["ACCOUNT_ID", "DATE", "TYPE", "POSITION_ID"]
+        values = [account_id, date, type, position_id]
+        for key, val in kwargs.items():
+            if val is not None:
+                columns.append(key.upper())
+                values.append(val)
+        placeholders = ", ".join(["?"] * len(columns))
+        cur.execute(
+            f"INSERT INTO CAPITAL_EVENTS ({', '.join(columns)}) VALUES ({placeholders})",
+            values,
+        )
+        self._conn.commit()
+        return cur.lastrowid
+
+    def get_capital_events(
+        self, account_id: Optional[int] = None
+    ) -> List[Dict[str, Any]]:
+        """Fetch capital events (dates ASC), optionally for one account."""
+        cur = self._conn.cursor()
+        if account_id is not None:
+            cur.execute(
+                "SELECT * FROM CAPITAL_EVENTS WHERE ACCOUNT_ID = ? ORDER BY DATE ASC, ID ASC",
+                (account_id,),
+            )
+        else:
+            cur.execute("SELECT * FROM CAPITAL_EVENTS ORDER BY DATE ASC, ID ASC")
+        return self._rows_to_dicts(cur.fetchall())
+
+    def get_pool_groups(self) -> List[Dict[str, Any]]:
+        """Fetch all pool-group registry rows."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT NAME, LABEL, ICON, NOTES FROM POOL_GROUPS ORDER BY NAME")
+        return self._rows_to_dicts(cur.fetchall())
+
+    def upsert_pool_group(
+        self,
+        name: str,
+        label: Optional[str] = None,
+        icon: Optional[str] = None,
+        notes: Optional[str] = None,
+    ) -> int:
+        """Insert or update a pool-group row. Returns the row ID."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """INSERT INTO POOL_GROUPS (NAME, LABEL, ICON, NOTES) VALUES (?, ?, ?, ?)
+               ON CONFLICT(NAME) DO UPDATE SET
+                   LABEL = excluded.LABEL, ICON = excluded.ICON, NOTES = excluded.NOTES""",
+            (name, label, icon, notes),
+        )
+        self._conn.commit()
+        return cur.lastrowid
 
     def close(self) -> None:
         """Close the database connection."""
@@ -702,53 +865,3 @@ class ColdTrackDB:
             (transaction_id,),
         )
         return self._rows_to_dicts(cur.fetchall())
-
-    # ------------------------------------------------------------------
-    # SENTINEL_POOLS CRUD (schema v3.1)
-    # ------------------------------------------------------------------
-
-    def upsert_sentinel_pool(
-        self,
-        pool_id: str,
-        account_id: Optional[int] = None,
-        group_name: Optional[str] = None,
-        position_type: Optional[str] = None,
-        season: Optional[int] = None,
-        position_config: Optional[str] = None,
-    ) -> str:
-        """Insert or update a sentinel pool registry row. Returns the pool id."""
-        cur = self._conn.cursor()
-        cur.execute(
-            """INSERT INTO SENTINEL_POOLS
-               (POOL_ID, ACCOUNT_ID, GROUP_NAME, POSITION_TYPE, SEASON, POSITION_CONFIG)
-               VALUES (?, ?, ?, ?, ?, ?)
-               ON CONFLICT(POOL_ID) DO UPDATE SET
-                   ACCOUNT_ID = excluded.ACCOUNT_ID,
-                   GROUP_NAME = excluded.GROUP_NAME,
-                   POSITION_TYPE = excluded.POSITION_TYPE,
-                   SEASON = excluded.SEASON,
-                   POSITION_CONFIG = excluded.POSITION_CONFIG,
-                   LAST_UPDATED = datetime('now')
-            """,
-            (pool_id, account_id, group_name, position_type, season, position_config),
-        )
-        self._conn.commit()
-        return pool_id
-
-    def get_sentinel_pool(self, pool_id: str) -> Optional[Dict[str, Any]]:
-        """Fetch a single sentinel pool registry row."""
-        cur = self._conn.cursor()
-        cur.execute("SELECT * FROM SENTINEL_POOLS WHERE POOL_ID = ?", (pool_id,))
-        return self._row_to_dict(cur.fetchone())
-
-    def get_sentinel_pools(self) -> List[Dict[str, Any]]:
-        """Fetch all sentinel pool registry rows."""
-        cur = self._conn.cursor()
-        cur.execute("SELECT * FROM SENTINEL_POOLS ORDER BY POOL_ID")
-        return self._rows_to_dicts(cur.fetchall())
-
-    def delete_sentinel_pool(self, pool_id: str) -> None:
-        """Delete a sentinel pool registry row."""
-        cur = self._conn.cursor()
-        cur.execute("DELETE FROM SENTINEL_POOLS WHERE POOL_ID = ?", (pool_id,))
-        self._conn.commit()

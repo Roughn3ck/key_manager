@@ -153,11 +153,11 @@ ColdTrack is the financial ledger module — the monetization layer of ColdStack
 - Tax report generation (Phase 5 — v5.3.6)
 
 ### Module Layout
-- `src/coldtrack/db.py` — SQLite schema (10 tables incl. v3.1 `SENTINEL_POOLS`), connection management, CRUD
+- `src/coldtrack/db.py` — SQLite schema (Kimi's v3.0 as-built: PORTFOLIOS→ACCOUNTS→LP_POSITIONS/TRANSACTIONS/…, plus `FEE_EVENTS`/`CAPITAL_EVENTS`/`POOL_GROUPS` and the LP_POSITIONS identifier columns — additive/idempotent), connection management, CRUD
 - `src/coldtrack/importer.py` — Bridge: vault address_db → ColdTrack DB
 - `src/coldtrack/tab.py` — ColdTrack tab UI (CustomTkinter) + "Export Sentinel View" button
-- `src/coldtrack/sentinel_export.py` (v5.3.12 NEW) — Sentinel export bridge: materializes `strategy_view.json` (contract v1) from coldtrack.db. Verbatim pool plumbing from `SENTINEL_POOLS.POSITION_CONFIG`, entry data from `LP_POSITIONS`, `fee_snapshot` = Σ fee events (backward-compat display), `fee_events` from `TYPE='fee_harvest'`, `capital_events` from `TYPE IN ('deposit','withdrawal')` (position-tagged via registry; `position_id: null` = portfolio-level owner attribution). Atomic write (tmp + `os.replace`) — the sentinel's fs.watchFile never sees a partial read. Default target `B:\Blockchain\lp-sentinel\strategy_view.json`, fallback `<app dir>\strategy_view.json`. Reads public portfolio records only — no vault data, no network. Graceful empties: empty registry → header + empty arrays, never throws.
-- Tests: `test_sentinel_export.py` (temp-DB fixtures → assert contract shape; mirrors the sentinel's `coldtrack_view_smoke_test.js`), `test_coldtrack_tab_widgets.py` (headless widget-construction smoke)
+- `src/coldtrack/sentinel_export.py` (v5.3.13) — **port of `kimi/coldtax/export_strategy_view.py`** (credited): materializes the merged `strategy_view.json` (Pool records from `LP_POSITIONS` under 'Executive Mind', KP positions from the `kitandpaul` account with `entry {usd,date,token0_amt,token1_amt,fees_claimed_usd}`, `pool_groups[]` passthrough, `FEE_EVENTS`/`CAPITAL_EVENTS` → snake_case with `position_id` as the sentinel pool-id string). Registry seam = `LP_POSITIONS` + `POOL_GROUPS`. Multi-DB `--db PATH`/`;`-separated, `$ARGUS_DB_PATH` env fallback, default = Pack + K&P DBs. Atomic tmp + `os.replace`; graceful empties; stdlib only; usable as module `main` / `coldtrack export`. Contract v1 reserved keys: `view_version, generated_by, generated_at, source_db, fee_events, capital_events, pool_groups`.
+- Tests: `test_sentinel_export.py` (temp-DB fixtures in Kimi's schema shape → assert merged contract; mirrors the sentinel's `coldtrack_view_smoke_test.js`), `test_coldtrack_tab_widgets.py` (headless widget-construction smoke)
 
 ### Security
 - ColdTrack DB stores financial data, NOT private keys
