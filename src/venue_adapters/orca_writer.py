@@ -477,18 +477,33 @@ class OrcaWriter(VenueWriter):
         return 0
 
     def _get_position_token_account(self, wallet: str, position_mint: str) -> Optional[str]:
-        """Find the wallet's token account holding the position NFT."""
-        result = self._rpc("getTokenAccountsByOwner", [
-            wallet, {"mint": position_mint}, {"encoding": "jsonParsed"},
-        ])
-        if result and isinstance(result, dict):
-            for entry in result.get("value", []):
-                try:
-                    amount = entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"]
-                    if amount == "1":
-                        return entry["pubkey"]
-                except (KeyError, TypeError):
-                    continue
+        """Find the wallet's token account holding the position NFT.
+
+        Retried with backoff — public RPCs rate-limit and a single 429 would
+        otherwise abort an otherwise-valid close rerun."""
+        last_err: Optional[Exception] = None
+        for attempt in range(3):
+            try:
+                result = self._rpc("getTokenAccountsByOwner", [
+                    wallet, {"mint": position_mint}, {"encoding": "jsonParsed"},
+                ])
+                if result and isinstance(result, dict):
+                    for entry in result.get("value", []):
+                        try:
+                            amount = entry["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"]
+                            if amount == "1":
+                                return entry["pubkey"]
+                        except (KeyError, TypeError):
+                            continue
+                    return None  # answered, wallet holds none
+            except Exception as e:  # network error — retry
+                last_err = e
+            time.sleep(1.0 + attempt)
+        if last_err is not None:
+            raise RuntimeError(
+                f"could not locate position token account for {position_mint} — retry. "
+                f"({last_err})"
+            )
         return None
 
     def _ensure_ata_ix(self, payer: bytes, wallet: str, mint: str,
@@ -530,18 +545,21 @@ class OrcaWriter(VenueWriter):
 
     def _build_collect_fees_ix(self, wallet: str, pos: Dict[str, Any],
                                 pool: Dict[str, Any]) -> Tuple[bytes, List[_AccountMeta], bytes]:
-        """collectFees instruction.
+        """collectFees instruction (pinned to the whirlpools IDL, disc a498cf631eba13b6).
 
         Accounts (CollectFees struct, verified order):
           0 whirlpool (mut, no sig)
           1 position_authority (sig, no mut)
           2 position (mut)
-          3 position_token_account (no mut)
+          3 position_token_account (no mut)   — interface acct; may be Token-2022 NFT
           4 token_owner_account_a (mut)
           5 token_vault_a (mut)
           6 token_owner_account_b (mut)
           7 token_vault_b (mut)
-          8 token_program (no mut, no sig)
+          8 token_program (no mut, no sig)    — classic SPL: TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+        Both pool legs in the target pool are classic SPL, so token_program is
+        classic; position_token_account is read via the token-interface Account
+        type, so a Token-2022 position NFT is accepted as-is.
         Data: 8-byte discriminator only.
         """
         wallet_b = _b58decode(wallet)
@@ -568,6 +586,51 @@ class OrcaWriter(VenueWriter):
             _AccountMeta(_b58decode(token_prog_a), False, False),             # token_program (pool tokens)
         ]
         return whirlpool_prog, accounts, DISC_COLLECT_FEES
+
+    def _build_collect_reward_ix(self, wallet: str, pos: Dict[str, Any],
+                                 pool: Dict[str, Any], reward_index: int,
+                                 ) -> Tuple[bytes, List[_AccountMeta], bytes, Optional[Tuple]]:
+        """collectReward instruction (pinned to the whirlpools IDL).
+
+        Returns (program_id, accounts, data, ata_create_ix_or_None) — the ATA
+        create instruction is separate so the caller bundles it with the collect.
+
+        Accounts (CollectReward struct, verified order):
+          0 whirlpool (mut, no sig)
+          1 position_authority (sig, no mut)
+          2 position (mut)
+          3 position_token_account (no mut)   — interface acct (Token-2022 NFT ok)
+          4 reward_owner_account (mut)        — owner's ATA for the reward mint
+          5 reward_vault (mut)                — pool's reward vault for this index
+          6 token_program (no mut, no sig)    — classic SPL for ORCA/standard rewards
+        Data: disc(8) + reward_index(u8).
+        """
+        wallet_b = _b58decode(wallet)
+        pos_token_acct = self._get_position_token_account(wallet, pos["position_mint"])
+        if not pos_token_acct:
+            raise RuntimeError(
+                f"Wallet {wallet} does not hold the position NFT for {pos['position_mint']}"
+            )
+        rinfos = pool.get("reward_infos") or []
+        rinfo = rinfos[reward_index]
+        reward_mint = rinfo["mint"]
+        reward_vault = rinfo["vault"]
+        reward_prog = self._get_token_program(reward_mint)
+        ataix, owner_ata = self._ensure_ata_ix(wallet_b, wallet, reward_mint,
+                                                token_program=reward_prog)
+
+        whirlpool_prog = _b58decode(WHIRLPOOL_PROGRAM)
+        accounts = [
+            _AccountMeta(_b58decode(pos["whirlpool"]), False, True),          # whirlpool
+            _AccountMeta(wallet_b, True, False),                              # position_authority
+            _AccountMeta(_b58decode(pos["position_address"]), False, True),   # position
+            _AccountMeta(_b58decode(pos_token_acct), False, False),           # position_token_account
+            _AccountMeta(_b58decode(owner_ata), False, True),                 # reward_owner_account
+            _AccountMeta(_b58decode(reward_vault), False, True),              # reward_vault
+            _AccountMeta(_b58decode(reward_prog), False, False),              # token_program
+        ]
+        data = DISC_COLLECT_REWARD + bytes([reward_index])
+        return whirlpool_prog, accounts, data, ataix
 
     def _build_modify_liquidity_ix(self, wallet: str, pos: Dict[str, Any],
                                     pool: Dict[str, Any], liquidity_amount: int,
@@ -637,16 +700,28 @@ class OrcaWriter(VenueWriter):
 
     def _build_close_position_ix(self, wallet: str, pos: Dict[str, Any],
                                   ) -> Tuple[bytes, List[_AccountMeta], bytes]:
-        """closePosition instruction.
+        """closePosition / closePositionWithTokenExtensions.
 
-        Accounts (ClosePosition struct, verified order):
-          0 position_authority (sig)
-          1 receiver (mut)
-          2 position (mut)
-          3 position_mint (mut)
-          4 position_token_account (mut)
-          5 token_program
-        Data: 8-byte discriminator only.
+        Pinned to the whirlpools IDL (anchor spec 0.1.0, program
+        whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc):
+
+          close_position (disc 7b86510031446262) — classic SPL NFT:
+            0 position_authority (sig)
+            1 receiver           (mut)
+            2 position           (mut; PDA seeds ["position", position_mint])
+            3 position_mint      (mut)
+            4 position_token_account (mut)
+            5 token_program = TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA
+
+          close_position_with_token_extensions (disc 01b6873b9b1963df) —
+          Token-2022 NFT (metadata extension; Orca's current UI mints these):
+            SAME 6 accounts in the SAME order; the only difference is account 5:
+            token_2022_program = TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb.
+            Both position_mint and position_token_account are closed (rent to
+            receiver).
+
+        Data: 8-byte discriminator only (no args). The variant is chosen by the
+        position mint's owner program (see _detect_token_program) — never guessed.
         """
         wallet_b = _b58decode(wallet)
         pos_token_acct = self._get_position_token_account(wallet, pos["position_mint"])
@@ -654,21 +729,19 @@ class OrcaWriter(VenueWriter):
             raise RuntimeError(
                 f"Wallet {wallet} does not hold the position NFT for {pos['position_mint']}"
             )
+        # Aborts with a clear error rather than guessing classic on RPC failure.
         token_prog = self._get_token_program(pos["position_mint"])
-        # Token-2022 position NFTs (Orca's current UI) require the dedicated
-        # closePositionWithTokenExtensions instruction — same account layout,
-        # different discriminator, token program MUST be Token-2022.
         disc = (DISC_CLOSE_POSITION_TE
                 if token_prog == TOKEN_2022_PROGRAM_ID
                 else DISC_CLOSE_POSITION)
         whirlpool_prog = _b58decode(WHIRLPOOL_PROGRAM)
         accounts = [
-            _AccountMeta(wallet_b, True, False),
+            _AccountMeta(wallet_b, True, False),                              # position_authority
             _AccountMeta(wallet_b, False, True),                              # receiver
-            _AccountMeta(_b58decode(pos["position_address"]), False, True),
-            _AccountMeta(_b58decode(pos["position_mint"]), False, True),
-            _AccountMeta(_b58decode(pos_token_acct), False, True),
-            _AccountMeta(_b58decode(token_prog), False, False),
+            _AccountMeta(_b58decode(pos["position_address"]), False, True),   # position
+            _AccountMeta(_b58decode(pos["position_mint"]), False, True),      # position_mint
+            _AccountMeta(_b58decode(pos_token_acct), False, True),            # position_token_account
+            _AccountMeta(_b58decode(token_prog), False, False),               # token_program / token_2022_program
         ]
         return whirlpool_prog, accounts, disc
 
@@ -998,6 +1071,30 @@ class OrcaWriter(VenueWriter):
         self._wait_for_confirmation(tx2, timeout=45)
         extra_ixs = []  # Clear for subsequent transactions
         print(f"[orca-writer] collectFees ok: {tx2}")
+
+        # Step 2b: collectReward for any initialized reward with amount_owed > 0.
+        # is_position_empty requires every reward_infos[i].amount_owed == 0 — a
+        # leftover ORCA (or other) reward would otherwise block closePosition with
+        # ClosePositionNotEmpty (6005).
+        pos = self._get_position_data(position_mint) or pos  # refresh post-collect
+        for i, rinfo in enumerate(pool.get("reward_infos") or []):
+            if not rinfo.get("initialized"):
+                continue
+            owed = 0
+            try:
+                owed = pos["reward_infos"][i]["amount_owed"]
+            except (KeyError, IndexError, TypeError):
+                owed = 0
+            if owed and owed > 0:
+                prog, accounts, data, ataix = self._build_collect_reward_ix(wallet, pos, pool, i)
+                reward_ix = (prog, accounts, data)
+                extras = ([ataix] if ataix else []) + extra_ixs
+                txr = self._sign_and_broadcast_single(account, [reward_ix],
+                                                       extra_instructions=extras)
+                tx_hashes.append(txr)
+                self._wait_for_confirmation(txr, timeout=45)
+                extra_ixs = []
+                print(f"[orca-writer] collectReward[{i}] ok: {txr}")
 
         # Step 3: closePosition — burns the NFT, recovers rent
         close_ix = self._build_close_position_ix(wallet, pos)

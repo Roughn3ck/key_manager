@@ -1,8 +1,47 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.13 (ColdTrack Sentinel Export — port of Kimi's tool)
+**Current Version:** v5.3.14 (Orca Close Position Token-2022 fixes — IllegalOwner + ClosePositionNotEmpty)
 **Last Updated:** 2026-09-21
+
+---
+
+## v5.3.14 - Orca Close Position (Token-2022): `IllegalOwner` + `ClosePositionNotEmpty` (6005) — UNRELEASED (Kris builds)
+
+### Summary
+Two back-to-back close failures on an Orca Whirlpool with a Token-2022 position NFT (Orca's current UI mints position NFTs as Token-2022 with metadata extension). Fixed both; the read-only mainnet simulation of the full close against the live position `F98SmN…` now returns **err: null** end-to-end (`BurnChecked` + `CloseAccount` ×2 complete).
+
+**(1) `IllegalOwner`** — `_detect_token_program()` silently fell back to the classic SPL program on any RPC failure; under a 429 storm the builder emitted the legacy `close_position` (classic disc + classic `TokenkegQ…`) against a Token-2022-owned mint. **Fix:** removed the silent fallback — retry detection across the configured RPCs with backoff; abort with a clear error ("could not determine token program for <mint> — retry") instead of guessing. The close/collect account layouts already matched the whirlpools IDL — no layout change was needed, only the detection.
+
+**(2) `ClosePositionNotEmpty` (6005)** — `Position::is_position_empty` requires `liquidity==0` AND `fee_owed_a/b==0` AND **every `reward_infos[i].amount_owed==0`**. The writer never collected rewards, so a leftover reward would block close even after fees drain. **Fix:** added a `collect_reward` step to `close_position()` for each initialized reward with `amount_owed > 0` (runs after collectFees, before closePosition), and extended the Position pool decoders to parse `reward_infos` so owed rewards are visible. The pool decoders also now expose reward mint/vault per slot.
+
+### Pinned IDL structs (orca-so/whirlpools IDL, anchor spec 0.1.0, program `whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc`)
+- `close_position` — disc `7b86510031446262`; 6 accts `[position_authority(sig), receiver(mut), position(mut), position_mint(mut), position_token_account(mut), token_program=TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA]`.
+- `close_position_with_token_extensions` — disc `01b6873b9b1963df`; SAME 6 accts in the same order; acct 5 = `token_2022_program=TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb`. Both variant builders' layouts match the IDL exactly.
+- `collect_fees` — disc `a498cf631eba13b6`; 9 accts; `position_token_account` is a token-interface account (Token-2022 NFT accepted); `token_program` classic (both pool legs classic SPL). No args.
+- `collect_reward` (NEW builder) — disc = `sha256("global:collect_reward")[:8]`; 8 accts `[whirlpool(mut), position_authority(sig), position(mut), position_token_account, reward_owner_account(mut), reward_vault(mut), token_program]`; data = disc(8) + `reward_index(u8)`.
+- `decrease_liquidity` — disc `a026d06f685b2c01`; 11 accts; unchanged (live-verified control).
+
+### Authoritative 216-byte Position layout (state/position.rs, `LEN = 8+136+72`)
+`disc(8) | whirlpool(32) | position_mint(32) | liquidity u128@72 | tick_lower i32@88 | tick_upper i32@92 | fee_growth_checkpoint_a u128@96 | fee_owed_a u64@112 | fee_growth_checkpoint_b u128@120 | fee_owed_b u64@128 | reward_infos[3]@136..216` — each `PositionRewardInfo { growth_inside_checkpoint u128, amount_owed u64 }` (24 B). `_decode_position_data` now parses `reward_infos` and exposes `is_position_empty`.
+
+### GUI error path
+- `key_manager_agent._format_solana_rpc_error` — the broadcast error now surfaces the full simulation `logs` array line-by-line (the anchor "thrown at" / account-index lines that anchor programs emit on revert), instead of a one-line dict repr that the copyable error textbox elided. Applied to both `broadcast_solana_tx` and `broadcast_raw_solana_tx`.
+
+### Verification (2026-09-21)
+- `test_orca_close_reproduce.py` (new) — full close-TE account list + 216-byte position hexdump + COMPLETE sim logs against live `F98SmN…`: **err: null** (18387 CU; BurnChecked → CloseAccount → CloseAccount all success).
+- `test_orca_close_simulate.py` — collect_fees err **null**; close(TE) succeeds or (when collect was only simulated against a stale owed-fee snapshot) reaches only `ClosePositionNotEmpty` — never IllegalOwner / AccountOwnedByWrongProgram.
+- `test_orca_close_layout.py` — golden-layout for classic close, Token-2022 close, collect_fees, **collect_reward**, plus a 216-byte 2.x position-bytes fixture asserting field offsets and `is_position_empty` on a nonzero reward: **PASS**.
+- Regression: `test_sentinel_export.py`, `test_coldtrack_tab_widgets.py` — **PASS**. `python -m py_compile` on all touched files: **PASS** (the `key_manager_agent.py` `\)` SyntaxWarning is a pre-existing docstring artifact, untouched by this change).
+- Per Kris: **no EXE build, no git push, no release** — source-only, ready for @kris to build + review.
+
+### Files Changed
+- `src/venue_adapters/orca_adapter.py` — token-program detection hardened (no silent classic fallback); `_decode_position_data` 2.x reward_infos + `is_position_empty`; `_decode_pool_data` reward_infos (mint/vault/authority)
+- `src/venue_adapters/orca_writer.py` — `collect_reward` builder (disc/accounts/data + ATA bundling); `close_position` adds a per-reward collect step; pinned-layout docstrings; resilient `_get_position_token_account`
+- `src/key_manager_agent.py` — `_format_solana_rpc_error` surfaces full sim logs (both Solana broadcast paths)
+- `src/gui_main_v5.py` — VERSION 5.3.14
+- `test_orca_close_layout.py`, `test_orca_close_simulate.py`, `test_orca_close_reproduce.py` — NEW
+- `STATUS.md` — this entry
 
 ---
 

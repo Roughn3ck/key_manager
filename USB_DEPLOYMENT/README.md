@@ -60,10 +60,13 @@ No browser. No browser extension. No cloud. Your keys never leave your machine.
 - LP position tracking with daily snapshots
 - Holdings with cost basis
 - Tax-ready reporting
+- **Sentinel Export** (v5.3.13) — one-click export of `strategy_view.json` from coldtrack.db for the Argus Sentinel. ColdTrack owns the records, the sentinel owns live state.
 
 ColdTrack uses a local SQLite database (`coldtrack.db`) co-located with your vault. Data is synced from your vault via a user-initiated bridge — your private keys and mnemonics never leave the encrypted vault.
 
-**Current status:** Foundation phase — portfolio/account tracking is live. Transaction import, LP tracking, cost basis, and tax reports are in active development.
+**Sentinel Export (v5.3.13):** the ColdTrack tab's "Export Sentinel View" button materializes a merged `strategy_view.json` (the contract-v1 payload the Argus Sentinel consumes) from one or more coldtrack DBs — the Pack and K&P portfolio ledgers. It ports Kimi's reference exporter into the app, reads only your public portfolio records — no vault data, no network — and writes atomically so the sentinel always sees a complete file. Pool records, K&P `entry` data, and dated fee/capital event streams are derived from the ledger's `LP_POSITIONS`, `FEE_EVENTS`, `CAPITAL_EVENTS`, and `POOL_GROUPS` tables.
+
+**Current status:** Foundation phase — portfolio/account tracking and Sentinel export are live. Transaction import, LP tracking, cost basis, and tax reports are in active development.
 
 ---
 

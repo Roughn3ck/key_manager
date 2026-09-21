@@ -224,31 +224,55 @@ def _get_account_data(address: str) -> Optional[bytes]:
 
 
 def _detect_token_program(mint_address: str) -> str:
-    """Detect whether a mint is SPL Token or Token-2022 by querying getAccountInfo.
+    """Detect whether a mint is owned by SPL Token or Token-2022, via getAccountInfo.
 
-    Returns the program ID that owns the mint account.
-    Defaults to SPL Token Program if the query fails.
+    Returns the token program ID that owns the mint account. There is NO silent
+    fallback to the classic program: a wrong-program guess produces an
+    IllegalOwner / AccountOwnedByWrongProgram on-chain error (the v5.3.13
+    closePosition failure). If no configured RPC returns the account after a
+    full retry pass, we abort with a clear error instead of guessing.
+
+    Public RPCs rate-limit bursts — each URL gets up to 3 attempts with backoff,
+    rotating across the configured endpoints.
     """
-    import json as _json
-    payload = _json.dumps({
+    payload = json.dumps({
         "jsonrpc": "2.0", "method": "getAccountInfo",
         "params": [mint_address, {"encoding": "base64"}], "id": 1,
     }).encode()
-    for url in (SOLANA_RPC_URL, SOLANA_RPC_FALLBACK, SOLANA_RPC_FALLBACK_2):
-        try:
-            req = urllib.request.Request(url, data=payload,
-                headers={"Content-Type": "application/json"})
-            with urllib.request.urlopen(req, timeout=15) as resp:
-                result = _json.loads(resp.read().decode("utf-8"))
-                value = result.get("result", {}).get("value")
-                if value:
-                    owner = value.get("owner", "")
-                    if owner == TOKEN_2022_PROGRAM_ID:
-                        return TOKEN_2022_PROGRAM_ID
-                    return SPL_TOKEN_PROGRAM_ID
-        except Exception:
-            continue
-    return SPL_TOKEN_PROGRAM_ID  # safe fallback
+    urls = (SOLANA_RPC_URL, SOLANA_RPC_FALLBACK, SOLANA_RPC_FALLBACK_2)
+    headers = {"Content-Type": "application/json"}
+    for attempt in range(3):
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, data=payload, headers=headers)
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    body = json.loads(resp.read().decode("utf-8"))
+            except (urllib.error.URLError, OSError, ValueError):
+                continue  # network/parse error — try next endpoint
+            if not isinstance(body, dict):
+                continue
+            if body.get("error"):  # JSON-RPC error (e.g. 429 surfaced as error)
+                continue
+            value = body.get("result", {}).get("value")
+            if value is None:
+                # Account not found at this slot yet — not a program-id answer.
+                continue
+            owner = value.get("owner", "")
+            if owner == TOKEN_2022_PROGRAM_ID:
+                return TOKEN_2022_PROGRAM_ID
+            if owner == SPL_TOKEN_PROGRAM_ID:
+                return SPL_TOKEN_PROGRAM_ID
+            # Some other owner (shouldn't happen for an SPL mint) — clear error.
+            raise RuntimeError(
+                f"Mint {mint_address} is owned by unexpected program {owner!r}; "
+                "cannot determine token program for closePosition."
+            )
+        if attempt < 2:
+            time.sleep(1.0 + attempt)  # linear backoff between passes
+    raise RuntimeError(
+        f"could not determine token program for {mint_address} — retry. "
+        "All configured Solana RPCs failed to return the mint account."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -467,21 +491,23 @@ def _find_orca_position_mints(wallet_address: str) -> List[str]:
 # ---------------------------------------------------------------------------
 
 def _decode_position_data(data: bytes) -> Optional[Dict[str, Any]]:
-    """Deserialize a Whirlpool Position account.
+    """Deserialize a Whirlpool Position account (2.x layout, 216 bytes).
 
-    Layout (position.rs):
-      0   8s  discriminator
-      8   32s whirlpool pubkey
-      40  32s position_mint pubkey
-      72  Q   liquidity u128 (two u64 words, low then high)
-      88  i   tick_lower_index i32
-      92  i   tick_upper_index i32
-      96  QQ  fee_growth_checkpoint_a u128
-      112 Q   fee_owed_a u64
-      120 QQ  fee_growth_checkpoint_b u128
-      128 Q   fee_owed_b u64
-      136 ... reward_infos (3 x 24 bytes)
-    Total: 216 bytes
+    Authoritative layout (orca-so/whirlpools state/position.rs — LEN = 8+136+72=216):
+       0   8s  discriminator  (aabc8fe47a40f7d0)
+       8  32s  whirlpool pubkey
+      40  32s  position_mint pubkey
+      72  Qs   liquidity u128 (LE: u64 low, u64 high)
+      88  i32  tick_lower_index
+      92  i32  tick_upper_index
+      96  Qs   fee_growth_checkpoint_a u128 (Q64.64)
+     112  Q    fee_owed_a u64
+     120  Qs   fee_growth_checkpoint_b u128 (Q64.64)
+     128  Q    fee_owed_b u64
+     136  ..   reward_infos[3], each PositionRewardInfo{ growth_inside_checkpoint u128, amount_owed u64 } (24 B)
+     208  ..   (end)
+    is_position_empty requires liquidity==0 AND fee_owed_a/b==0 AND every
+    reward_infos[i].amount_owed==0 — so reward parsing is required for close.
     """
     if len(data) < POSITION_ACCOUNT_LEN:
         return None
@@ -498,8 +524,21 @@ def _decode_position_data(data: bytes) -> Optional[Dict[str, Any]]:
         fgc_b_lo, fgc_b_hi = struct.unpack_from("<QQ", data, 120)
         fee_growth_checkpoint_b = fgc_b_lo + (fgc_b_hi << 64)
         fee_owed_b = struct.unpack_from("<Q", data, 128)[0]
+        reward_infos = []
+        for i in range(3):
+            base = 136 + i * 24
+            growth = int.from_bytes(data[base:base + 16], "little")
+            amount_owed = struct.unpack_from("<Q", data, base + 16)[0]
+            reward_infos.append({
+                "growth_inside_checkpoint": growth,
+                "amount_owed": amount_owed,
+            })
     except (struct.error, ValueError):
         return None
+    is_empty = (
+        liquidity == 0 and fee_owed_a == 0 and fee_owed_b == 0
+        and all(r["amount_owed"] == 0 for r in reward_infos)
+    )
     return {
         "whirlpool": pool,
         "position_mint": mint,
@@ -510,6 +549,8 @@ def _decode_position_data(data: bytes) -> Optional[Dict[str, Any]]:
         "fee_owed_a": fee_owed_a,
         "fee_growth_checkpoint_b": fee_growth_checkpoint_b,
         "fee_owed_b": fee_owed_b,
+        "reward_infos": reward_infos,
+        "is_position_empty": is_empty,
     }
 
 
@@ -536,7 +577,9 @@ def _decode_pool_data(data: bytes) -> Optional[Dict[str, Any]]:
       213 32s token_vault_b
       245 QQ  fee_growth_global_b u128 (Q64.64)
       261 Q   reward_last_updated_timestamp u64
-      269 ... reward_infos (3 x 128)
+      269 ... reward_infos (3 x 128 bytes each, WhirlpoolRewardInfo:
+                mint(32) + vault(32) + authority(32) + emissions_per_second_x64(16)
+                + growth_global_x64(16) + [16 bytes padding/reserved])
     """
     if len(data) < 269:
         return None
@@ -554,6 +597,21 @@ def _decode_pool_data(data: bytes) -> Optional[Dict[str, Any]]:
         token_mint_b = _b58encode(data[181:213])
         fg_b_lo, fg_b_hi = struct.unpack_from("<QQ", data, 245)
         fee_growth_global_b = fg_b_lo + (fg_b_hi << 64)
+        reward_last_updated = struct.unpack_from("<Q", data, 261)[0]
+        reward_infos = []
+        for i in range(3):
+            base = 269 + i * 128
+            if len(data) < base + 128:
+                break
+            rmint = _b58encode(data[base:base + 32])
+            rvault = _b58encode(data[base + 32:base + 64])
+            rauthority = _b58encode(data[base + 64:base + 96])
+            reward_infos.append({
+                "mint": rmint,
+                "vault": rvault,
+                "authority": rauthority,
+                "initialized": rmint != "11111111111111111111111111111111",
+            })
     except (struct.error, ValueError):
         return None
     return {
@@ -566,6 +624,8 @@ def _decode_pool_data(data: bytes) -> Optional[Dict[str, Any]]:
         "token_mint_b": token_mint_b,
         "fee_growth_global_a": fee_growth_global_a,
         "fee_growth_global_b": fee_growth_global_b,
+        "reward_last_updated_timestamp": reward_last_updated,
+        "reward_infos": reward_infos,
     }
 
 

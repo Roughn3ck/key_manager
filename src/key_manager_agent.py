@@ -1108,6 +1108,24 @@ class KeyManagerAgent:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    @staticmethod
+    def _format_solana_rpc_error(err: Any) -> str:
+        """Render a Solana JSON-RPC error for display, surfacing the full
+        simulation `logs` array (the anchor 'thrown at' / account-index lines)
+        that anchor programs emit on revert. Never truncate the logs."""
+        if isinstance(err, dict):
+            parts = [f"code={err.get('code')}", f"message={err.get('message')}"]
+            data = err.get("data")
+            if isinstance(data, dict):
+                if data.get("err") is not None:
+                    parts.append(f"err={data['err']}")
+                logs = data.get("logs")
+                if isinstance(logs, list) and logs:
+                    parts.append("logs:")
+                    parts.extend(f"  {line}" for line in logs)
+            return "Solana RPC error: " + "; ".join(parts)
+        return f"Solana RPC error: {err}"
+
     def broadcast_solana_tx(self, account: str, message_b64: str,
                             rpc_url: Optional[str] = None) -> dict:
         """Sign and broadcast a Solana transaction via sendTransaction.
@@ -1132,7 +1150,7 @@ class KeyManagerAgent:
             result = self._solana_rpc(rpc_url, "sendTransaction", [signed_tx_b64, {"encoding": "base64"}])
             if isinstance(result, dict) and "_rpc_error" in result:
                 return {"status": "error",
-                        "error": f"Solana RPC error: {result['_rpc_error']}"}
+                        "error": self._format_solana_rpc_error(result['_rpc_error'])}
             if isinstance(result, str):
                 return {"status": "ok", "result": {"tx_signature": result}}
             return {"status": "error",
@@ -1168,7 +1186,7 @@ class KeyManagerAgent:
             result = self._solana_rpc(rpc_url, "sendTransaction", [signed_tx_b64, {"encoding": "base64"}])
             if isinstance(result, dict) and "_rpc_error" in result:
                 return {"status": "error",
-                        "error": f"Solana RPC error: {result['_rpc_error']}"}
+                        "error": self._format_solana_rpc_error(result['_rpc_error'])}
             if isinstance(result, str):
                 return {"status": "ok", "result": {"tx_signature": result}}
             return {"status": "error",
