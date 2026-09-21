@@ -153,9 +153,11 @@ ColdTrack is the financial ledger module — the monetization layer of ColdStack
 - Tax report generation (Phase 5 — v5.3.6)
 
 ### Module Layout
-- `src/coldtrack/db.py` — SQLite schema (9 tables), connection management, CRUD
+- `src/coldtrack/db.py` — SQLite schema (10 tables incl. v3.1 `SENTINEL_POOLS`), connection management, CRUD
 - `src/coldtrack/importer.py` — Bridge: vault address_db → ColdTrack DB
-- `src/coldtrack/tab.py` — ColdTrack tab UI (CustomTkinter)
+- `src/coldtrack/tab.py` — ColdTrack tab UI (CustomTkinter) + "Export Sentinel View" button
+- `src/coldtrack/sentinel_export.py` (v5.3.12 NEW) — Sentinel export bridge: materializes `strategy_view.json` (contract v1) from coldtrack.db. Verbatim pool plumbing from `SENTINEL_POOLS.POSITION_CONFIG`, entry data from `LP_POSITIONS`, `fee_snapshot` = Σ fee events (backward-compat display), `fee_events` from `TYPE='fee_harvest'`, `capital_events` from `TYPE IN ('deposit','withdrawal')` (position-tagged via registry; `position_id: null` = portfolio-level owner attribution). Atomic write (tmp + `os.replace`) — the sentinel's fs.watchFile never sees a partial read. Default target `B:\Blockchain\lp-sentinel\strategy_view.json`, fallback `<app dir>\strategy_view.json`. Reads public portfolio records only — no vault data, no network. Graceful empties: empty registry → header + empty arrays, never throws.
+- Tests: `test_sentinel_export.py` (temp-DB fixtures → assert contract shape; mirrors the sentinel's `coldtrack_view_smoke_test.js`), `test_coldtrack_tab_widgets.py` (headless widget-construction smoke)
 
 ### Security
 - ColdTrack DB stores financial data, NOT private keys
@@ -181,7 +183,7 @@ When adding a new module to `src/coldtrack/`:
 
 ### Module layout (updates)
 - `gui_main_v5.py` — CTkTabview with Wallet / HL1 Vaults / LP Positions / Railgun / ColdTrack tabs; VERSION constant (single source of truth)
-- `coldtrack/` — SQLite ledger subpackage (db.py, importer.py, tab.py)
+- `coldtrack/` — SQLite ledger subpackage (db.py, importer.py, tab.py, sentinel_export.py)
 - `ed25519_utils.py` — Shared Ed25519 math primitives, base58 encoding, SLIP-0010 HD derivation (used by derivation_engine and key_manager_agent)
 
 ## Coding Conventions

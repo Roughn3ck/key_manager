@@ -2,11 +2,14 @@
 
 Stores the ledger database (coldtrack.db) co-located with key_vault.encrypted.
 Schema v3.0 — 9 tables, ALL CAPS naming, INTEGER PRIMARY KEY AUTOINCREMENT.
+Schema v3.1 — additive SENTINEL_POOLS registry for the Sentinel export bridge.
 """
 import sqlite3
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+SCHEMA_VERSION = "3.1"
 
 
 class ColdTrackDB:
@@ -203,6 +206,17 @@ class ColdTrackDB:
             TRANSACTION_ID INTEGER NOT NULL REFERENCES TRANSACTIONS(ID),
             TAG_ID INTEGER NOT NULL REFERENCES TAGS(ID),
             PRIMARY KEY (TRANSACTION_ID, TAG_ID)
+        );
+
+        -- Schema v3.1 (additive): Sentinel pool registry.
+        CREATE TABLE IF NOT EXISTS SENTINEL_POOLS (
+            POOL_ID         TEXT PRIMARY KEY,
+            ACCOUNT_ID      INTEGER REFERENCES ACCOUNTS(ID),
+            GROUP_NAME      TEXT,
+            POSITION_TYPE   TEXT,
+            SEASON          INTEGER,
+            POSITION_CONFIG TEXT,
+            LAST_UPDATED    TEXT NOT NULL DEFAULT (datetime('now'))
         );
         """)
         self._conn.commit()
@@ -688,3 +702,53 @@ class ColdTrackDB:
             (transaction_id,),
         )
         return self._rows_to_dicts(cur.fetchall())
+
+    # ------------------------------------------------------------------
+    # SENTINEL_POOLS CRUD (schema v3.1)
+    # ------------------------------------------------------------------
+
+    def upsert_sentinel_pool(
+        self,
+        pool_id: str,
+        account_id: Optional[int] = None,
+        group_name: Optional[str] = None,
+        position_type: Optional[str] = None,
+        season: Optional[int] = None,
+        position_config: Optional[str] = None,
+    ) -> str:
+        """Insert or update a sentinel pool registry row. Returns the pool id."""
+        cur = self._conn.cursor()
+        cur.execute(
+            """INSERT INTO SENTINEL_POOLS
+               (POOL_ID, ACCOUNT_ID, GROUP_NAME, POSITION_TYPE, SEASON, POSITION_CONFIG)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(POOL_ID) DO UPDATE SET
+                   ACCOUNT_ID = excluded.ACCOUNT_ID,
+                   GROUP_NAME = excluded.GROUP_NAME,
+                   POSITION_TYPE = excluded.POSITION_TYPE,
+                   SEASON = excluded.SEASON,
+                   POSITION_CONFIG = excluded.POSITION_CONFIG,
+                   LAST_UPDATED = datetime('now')
+            """,
+            (pool_id, account_id, group_name, position_type, season, position_config),
+        )
+        self._conn.commit()
+        return pool_id
+
+    def get_sentinel_pool(self, pool_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a single sentinel pool registry row."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM SENTINEL_POOLS WHERE POOL_ID = ?", (pool_id,))
+        return self._row_to_dict(cur.fetchone())
+
+    def get_sentinel_pools(self) -> List[Dict[str, Any]]:
+        """Fetch all sentinel pool registry rows."""
+        cur = self._conn.cursor()
+        cur.execute("SELECT * FROM SENTINEL_POOLS ORDER BY POOL_ID")
+        return self._rows_to_dicts(cur.fetchall())
+
+    def delete_sentinel_pool(self, pool_id: str) -> None:
+        """Delete a sentinel pool registry row."""
+        cur = self._conn.cursor()
+        cur.execute("DELETE FROM SENTINEL_POOLS WHERE POOL_ID = ?", (pool_id,))
+        self._conn.commit()

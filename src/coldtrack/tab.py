@@ -5,12 +5,14 @@ User-initiated sync button bridges vault data to ColdTrack DB.
 """
 import threading
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import customtkinter as ctk
 
 from coldtrack.db import ColdTrackDB
 from coldtrack.importer import ColdTrackImporter
+from coldtrack.sentinel_export import DEFAULT_EXPORT_PATH, SentinelExporter
 
 
 def _truncate_address(addr: str, prefix_len: int = 6, suffix_len: int = 4) -> str:
@@ -42,6 +44,7 @@ class ColdTrackTab:
         self.gui = gui_instance
         self._widgets: Dict[str, Any] = {}
         self._last_sync: Optional[str] = None
+        self._last_export: Optional[str] = None
 
     def create_tab(self, parent: ctk.CTkFrame) -> None:
         """Build the tab UI inside parent_tab (the CTkFrame returned by tabview.add("ColdTrack")).
@@ -89,6 +92,42 @@ class ColdTrackTab:
             text_color=("gray40", "gray60"),
         )
         self._widgets["status_label"].pack(side="right", padx=(0, 10))
+
+        # ─── Section: Sentinel export bar ───
+        export_frame = ctk.CTkFrame(container, corner_radius=8)
+        export_frame.pack(fill="x", pady=(0, 10))
+
+        self._widgets["export_btn"] = ctk.CTkButton(
+            export_frame,
+            text="Export Sentinel View",
+            command=self.on_export_clicked,
+            width=170,
+            height=30,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            fg_color=("#4CAF50", "#2E7D32"),
+            hover_color=("#43A047", "#1B5E20"),
+        )
+        self._widgets["export_btn"].pack(side="left", padx=(10, 8), pady=8)
+
+        ctk.CTkLabel(
+            export_frame,
+            text="Target:",
+            font=ctk.CTkFont(size=11),
+        ).pack(side="left", padx=(0, 4))
+
+        self._widgets["export_path_entry"] = ctk.CTkEntry(
+            export_frame, width=360, font=ctk.CTkFont(size=11)
+        )
+        self._widgets["export_path_entry"].pack(side="left", padx=(0, 8))
+        self._widgets["export_path_entry"].insert(0, str(DEFAULT_EXPORT_PATH))
+
+        self._widgets["export_status"] = ctk.CTkLabel(
+            export_frame,
+            text="Sentinel view not exported yet.",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray40", "gray60"),
+        )
+        self._widgets["export_status"].pack(side="left", padx=(4, 10))
 
         # ─── Section: Portfolio Cards ───
         self._widgets["portfolios_frame"] = ctk.CTkFrame(
@@ -163,6 +202,60 @@ class ColdTrackTab:
         self._widgets["sync_btn"].configure(state="normal", text="Sync from Vault")
         self._widgets["status_label"].configure(text="Sync failed")
         self.gui.show_notification(f"ColdTrack sync failed: {error_msg}", error=True)
+
+    def on_export_clicked(self) -> None:
+        """Handle 'Export Sentinel View' button click. Materializes
+        strategy_view.json from coldtrack.db (read-only, no vault access) and
+        writes it atomically. Runs on a worker thread; UI stays responsive."""
+        raw_path = self._widgets["export_path_entry"].get().strip()
+        export_path = Path(raw_path) if raw_path else None
+
+        self._widgets["export_btn"].configure(state="disabled", text="Exporting...")
+        self._widgets["export_status"].configure(text="Exporting sentinel view...")
+
+        def _export_thread():
+            db = None
+            try:
+                db = ColdTrackDB()
+                db.init_schema()
+                result = SentinelExporter(db, export_path).export()
+                self._last_export = datetime.now(timezone.utc).strftime(
+                    "%Y-%m-%d %H:%M UTC"
+                )
+                self.gui.root.after(0, lambda: self._on_export_complete(result))
+            except Exception as e:
+                self.gui.root.after(0, lambda: self._on_export_error(str(e)))
+            finally:
+                if db:
+                    db.close()
+
+        threading.Thread(target=_export_thread, daemon=True).start()
+
+    def _on_export_complete(self, result: Dict[str, Any]) -> None:
+        """Handle successful sentinel export."""
+        self._widgets["export_btn"].configure(state="normal", text="Export Sentinel View")
+        self._widgets["export_status"].configure(
+            text=(
+                f"Last export {self._last_export} · {result['pools']} pools · "
+                f"{result['fee_events']} fee events · {result['capital_events']} capital events"
+            )
+        )
+        # Surface the actual path (fallback may redirect when the sentinel dir
+        # is unwritable) so the tab always shows where the file landed.
+        entry = self._widgets.get("export_path_entry")
+        if entry is not None:
+            entry.delete(0, "end")
+            entry.insert(0, result["path"])
+        note = f"Sentinel view exported → {result['path']}"
+        if result.get("fallback"):
+            note += " (fallback path — sentinel dir unwritable)"
+        self.gui.show_notification(note)
+
+    def _on_export_error(self, error_msg: str) -> None:
+        """Handle sentinel export error."""
+        self._widgets["export_btn"].configure(state="normal", text="Export Sentinel View")
+        self._widgets["export_status"].configure(text="Export failed")
+        self.gui.show_notification(f"Sentinel export failed: {error_msg}", error=True)
 
     def refresh_display(self) -> None:
         """Reload portfolios and accounts from ColdTrack DB and update the UI."""

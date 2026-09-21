@@ -108,6 +108,8 @@ def build_gui_exe():
         '--hidden-import=coldtrack.db',
         '--hidden-import=coldtrack.importer',
         '--hidden-import=coldtrack.tab',
+        # --- v5.3.12: ColdTrack Sentinel export bridge ---
+        '--hidden-import=coldtrack.sentinel_export',
         '--collect-submodules=coldtrack',
         # --- v5.2.6: Ed25519 utils ---
         '--hidden-import=ed25519_utils',

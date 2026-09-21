@@ -1,8 +1,35 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.11 (SUI Address Flag-Order Hotfix)
-**Last Updated:** 2026-09-11
+**Current Version:** v5.3.12 (ColdTrack Sentinel Export)
+**Last Updated:** 2026-09-21
+
+---
+
+## v5.3.12 - ColdTrack Sentinel Export Bridge (2026-09-21)
+
+### Summary
+coldtrack.db becomes the pack's single system of record. The new ColdTrack tab **"Export Sentinel View"** materializes `strategy_view.json` — the contract-v1 payload the Argus Sentinel already consumes (`loadStrategyData()` + `enrichKP()` are shipped and smoke-tested sentinel-side). ColdStack owns the records, the sentinel owns live state; no keys cross the boundary because none exist in the ledger. Schema v3.1 is additive: a new `SENTINEL_POOLS` registry; v3.0 tables are untouched.
+
+### Added
+- **`src/coldtrack/sentinel_export.py`** — `SentinelExporter`: builds the contract-v1 view (header + pool records keyed by sentinel id + a `KP` container with verbatim POSITION_CONFIG plumbing and per-position `entry`s + `fee_events`/`capital_events` arrays), reads ONLY coldtrack.db (no vault, no network), writes atomically via tmp + `os.replace` (the sentinel's fs.watchFile never sees a partial read). Default target `B:\Blockchain\lp-sentinel\strategy_view.json`, overridable in the tab; falls back to `<app dir>\strategy_view.json` when the sentinel dir is unwritable. Graceful empties: an empty registry emits header + empty arrays and never throws.
+- **`SENTINEL_POOLS` table + CRUD** in `src/coldtrack/db.py` — POOL_ID (sentinel position id), ACCOUNT_ID (FK → ACCOUNTS), GROUP_NAME, POSITION_TYPE, SEASON, POSITION_CONFIG (verbatim strategy.json JSON blob), LAST_UPDATED.
+- **ColdTrack tab** — "Export Sentinel View" button (threaded, non-blocking) + target-path entry + status line (last export time, path, pool/fee/capital event counts).
+- Derivation rules implemented: entry data refreshed from `LP_POSITIONS`; `fee_snapshot` = cumulative Σ fee events (backward-compat display); `fee_events` from `TYPE='fee_harvest'` (position-tagged via registry); `capital_events` from `TYPE IN ('deposit','withdrawal')` (position-tagged when the account maps to a pool, else `position_id: null` feeding owner attribution; deposits → INJECTION, withdrawals → WITHDRAWAL).
+
+### Verification (2026-09-21)
+- `test_sentinel_export.py` (new) — temp-DB fixtures (G-pool + KP entry + fee_harvest + position deposit + portfolio-level deposit) → export → assert contract shape, mirroring the sentinel's `coldtrack_view_smoke_test.js`: PASS (incl. graceful-empty case, no tmp litter).
+- `test_coldtrack_tab_widgets.py` (new) — headless widget-construction smoke (stub GUI → build tab → expected widgets), per the v5.3.8 lesson: PASS.
+- `python -m py_compile` all touched src/build/test files: PASS.
+- EXE rebuilt (156.36 MB); `rpc_endpoints.json` synced next to the EXE.
+
+### Files Changed
+- `src/coldtrack/db.py` — SENTINEL_POOLS table + CRUD, SCHEMA_VERSION 3.1
+- `src/coldtrack/sentinel_export.py` — NEW (exporter)
+- `src/coldtrack/tab.py` — export button + status line + path entry
+- `src/gui_main_v5.py` — VERSION 5.3.12
+- `build_gui_v5.py` — hidden import `coldtrack.sentinel_export`
+- `test_sentinel_export.py`, `test_coldtrack_tab_widgets.py` — NEW
 
 ---
 
