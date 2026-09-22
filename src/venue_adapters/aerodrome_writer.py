@@ -163,7 +163,7 @@ class AerodromeWriter(VenueWriter):
                 "cannot resolve the close signer."
             )
         owner_l = owner.lower()
-        accounts = self._agent_call("accounts")
+        accounts = self._agent_call("list_accounts")
         accounts = accounts.get("result", accounts) if isinstance(accounts, dict) else accounts
         derivable = []
         if isinstance(accounts, dict):

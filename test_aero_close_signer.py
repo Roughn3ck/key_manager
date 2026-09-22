@@ -30,8 +30,13 @@ def _mk_writer(agent_accounts):
     w = aw.AerodromeWriter.__new__(aw.AerodromeWriter)
     w.agent_url = "http://127.0.0.1:8842"
     w.chain_id = aw.BASE_CHAIN_ID
-    # Stub the two network-bound members.
-    w._agent_call = lambda cmd, **kw: {"status": "ok", "result": agent_accounts} if cmd == "accounts" else {"status": "ok"}
+    # Stub the two network-bound members; "accounts" is a legacy name — current
+    # code calls "list_accounts".
+    def _agent_call(cmd, **kw):
+        if cmd in ("list_accounts", "accounts"):
+            return {"status": "ok", "result": agent_accounts}
+        return {"status": "ok"}
+    w._agent_call = _agent_call
     w._get_position_owner = lambda token_id, pm: OWNER
     return w
 
