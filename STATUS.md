@@ -1,12 +1,34 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.14 (Orca Close Position Token-2022 fixes — IllegalOwner + ClosePositionNotEmpty)
-**Last Updated:** 2026-09-21
+**Current Version:** v5.3.15 (Sentinel Export emit hotfix — nfpm / liquidity / KP entry ordering)
+**Last Updated:** 2026-09-22
 
 ---
 
-## v5.3.14 - Orca Close Position (Token-2022): `IllegalOwner` + `ClosePositionNotEmpty` (6005) — UNRELEASED (Kris builds)
+## v5.3.15 - Sentinel Export Port Hotfix: emit fields + KP entry-amount ordering (2026-09-22)
+
+### Summary
+Three targeted fixes to `src/coldtrack/sentinel_export.py`, ported exactly from Kimi's corrected reference (`kimi/coldtax/export_strategy_view.py` — the live verified view). No schema changes; the events contract is unchanged.
+
+### Fixed
+1. **Emit `nfpm`** from the KP position config blob (NOTES JSON), non-null-only — Project X needs it for the `positions(tokenId)` call; without it the sentinel's monitor errors that position.
+2. **Emit `liquidity`** from the config blob, non-null-only — Aerodrome (Slipstream) needs it for config-frozen position math.
+3. **KP entry-amount ordering** — the port emitted inverted entries for positions whose DB row is quote-first but the canonical monitor order is inverted (e.g. Orca cbBTC/SOL vs canonical SOL/cbBTC). Amounts now follow the canonical token0/token1 order via an alias-tolerant `_same_token` match (WHYPE/HYPE, WETH/ETH wrap aliases compare equal so they don't false-trigger the swap). Verified live: Orca (swap fires → token0_amt = the SOL amount), Aerodrome (`WETH`/`ETH` alias → no swap), Project X (`WHYPE`/`HYPE` → no swap).
+
+### Verification (2026-09-22)
+- `test_sentinel_export.py` — new fixture block: (a) inverted-token position (assert the swap fires), (b) wrap-alias WETH/ETH position (assert NO false swap), (c) Project X position with `nfpm` + `liquidity` in the config blob (assert both emit), plus `_same_token` alias semantics: **PASS**.
+- Field-for-field parity vs Kimi's reference script on the same three fixtures: **PASS** (zero diffs).
+- Regression: `test_coldtrack_tab_widgets.py`, `test_orca_close_layout.py` — **PASS**; `python -m py_compile` touched files — **PASS**.
+
+### Files Changed
+- `src/coldtrack/sentinel_export.py` — `_same_token` helper; KP loader emits `nfpm`/`liquidity`; entry-amount canonical ordering (`EXPORTER_VERSION` 5.3.15)
+- `src/gui_main_v5.py` — VERSION 5.3.15
+- `test_sentinel_export.py` — emit-fix fixtures + `_same_token` assertions
+
+---
+
+## v5.3.14 - Orca Close Position (Token-2022): `IllegalOwner` + `ClosePositionNotEmpty` (6005) (2026-09-21)
 
 ### Summary
 Two back-to-back close failures on an Orca Whirlpool with a Token-2022 position NFT (Orca's current UI mints position NFTs as Token-2022 with metadata extension). Fixed both; the read-only mainnet simulation of the full close against the live position `F98SmN…` now returns **err: null** end-to-end (`BurnChecked` + `CloseAccount` ×2 complete).

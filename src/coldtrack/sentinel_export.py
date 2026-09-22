@@ -49,7 +49,7 @@ logger = logging.getLogger(__name__)
 # Contract version the sentinel pins (argus_sentinel.js VIEW_CONTRACT_VERSION).
 VIEW_CONTRACT_VERSION = 1
 # Semver of this port, embedded in generated_by. Credit preserved.
-EXPORTER_VERSION = "5.3.13"
+EXPORTER_VERSION = "5.3.15"
 GENERATED_BY = f"ColdTrack Sentinel Export {EXPORTER_VERSION} (port of kimi/coldtax)"
 
 # Default merged-view sources: the Pack + K&P portfolio DBs (Kimi's layout).
@@ -175,17 +175,6 @@ def _load_kp_positions(cur: sqlite3.Cursor) -> List[Dict[str, Any]]:
             "token1": (canon.get("token1") if canon else None) or row.get("TOKEN_B"),
             "token1_decimals": (canon.get("token1_decimals") if canon else None),
             "fees": config.get("fees"),
-            # Contract: entry lights up K&P Net P&L.
-            "entry": {
-                "usd": row.get("TOTAL_VALUE_USD_ENTRY"),
-                "date": row.get("OPENED_DATE"),
-                "token0_amt": row.get("AMOUNT_A_ENTRY"),
-                "token1_amt": row.get("AMOUNT_B_ENTRY"),
-                "fees_claimed_usd": (row.get("FEES_CLAIMED_USD")
-                                     if row.get("FEES_CLAIMED_USD") is not None
-                                     else row.get("FEES_EARNED_USD")),
-            },
-            "_lp_id": row.get("ID"),  # internal: event mapping
         }
         if pid_type == "solana_position":
             pos["position_address"] = row.get("POSITION_ADDRESS")
@@ -195,6 +184,28 @@ def _load_kp_positions(cur: sqlite3.Cursor) -> List[Dict[str, Any]]:
         if row.get("TICK_LOWER") is not None:
             pos["tick_lower"] = row["TICK_LOWER"]
             pos["tick_upper"] = row["TICK_UPPER"]
+        # monitor plumbing the emit list used to drop (data lives in the NOTES config blob):
+        # nfpm — Project X positions() call · liquidity — Aerodrome config-frozen position math
+        if config.get("nfpm"):
+            pos["nfpm"] = config["nfpm"]
+        if config.get("liquidity"):
+            pos["liquidity"] = config["liquidity"]
+        # entry record — lights up K&P Net P&L in the sentinel (its enrichment keys off `entry`).
+        # Amounts follow the CANONICAL token0/token1 order: the DB's TOKEN_A/TOKEN_B is
+        # quote-first and may be inverted (Orca cbBTC/SOL vs canonical SOL/cbBTC).
+        entry_usd = row.get("TOTAL_VALUE_USD_ENTRY")
+        if entry_usd:
+            amt_a, amt_b = row.get("AMOUNT_A_ENTRY"), row.get("AMOUNT_B_ENTRY")
+            if canon and canon.get("token0") and not _same_token(canon.get("token0"), row.get("TOKEN_A")):
+                amt_a, amt_b = amt_b, amt_a   # canonical token0 order is inverted vs TOKEN_A/TOKEN_B
+            pos["entry"] = {
+                "usd": entry_usd,
+                "date": row.get("OPENED_DATE"),
+                "token0_amt": amt_a,
+                "token1_amt": amt_b,
+                "fees_claimed_usd": row.get("FEES_CLAIMED_USD") or 0,
+            }
+        pos["_lp_id"] = row.get("ID")  # internal: event mapping
         positions.append(pos)
     return positions
 
@@ -377,6 +388,19 @@ class SentinelExporter:
 def _rows_as_dicts(cur: sqlite3.Cursor) -> List[Dict[str, Any]]:
     cols = [c[0] for c in cur.description]
     return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def _same_token(x: Any, y: Any) -> bool:
+    """Alias-tolerant token match: WHYPE/HYPE, WETH/ETH wrap aliases compare equal.
+
+    Guard for the canonical-token0 inversion check: a 'W'-prefixed wrap alias of
+    the same underlying asset must NOT false-trigger the token0/token1 swap.
+    (from kimi/coldtax/export_strategy_view.py)
+    """
+    if not x or not y:
+        return False
+    x, y = str(x).upper(), str(y).upper()
+    return x == y or (x.startswith("W") and x[1:] == y) or (y.startswith("W") and y[1:] == x)
 
 
 def _parse_notes(raw: Optional[str]) -> Dict[str, Any]:

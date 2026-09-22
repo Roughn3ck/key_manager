@@ -22,7 +22,7 @@ if hasattr(sys.stdout, "reconfigure"):
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from coldtrack.db import ColdTrackDB  # noqa: E402
-from coldtrack.sentinel_export import SentinelExporter  # noqa: E402
+from coldtrack.sentinel_export import SentinelExporter, _same_token  # noqa: E402
 
 
 def _pack_db(path: Path) -> None:
@@ -182,5 +182,118 @@ def main() -> int:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def _kp_fixtures_db(path: Path) -> ColdTrackDB:
+    """kitandpaul account with three KP positions exercising the entry/nfpm/liquidity fixes."""
+    db = ColdTrackDB(path)
+    db.init_schema()
+    pf = db.upsert_portfolio("Kit & Paul", reporting_currency="CAD", tax_jurisdiction="CA")
+    acc = db.upsert_account(pf, "kitandpaul", "lp_position",
+                            address="0x8958Bd96896De55bFe31b1A6Eb2B280ebE098509")
+    # (a) inverted-token position: DB quote-first cbBTC/SOL, canonical SOL/cbBTC → swap must fire.
+    db.upsert_lp_position(
+        acc, "cbBTC/SOL", "Orca", "Solana", "cbBTC", "SOL", "2026-08-22",
+        position_id_type="solana_position", token_id="ORCA_MINT_A",
+        pool_address="ORCA_POOL_A", position_address="ORCA_POS_A",
+        amount_a_entry=0.01011925, amount_b_entry=9.20164718,
+        total_value_usd_entry=1678.06, fees_claimed_usd=0.0, status="active")
+    # (b) wrap-alias position: canonical ETH vs DB TOKEN_A WETH → NO swap (alias match).
+    db.upsert_lp_position(
+        acc, "WETH/cbBTC", "Aerodrome", "Base", "WETH", "cbBTC", "2026-08-01",
+        position_id_type="numeric_id", token_id="75269474",
+        pool_address="0x70acdf2ad0bf2402c957154f944c19ef4e1cbae1",
+        amount_a_entry=1.5, amount_b_entry=0.007,
+        total_value_usd_entry=7000.0, fees_claimed_usd=50.0, status="active",
+        notes=json.dumps({"liquidity": 123456789}))
+    # (c) nfpm + liquidity in config (Project X) → both must emit.
+    db.upsert_lp_position(
+        acc, "WHYPE/UBTC", "Project X", "HyperEVM", "WHYPE", "UBTC", "2026-08-15",
+        position_id_type="erc721", token_id="545983",
+        pool_address="0x0d6ecb912b6ee160e95bc198b618acc1bcb92525",
+        amount_a_entry=16.0559, amount_b_entry=0.017509,
+        total_value_usd_entry=2015.82, fees_claimed_usd=12.5, status="active",
+        notes=json.dumps({"nfpm": "0xead19ae861c29bbb2101e834922b2feee69b9091",
+                          "liquidity": 999888777}))
+    return db
+
+
+def _fix_kp_canonical():
+    """Monkeypatched canonical map (strategy.json KP positions, by position_id)."""
+    return {
+        # (a) canonical token0=SOL, token1=cbBTC (inverted vs DB cbBTC/SOL)
+        "ORCA_MINT_A": {"token0": "SOL", "token1": "cbBTC", "token0_decimals": 9, "token1_decimals": 8},
+        # (b) canonical token0=ETH (alias of DB TOKEN_A WETH) — must NOT swap
+        "75269474": {"token0": "ETH", "token1": "cbBTC", "token0_decimals": 18, "token1_decimals": 8},
+        # (c) canonical token0=WHYPE, token1=UBTC — same order as DB → no swap
+        "545983": {"token0": "WHYPE", "token1": "UBTC", "token0_decimals": 18, "token1_decimals": 8},
+    }
+
+
+def test_entry_nfpm_liquidity_fixes() -> None:
+    """Regression for the three v5.3.14 emit fixes against Kimi's reference script."""
+    import coldtrack.sentinel_export as se
+    tmp = Path(tempfile.mkdtemp(prefix="coldtrack_emit_fix_"))
+    try:
+        db = _kp_fixtures_db(tmp / "kp.db")
+        cur = db._conn.cursor()
+
+        # Drive the loader with a deterministic canonical map (no real strategy.json).
+        real_strategy_path = se._STRATEGY_JSON
+        se._STRATEGY_JSON = _FakeStrategy(_fix_kp_canonical())
+        try:
+            positions = se._load_kp_positions(cur)
+        finally:
+            se._STRATEGY_JSON = real_strategy_path
+
+        by_token = {p["token0"]: p for p in positions}
+        # (a) inverted: SOL amount must land under token0_amt (the SOL amount 9.20164718)
+        orca = by_token["SOL"]
+        assert orca["token1"] == "cbBTC"
+        assert orca["entry"]["token0_amt"] == 9.20164718, orca["entry"]
+        assert orca["entry"]["token1_amt"] == 0.01011925, orca["entry"]
+        # (b) wrap-alias: WETH/ETH must NOT swap; token0_amt stays the ETH-leg amount 1.5
+        eth = by_token["ETH"]
+        assert eth["entry"]["token0_amt"] == 1.5, eth["entry"]
+        assert eth["entry"]["token1_amt"] == 0.007, eth["entry"]
+        assert eth["liquidity"] == 123456789, "liquidity emits from config"
+        # (c) nfpm + liquidity both emit; entry not swapped (WHYPE first in both)
+        whype = by_token["WHYPE"]
+        assert whype["nfpm"] == "0xead19ae861c29bbb2101e834922b2feee69b9091"
+        assert whype["liquidity"] == 999888777
+        assert whype["entry"]["token0_amt"] == 16.0559 and whype["entry"]["token1_amt"] == 0.017509
+
+        # _same_token alias semantics
+        assert _same_token("WHYPE", "HYPE") and _same_token("WETH", "ETH")
+        assert _same_token("cbBTC", "cbBTC") and not _same_token("SOL", "cbBTC")
+        assert not _same_token(None, "ETH") and not _same_token("WBTC", "BTCBTC")
+        db.close()
+        print("✅ ENTRY/nfpm/liquidity FIXTURE TESTS PASS")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+class _FakeStrategy:
+    """Path-like shim whose .read_text() returns the fixture strategy.json KP block."""
+
+    def __init__(self, canonical):
+        self._canonical = canonical
+
+    def exists(self):
+        return True
+
+    def read_text(self, encoding="utf-8"):
+        return json.dumps({"KP": {"positions": [
+            {"pool": "ORCA_POOL_A", "position_id": "ORCA_MINT_A", "position_address": "ORCA_POS_A",
+             **self._canonical["ORCA_MINT_A"]},
+            {"pool": "0x70acdf2ad0bf2402c957154f944c19ef4e1cbae1", "position_id": "75269474",
+             **self._canonical["75269474"]},
+            {"pool": "0x0d6ecb912b6ee160e95bc198b618acc1bcb92525", "position_id": "545983",
+             **self._canonical["545983"]},
+        ]}})
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    rc = main()
+    if rc == 0:
+        test_entry_nfpm_liquidity_fixes()
+        print("✅ ALL SENTINEL EXPORT TESTS PASSED (port + emit-fix fixtures)")
+    sys.exit(rc)
