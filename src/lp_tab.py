@@ -1464,6 +1464,8 @@ class LPTab:
         except Exception:
             return False
         return False
+
+    def _lp_do_fetch_single(self):
         """Fetch a single LP position by NFT ID / position ID / pool address (threaded).
 
         v5.1: Smart fetch — if the entered value is a numeric token ID or
