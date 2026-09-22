@@ -4,9 +4,9 @@ Forge's project rules for working on ColdStack. Read this file at the start of e
 
 ## What This Is
 
-ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.3.15.
+ColdStack is a portable, offline-first cryptocurrency key vault (Windows GUI app, `coldstack.exe`) plus a headless signing agent. It stores BIP39 mnemonics, addresses, and private keys encrypted with AES-256-GCM + Argon2id, and optionally (user-toggled "Go Online") fetches read-only balances/prices and LP positions. Production version is v5.3.16.
 
-Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder â€” Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.3.15.
+Forge runs via OpenRouter using Kimi 2.7 on Ollama. Forge is the builder â€” Slater (CTO) is the architect. Forge executes, Slater reviews. ColdStack production version is v5.3.16.
 
 ## Commands
 
@@ -147,7 +147,7 @@ ColdTrack is the financial ledger module â€” the monetization layer of Cold
 - Tax-ready schema (cost basis, realized gains, holding periods)
 
 ### What It Does NOT Do (Yet)
-- Transaction import from on-chain (Phase 2 â€” v5.3.15)
+- Transaction import from on-chain (Phase 2 â€” v5.3.16)
 - LP position tracking with P&L (Phase 3 â€” v5.3.4)
 - Holdings & cost basis (Phase 4 â€” v5.3.5)
 - Tax report generation (Phase 5 â€” v5.3.6)
@@ -156,7 +156,8 @@ ColdTrack is the financial ledger module â€” the monetization layer of Cold
 - `src/coldtrack/db.py` â€” SQLite schema (Kimi's v3.0 as-built: PORTFOLIOSâ†’ACCOUNTSâ†’LP_POSITIONS/TRANSACTIONS/â€¦, plus `FEE_EVENTS`/`CAPITAL_EVENTS`/`POOL_GROUPS` and the LP_POSITIONS identifier columns â€” additive/idempotent), connection management, CRUD
 - `src/coldtrack/importer.py` â€” Bridge: vault address_db â†’ ColdTrack DB
 - `src/coldtrack/tab.py` â€” ColdTrack tab UI (CustomTkinter) + "Export Sentinel View" button
-- `src/coldtrack/sentinel_export.py` (v5.3.13; emit-fix v5.3.15) â€” **port of `kimi/coldtax/export_strategy_view.py`** (credited): materializes the merged `strategy_view.json` (Pool records from `LP_POSITIONS` under 'Executive Mind', KP positions from the `kitandpaul` account with `entry {usd,date,token0_amt,token1_amt,fees_claimed_usd}` in canonical token0/token1 order via alias-tolerant `_same_token`, plus `nfpm`/`liquidity` from the NOTES config blob, `pool_groups[]` passthrough, `FEE_EVENTS`/`CAPITAL_EVENTS` â†’ snake_case with `position_id` as the sentinel pool-id string). Registry seam = `LP_POSITIONS` + `POOL_GROUPS`. Multi-DB `--db PATH`/`;`-separated, `$ARGUS_DB_PATH` env fallback, default = Pack + K&P DBs. Atomic tmp + `os.replace`; graceful empties; stdlib only; usable as module `main` / `coldtrack export`. Contract v1 reserved keys: `view_version, generated_by, generated_at, source_db, fee_events, capital_events, pool_groups`.
+- `src/coldtrack/sentinel_export.py` (v5.3.13; emit-fix v5.3.16) â€” **port of `kimi/coldtax/export_strategy_view.py`** (credited): materializes the merged `strategy_view.json` (Pool records from `LP_POSITIONS` under 'Executive Mind', KP positions from the `kitandpaul` account with `entry {usd,date,token0_amt,token1_amt,fees_claimed_usd}` in canonical token0/token1 order via alias-tolerant `_same_token`, plus `nfpm`/`liquidity` from the NOTES config blob, `pool_groups[]` passthrough, `FEE_EVENTS`/`CAPITAL_EVENTS` â†’ snake_case with `position_id` as the sentinel pool-id string). Registry seam = `LP_POSITIONS` + `POOL_GROUPS`. Multi-DB `--db PATH`/`;`-separated, `$ARGUS_DB_PATH` env fallback, default = Pack + K&P DBs. Atomic tmp + `os.replace`; graceful empties; stdlib only; usable as module `main` / `coldtrack export`. Contract v1 reserved keys: `view_version, generated_by, generated_at, source_db, fee_events, capital_events, pool_groups`.
+- `src/coldtrack/close_recorder.py` (v5.3.16) — Close-Position Ledger Recorder: on a confirmed close the writer captures a `CloseResult` (legs/fee legs/sigs/blockTime/gas/prices) and the recorder writes TRANSACTIONS (lp_withdraw + yield legs with per-tx sig attribution), LP_POSITIONS (STATUS='closed', CLOSED_DATE), LP_SNAPSHOTS (close row, IN_RANGE=0, sigs in NOTES), FEE_EVENTS (SOURCE='HARVEST') in ONE BEGIN IMMEDIATE (busy_timeout 5s) transaction, then auto-exports the sentinel view. Matches LP_POSITIONS by TOKEN_ID = position mint; missing/ambiguous → pending record in `coldstack_pending_records/` + retry (never fabricates entry data). On write failure the close is still reported successful. Orca + Aerodrome (EVM) end-to-end; BSC/Project X log a "not implemented yet" stub. Aerodrome close uses owner-anchored signer resolution (`_resolve_owner_signer`: ownerOf(tokenId) → match the vault account whose derived EVM address == owner; aborts naming owner + derivable set, never falls back) and agent broadcast errors echo the derived signer. Tests: `test_close_recorder.py` (Orca, atomic 4-table on a DB copy), `test_close_recorder_aerodrome.py` (EVM, pack-db copy), `test_close_recorder_integration.py`, `test_close_recorder_widget.py`, `test_aero_close_signer.py` (owner-anchored resolution + live ownerOf anchor).
 - Tests: `test_sentinel_export.py` (temp-DB fixtures in Kimi's schema shape â†’ assert merged contract; mirrors the sentinel's `coldtrack_view_smoke_test.js`), `test_coldtrack_tab_widgets.py` (headless widget-construction smoke)
 
 ### Security

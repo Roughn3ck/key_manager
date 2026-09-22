@@ -391,6 +391,33 @@ class ColdTrackDB:
             self._conn = None
 
     # ------------------------------------------------------------------
+    # Transaction control (for the close recorder's atomic multi-table writes)
+    # ------------------------------------------------------------------
+
+    def conn(self) -> sqlite3.Connection:
+        """Direct handle to the live connection (recorder wraps its own txn)."""
+        return self._conn
+
+    def begin_immediate(self, busy_timeout_ms: int = 5000) -> None:
+        """Start an IMMEDIATE transaction with a busy timeout. For multi-table
+        atomic writes (the close recorder). The per-call helpers below still
+        self-commit; callers that need atomicity use this + commit/rollback and
+        drive inserts via raw SQL on conn()."""
+        self._conn.execute(f"PRAGMA busy_timeout = {busy_timeout_ms}")
+        self._conn.execute("BEGIN IMMEDIATE")
+
+    def commit(self) -> None:
+        """Commit an open transaction (recorder)."""
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        """Roll back an open transaction (recorder)."""
+        try:
+            self._conn.rollback()
+        except sqlite3.Error:
+            pass
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 

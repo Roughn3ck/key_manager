@@ -756,34 +756,8 @@ class LPTab:
                     break
             if already_rendered:
                 continue
-            # Render a "fetch failed" placeholder card
-            card = ctk.CTkFrame(scroll, corner_radius=10)
-            card.pack(fill="x", pady=5, padx=5)
-            info = ctk.CTkFrame(card, fg_color="transparent")
-            info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
-            ctk.CTkLabel(info, text=f"⚠️ {pair}  ·  {venue}",
-                         font=ctk.CTkFont(size=14, weight="bold"),
-                         text_color=("#cccc00", "#cccc00")).pack(anchor="w")
-            ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
-                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-            ctk.CTkLabel(info, text="Fetch failed — live data unavailable. Click Scan Wallet to retry.",
-                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-
-            button_frame = ctk.CTkFrame(card, fg_color="transparent")
-            button_frame.pack(side="right", padx=10, pady=8)
-            class _PlaceholderPos:
-                def __init__(self, position_id, pair, venue):
-                    self.position_id = position_id
-                    self.pair = pair
-                    self.venue = venue
-                    self.pool_id = ""
-            ph_pos = _PlaceholderPos(f"{prefix}:{tid}", pair, venue)
-            ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
-                          font=ctk.CTkFont(size=10),
-                          fg_color=("#dc3545", "#c82333"),
-                          hover_color=("#c82333", "#a71d2a"),
-                          command=lambda pos=ph_pos, card=card: self._lp_remove_pool(pos, card)
-                          ).pack(pady=2)
+            # Saved-pool placeholder: only this pool's card (closed ↔ failed).
+            self._lp_render_saved_placeholder(scroll, entry, prefix, tid, venue, pair)
 
         status = self._lp_widgets.get("status_label")
         if status:
@@ -865,6 +839,63 @@ class LPTab:
                 status.configure(text="Scanning wallet for new positions — this may take up to 6 minutes.")
             # No saved pools — do full scan immediately (existing behavior).
             self._lp_do_full_scan(address)
+
+    # ------------------------------------------------------------------
+    # Close → ledger recording (v5.3.16)
+    # ------------------------------------------------------------------
+
+    def _lp_portfolio_db_path(self):
+        """Resolve the coldtrack.db path for the active portfolio the position
+        belongs to. The portfolio DBs live in the kimi workspace layout; fall back
+        to the app-local coldtrack.db if none is resolvable. Returns a Path or None."""
+        try:
+            from pathlib import Path
+            # The export defaults carry the two live portfolio DBs (Pack + K&P).
+            from coldtrack.sentinel_export import DEFAULT_DB_PATHS
+            for p in DEFAULT_DB_PATHS:
+                if Path(p).exists():
+                    return Path(p)
+        except Exception:
+            pass
+        return None
+
+    def _lp_record_orca_close(self, writer, position, account_name: str) -> str:
+        """Record a successful Orca close to coldtrack.db (atomic, pending-file
+        on failure), then trigger the sentinel export. Returns a short user-facing
+        note appended to the success notification."""
+        return self._lp_record_close_for_writer(writer, venue="orca")
+
+    def _lp_record_close_for_writer(self, writer, venue: str = "") -> str:
+        """Generic close→ledger hook (v5.3.16): reads writer.last_close_result and
+        records it (atomic, pending on failure) + auto-exports. Venue-agnostic —
+        the writer supplies the CloseResult; this resolves the portfolio DB and calls
+        the recorder used by Orca and Aerodrome."""
+        result = getattr(writer, "last_close_result", None)
+        if result is None:
+            return "close confirmed on-chain"
+        db_path = self._lp_portfolio_db_path()
+        if db_path is None:
+            return "close confirmed on-chain · ledger write skipped (no portfolio db found)"
+        try:
+            from coldtrack.close_recorder import record_close_and_export
+            out = record_close_and_export(result, db_path, base_dir=db_path.parent)
+            if out.get("error"):
+                return ("close confirmed on-chain · ledger pending — position not mapped "
+                        "(recorded to coldstack_pending_records/, retry in ColdTrack)") \
+                    if ("not found" in out["error"] or "ambiguous" in out["error"]) \
+                    else f"close confirmed on-chain · ledger pending — {out['error']}"
+            return (f"close confirmed on-chain · ledger recorded "
+                    f"({out.get('transactions', 0)} tx legs, {out.get('fee_events', 0)} fee events)")
+        except RuntimeError as e:
+            msg = str(e)
+            if "no LP_POSITIONS row" in msg or "ambiguous" in msg:
+                return ("close confirmed on-chain · ledger pending — position not mapped "
+                        "(recorded to coldstack_pending_records/, retry in ColdTrack)")
+            return ("close confirmed on-chain · ledger write failed — saved to "
+                    "coldstack_pending_records/ (retry in ColdTrack)")
+        except Exception as e:
+            return ("close confirmed on-chain · ledger write failed — saved to "
+                    f"coldstack_pending_records/ (retry in ColdTrack). ({e})")
 
     def _lp_saved_entry_is_closed(self, pos, venue: str) -> bool:
         """Return True if a fetched saved-pool position is closed.
@@ -1350,7 +1381,89 @@ class LPTab:
 
         threading.Thread(target=_fetch_thread, daemon=True).start()
 
-    def _lp_do_fetch_single(self):
+    # ------------------------------------------------------------------
+    # Saved-pool placeholder rendering (closed vs fetch-failed)
+    # ------------------------------------------------------------------
+
+    def _lp_render_saved_placeholder(self, scroll, entry, prefix, tid, venue, pair):
+        """Render a saved pool that did not resolve to a live card.
+
+        Distinguishes a CLOSED position (account gone / is_position_empty) from a
+        transient fetch failure, so a gone position shows 'Position closed' with a
+        clean Remove affordance instead of an alarming 'Fetch failed'. Only the
+        specific saved pool's card is rendered — other saved pools are untouched.
+        """
+        card = ctk.CTkFrame(scroll, corner_radius=10)
+        card.pack(fill="x", pady=5, padx=5)
+        info = ctk.CTkFrame(card, fg_color="transparent")
+        info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
+
+        closed = self._lp_saved_pool_is_closed(entry, prefix, tid, venue)
+        if closed:
+            ctk.CTkLabel(info, text=f"✔ {pair}  ·  {venue}",
+                         font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=("#2fa572", "#2fa572")).pack(anchor="w")
+            ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
+                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+            ctk.CTkLabel(info, text="Position closed — nothing left on-chain. You can remove this entry.",
+                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+        else:
+            ctk.CTkLabel(info, text=f"⚠️ {pair}  ·  {venue}",
+                         font=ctk.CTkFont(size=14, weight="bold"),
+                         text_color=("#cccc00", "#cccc00")).pack(anchor="w")
+            ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
+                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+            ctk.CTkLabel(info, text="Fetch failed — live data unavailable. Click Scan Wallet to retry.",
+                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+
+        button_frame = ctk.CTkFrame(card, fg_color="transparent")
+        button_frame.pack(side="right", padx=10, pady=8)
+
+        class _PlaceholderPos:
+            def __init__(self, position_id, pair, venue):
+                self.position_id = position_id
+                self.pair = pair
+                self.venue = venue
+                self.pool_id = ""
+
+        ph_pos = _PlaceholderPos(f"{prefix}:{tid}", pair, venue)
+        ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
+                      font=ctk.CTkFont(size=10),
+                      fg_color=("#dc3545", "#c82333"),
+                      hover_color=("#c82333", "#a71d2a"),
+                      command=lambda pos=ph_pos, card=card: self._lp_remove_pool(pos, card)
+                      ).pack(pady=2)
+
+    def _lp_saved_pool_is_closed(self, entry, prefix, tid, venue) -> bool:
+        """True if a saved pool's position is closed/empty on-chain (best-effort).
+
+        Orca: the position PDA (derived from the saved mint) is gone, or the
+        decoded account is empty. Read-only; network errors return False so a
+        transient 429 is never misreported as closed.
+        """
+        try:
+            if venue in ("Orca", "orca") or prefix == "solana":
+                from venue_adapters.orca_adapter import (
+                    _derive_position_address, _account_exists, _get_account_data,
+                    _decode_position_data,
+                )
+                mint = str(tid).split(":", 1)[1] if ":" in str(tid) else str(tid)
+                pda = _derive_position_address(mint)
+                if not pda:
+                    return False
+                exists = _account_exists(pda)
+                if exists is False:
+                    return True                       # account gone → closed
+                if exists is None:
+                    return False                      # RPC down → not 'closed'
+                data = _get_account_data(pda)
+                if not data:
+                    return False
+                dec = _decode_position_data(data)
+                return bool(dec and dec.get("is_position_empty"))
+        except Exception:
+            return False
+        return False
         """Fetch a single LP position by NFT ID / position ID / pool address (threaded).
 
         v5.1: Smart fetch — if the entered value is a numeric token ID or
@@ -1572,34 +1685,8 @@ class LPTab:
                     break
             if already_rendered:
                 continue
-            # Render a "fetch failed" placeholder card
-            card = ctk.CTkFrame(scroll, corner_radius=10)
-            card.pack(fill="x", pady=5, padx=5)
-            info = ctk.CTkFrame(card, fg_color="transparent")
-            info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
-            ctk.CTkLabel(info, text=f"⚠️ {pair}  ·  {venue}",
-                         font=ctk.CTkFont(size=14, weight="bold"),
-                         text_color=("#cccc00", "#cccc00")).pack(anchor="w")
-            ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
-                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-            ctk.CTkLabel(info, text="Fetch failed — live data unavailable. Click Scan Wallet to retry.",
-                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-
-            button_frame = ctk.CTkFrame(card, fg_color="transparent")
-            button_frame.pack(side="right", padx=10, pady=8)
-            class _PlaceholderPos:
-                def __init__(self, position_id, pair, venue):
-                    self.position_id = position_id
-                    self.pair = pair
-                    self.venue = venue
-                    self.pool_id = ""
-            ph_pos = _PlaceholderPos(f"{prefix}:{tid}", pair, venue)
-            ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
-                          font=ctk.CTkFont(size=10),
-                          fg_color=("#dc3545", "#c82333"),
-                          hover_color=("#c82333", "#a71d2a"),
-                          command=lambda pos=ph_pos, card=card: self._lp_remove_pool(pos, card)
-                          ).pack(pady=2)
+            # Saved-pool placeholder: only this pool's card (closed ↔ failed).
+            self._lp_render_saved_placeholder(scroll, entry, prefix, tid, venue, pair)
 
         if status:
             fetched = len(unique_positions)
@@ -3171,6 +3258,12 @@ class LPTab:
                         self.gui.root.after(0, lambda: self.gui.show_notification(
                             "Agent not running. Start key_manager_agent with --serve.", error=True))
                         return
+                    # v5.3.16: give the writer the price engine so the close
+                    # capture can price legs for the ledger record.
+                    try:
+                        writer.price_engine = self.gui.price_engine
+                    except Exception:
+                        pass
                     tx_hashes = writer.close_position(position.position_id, account_name)
                     if tx_hashes:
                         # v5.3.4: post-close verification — closePosition burns
@@ -3197,8 +3290,10 @@ class LPTab:
                                     break
                                 time.sleep(2)
                         if confirmed:
-                            self.gui.root.after(0, lambda: self._lp_forget_position(
-                                position, notify="Position closed \u2713 confirmed on-chain"))
+                            # v5.3.16: write the close to coldtrack.db + auto-export.
+                            note = self._lp_record_orca_close(writer, position, account_name)
+                            self.gui.root.after(0, lambda n=note: self._lp_forget_position(
+                                position, notify=f"Position closed ✓ {n}"))
                         elif verifiable:
                             self.gui.root.after(0, lambda: self.gui.show_notification(
                                 f"Close TXs submitted but position still on-chain — verify. "
@@ -3312,8 +3407,18 @@ class LPTab:
                             self.gui.root.after(0, lambda: self.gui.show_notification(
                                 "Liquidity still on-chain — retry Close or Collect Fees", error=True))
                             return
-                        self.gui.root.after(0, lambda: self._lp_forget_position(
-                            position, notify="Position closed ✓ confirmed on-chain"))
+                        # v5.3.16: ledger auto-record — Aerodrome wired; others stub.
+                        vkey = (venue_key or "").lower()
+                        is_aero = vkey in ("aerodrome", "aerodrome/base") or "aerodrome" in vkey
+                        if is_aero:
+                            note = self._lp_record_close_for_writer(writer, venue="aerodrome")
+                        else:
+                            print(f"[close_position] ledger recording not implemented for venue "
+                                  f"'{venue_key}' yet — close confirmed on-chain; record via Kimi's tool.")
+                            note = ("close confirmed on-chain — ledger recording pending "
+                                    "(this venue's recorder is a follow-up)")
+                        self.gui.root.after(0, lambda n=note: self._lp_forget_position(
+                            position, notify=f"Position closed ✓ {n}"))
                     elif len(tx_hashes) == 1:
                         # Partial close (collect failed) — keep the card.
                         self.gui.root.after(0, lambda: self.gui.show_notification(

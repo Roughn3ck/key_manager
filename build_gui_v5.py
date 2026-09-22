@@ -110,6 +110,8 @@ def build_gui_exe():
         '--hidden-import=coldtrack.tab',
         # --- v5.3.12: ColdTrack Sentinel export bridge ---
         '--hidden-import=coldtrack.sentinel_export',
+        # --- v5.3.16: ColdTrack close recorder (Orca close → ledger) ---
+        '--hidden-import=coldtrack.close_recorder',
         '--collect-submodules=coldtrack',
         # --- v5.2.6: Ed25519 utils ---
         '--hidden-import=ed25519_utils',

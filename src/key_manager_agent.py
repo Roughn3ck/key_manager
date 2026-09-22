@@ -926,6 +926,13 @@ class KeyManagerAgent:
             if not rpc:
                 return {"status": "error", "error": "rpc URL required for broadcast"}
 
+            # v5.3.16: echo the derived signer on every broadcast error so a
+            # wrong-key close is diagnosable in one glance.
+            signer_note = ""
+            try:
+                signer_note = f" [signer {sign_result['result'].get('from', '?')}]"
+            except Exception:
+                pass
             try:
                 tx_hash = broadcast_raw_tx(rpc, signed_tx)
             except Exception as broadcast_err:
@@ -1007,7 +1014,7 @@ class KeyManagerAgent:
                 elif "nonce too low" in err_msg.lower():
                     # A previous tx already used this nonce. The tx may have succeeded.
                     return {"status": "error",
-                            "error": f"Nonce too low -- a previous tx may have already used this nonce. Check on-chain. ({err_msg})"}
+                            "error": f"Nonce too low -- a previous tx may have already used this nonce. Check on-chain.{signer_note} ({err_msg})"}
                 else:
                     raise
 
@@ -1022,7 +1029,15 @@ class KeyManagerAgent:
                 }
             }
         except Exception as e:
-            return {"status": "error", "error": str(e)}
+            # v5.3.16: echo the derived signer when known so the close-signer
+            # class of bug is diagnosable in one glance.
+            extra = ""
+            try:
+                if isinstance(locals().get("sign_result"), dict) and sign_result.get("result"):
+                    extra = f" [signer {sign_result['result'].get('from', '?')}]"
+            except Exception:
+                pass
+            return {"status": "error", "error": f"{e}{extra}"}
 
     def sign_message(self, account: str, message: str, chain: str = "EVM") -> dict:
         """Sign an arbitrary message. Returns signature (r, s, v)."""

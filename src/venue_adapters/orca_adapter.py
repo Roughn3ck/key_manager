@@ -36,8 +36,10 @@ from price_engine import PriceEngine
 # ---------------------------------------------------------------------------
 
 SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com"
-SOLANA_RPC_FALLBACK = "https://solana-api.projectserum.com"
-SOLANA_RPC_FALLBACK_2 = "https://rpc.ankr.com/solana"
+# 2026-09: projectserum + rpc.ankr free tier are deprecated/403. Rotate over
+# reliable public endpoints for the read path (429-aware retry below).
+SOLANA_RPC_FALLBACK = "https://solana-rpc.publicnode.com"
+SOLANA_RPC_FALLBACK_2 = "https://solana.drpc.org"
 
 # ---------------------------------------------------------------------------
 # Program IDs
@@ -189,7 +191,7 @@ def _solana_rpc_call(method: str, params: list) -> Optional[Any]:
     ).encode("utf-8")
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "ColdStack/5.2.5",
+        "User-Agent": "ColdStack/5.3.16",
     }
     for url in (SOLANA_RPC_URL, SOLANA_RPC_FALLBACK, SOLANA_RPC_FALLBACK_2):
         try:
@@ -204,9 +206,47 @@ def _solana_rpc_call(method: str, params: list) -> Optional[Any]:
     return None
 
 
+def _solana_rpc_call_resilient(method: str, params: list,
+                               attempts: int = 4, timeout: int = 20) -> Optional[Any]:
+    """Read-path RPC with retry/backoff + endpoint rotation (429-aware).
+
+    The write path has this; the read path historically did not, so a burst of
+    public-RPC 429s surfaced as a generic 'Fetch failed'. Up to ``attempts``
+    passes across the configured endpoints with linear backoff; returns the
+    'result' field or None when every attempt failed (RPC unavailable).
+    """
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "method": method, "params": params, "id": 1}
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json", "User-Agent": "ColdStack/5.3.16"}
+    urls = (SOLANA_RPC_URL, SOLANA_RPC_FALLBACK, SOLANA_RPC_FALLBACK_2)
+    for attempt in range(attempts):
+        for url in urls:
+            try:
+                req = urllib.request.Request(url, data=payload, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+            except (urllib.error.URLError, OSError, ValueError):
+                continue
+            if isinstance(data, dict) and data.get("error"):
+                code = (data["error"] or {}).get("code")
+                if code not in (429, -32429, -32016):  # retryable rate/behind errors
+                    return data.get("result")  # a real on-chain answer (often None)
+                continue
+            return data.get("result")
+        if attempt < attempts - 1:
+            time.sleep(1.0 + 0.5 * attempt)
+    return None
+
+
 def _get_account_data(address: str) -> Optional[bytes]:
-    """Fetch raw account bytes for an address (base64-encoded)."""
-    result = _solana_rpc_call(
+    """Fetch raw account bytes for an address (base64-encoded).
+
+    Read path is resilient: retry/backoff + endpoint rotation (429-aware), so a
+    public-RPC burst doesn't surface as a phantom 'not found'. None on a real
+    not-found AND on exhausted retry — callers distinguish via _account_exists.
+    """
+    result = _solana_rpc_call_resilient(
         "getAccountInfo", [address, {"encoding": "base64"}]
     )
     if not result or not isinstance(result, dict):
@@ -221,6 +261,20 @@ def _get_account_data(address: str) -> Optional[bytes]:
         except Exception:
             return None
     return None
+
+
+def _account_exists(address: str) -> Optional[bool]:
+    """True/False if the account exists on-chain, None if the RPC is down.
+
+    Distinguishes 'RPC unavailable' from a real 'account not found' for the
+    read path (a closed position's PDA is gone → not found, not an error).
+    """
+    result = _solana_rpc_call_resilient(
+        "getAccountInfo", [address, {"encoding": "base64"}]
+    )
+    if not isinstance(result, dict):
+        return None  # RPC unavailable (all retries exhausted)
+    return result.get("value") is not None
 
 
 def _detect_token_program(mint_address: str) -> str:
@@ -326,6 +380,39 @@ def _is_fallback_symbol(symbol: str) -> bool:
     fallback — a truncated mint string will never be priced by the engine.
     """
     return bool(symbol) and "..." in symbol
+
+
+def orca_display_pair(symbol_a: str, symbol_b: str) -> Tuple[str, str, str]:
+    """Order a token pair per Orca's display convention (quote-style asset LAST).
+
+    Orca (and the coldtrack ledger / sentinel view) show the higher-ticket asset
+    first: SOL last when paired with a non-USDC token (cbBTC/SOL), USDC last when
+    paired with SOL (SOL/USDC), otherwise keep the token order as-is. Returns
+    (pair_label, display_token_0, display_token_1) so callers can relabel the
+    card while keeping the on-chain token_0/token_1 mapping intact for math.
+    """
+    a, b = symbol_a, symbol_b
+    # Quote-style assets render LAST. Rank on the raw symbol (NOT the USD-mapped
+    # canonical — _canonical_symbol('USDC') yields 'USD', which is not a token).
+    a_q = (a or "").upper()
+    b_q = (b or "").upper()
+    def _q_rank(sym_upper: str) -> int:
+        # 0 = keep-first (volatile/base), higher = quote-style (render last)
+        if sym_upper in ("USDC", "USDT"):
+            return 2      # stables out-rank SOL: SOL/USDC
+        if sym_upper in ("SOL", "WSOL"):
+            return 1      # SOL goes last vs non-stable: cbBTC/SOL
+        return 0
+    ra, rb = _q_rank(a_q), _q_rank(b_q)
+    # The leg with the LOWER quote-rank renders FIRST (volatile/base first,
+    # quote-style last). Equal rank → keep the input order.
+    if rb > ra:
+        disp0, disp1 = a, b          # b is quote-style → renders last
+    elif ra > rb:
+        disp0, disp1 = b, a
+    else:
+        disp0, disp1 = a, b
+    return f"{disp0}/{disp1}", disp0, disp1
 
 
 def _get_sol_token_decimals(mint: str) -> int:
@@ -1088,9 +1175,23 @@ class OrcaAdapter(VenueAdapter):
         price_engine: Optional[PriceEngine] = None,
         wallet_address: str = "",
     ) -> Optional[LPPosition]:
-        """Fetch a position given its position account address directly."""
+        """Fetch a position given its position account address directly.
+
+        Distinguishes closed (account gone) from RPC-unavailable so the GUI can
+        render 'Position closed' instead of a generic fetch failure."""
         data = _get_account_data(position_addr)
         if not data or len(data) != POSITION_ACCOUNT_LEN:
+            exists = _account_exists(position_addr)
+            if exists is False:
+                return LPPosition(
+                    position_id=f"solana:{position_addr}",
+                    venue="Orca", chain="Solana", error="Position closed",
+                )
+            if exists is None:
+                return LPPosition(
+                    position_id=f"solana:{position_addr}",
+                    venue="Orca", chain="Solana", error="Solana RPC unavailable — retry",
+                )
             return None
         # Extract the mint from the account data (offset 40..72)
         mint = _b58encode(data[40:72])
@@ -1103,14 +1204,25 @@ class OrcaAdapter(VenueAdapter):
         price_engine: Optional[PriceEngine] = None,
         wallet_address: str = "",
     ) -> Optional[LPPosition]:
-        """Fetch and decode a position account + its pool, returning an LPPosition."""
+        """Fetch and decode a position account + its pool, returning an LPPosition.
+
+        Distinguishes closed/removed positions from transient RPC failure so the
+        GUI can render 'Position closed' (offer removal) instead of a generic
+        'Fetch failed' under a public-RPC 429 burst.
+        """
         pos_bytes = _get_account_data(position_addr)
         if not pos_bytes:
+            exists = _account_exists(position_addr)
+            if exists is False:
+                return LPPosition(
+                    position_id=f"solana:{position_mint}",
+                    venue="Orca", chain="Solana",
+                    error="Position closed",
+                )
             return LPPosition(
                 position_id=f"solana:{position_mint}",
-                venue="Orca",
-                chain="Solana",
-                error="Solana RPC unavailable",
+                venue="Orca", chain="Solana",
+                error="Solana RPC unavailable — retry",
             )
         position = _decode_position_data(pos_bytes)
         if not position:
@@ -1228,12 +1340,13 @@ class OrcaAdapter(VenueAdapter):
                     f"{fee_estimate_note} · {unpriced_note}" if fee_estimate_note else unpriced_note
                 )
 
+        display_pair, disp0, disp1 = orca_display_pair(symbol_a, symbol_b)
         return LPPosition(
             position_id=f"solana:{position_mint}",
             pool_id=pool_addr,
             venue="Orca",
             chain="Solana",
-            pair=f"{symbol_a}/{symbol_b}",
+            pair=display_pair,
             token_0=symbol_a,
             token_1=symbol_b,
             current_price=current_price,
@@ -1281,13 +1394,14 @@ class OrcaAdapter(VenueAdapter):
         dec_a = _get_sol_token_decimals(pool["token_mint_a"])
         dec_b = _get_sol_token_decimals(pool["token_mint_b"])
         current_price = _tick_to_price(pool["tick_current"], dec_a, dec_b)
+        display_pair, _, _ = orca_display_pair(symbol_a, symbol_b)
 
         return LPPosition(
             position_id=f"solana:{pool_addr}",
             pool_id=pool_addr,
             venue="Orca",
             chain="Solana",
-            pair=f"{symbol_a}/{symbol_b}",
+            pair=display_pair,
             token_0=symbol_a,
             token_1=symbol_b,
             current_price=current_price,

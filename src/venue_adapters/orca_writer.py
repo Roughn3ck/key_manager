@@ -26,6 +26,7 @@ import struct
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from venue_adapters.venue_writer import (
@@ -1009,9 +1010,13 @@ class OrcaWriter(VenueWriter):
         return tx_sig
 
     def close_position(self, position_id: str, account: str) -> List[str]:
-        """Close an Orca Whirlpool position: decrease liquidity (100%) → collectFees → closePosition.
+        """Close an Orca Whirlpool position: decrease (100%) → collectFees →
+        collect_reward → closePosition. Returns tx signatures, in order.
 
-        Returns a list of transaction signatures, in order.
+        On a successful close the writer also builds a `CloseResult` (stored on
+        `self.last_close_result`) capturing every token movement, per-tx gas and
+        blockTime, so the GUI completion path can write the ledger deterministically
+        with correct per-tx signature attribution.
         """
         position_mint = position_id.split(":", 1)[1] if ":" in position_id else position_id
         wallet = self._get_solana_address(account)
@@ -1024,7 +1029,16 @@ class OrcaWriter(VenueWriter):
         if not pool:
             raise RuntimeError(f"Could not read pool {pos['whirlpool']}")
 
+        # Track the role of each tx sig for per-tx signature attribution.
         tx_hashes: List[str] = []
+        self._close_capture = {
+            "position_mint": position_mint,
+            "decrease_sig": None, "collect_sig": None, "reward_sigs": [], "close_sig": None,
+            "mint_a": pool["token_mint_a"], "mint_b": pool["token_mint_b"],
+            "dec_a": _get_sol_token_decimals(pool["token_mint_a"]),
+            "dec_b": _get_sol_token_decimals(pool["token_mint_b"]),
+        }
+        self.last_close_result = None
 
         # Ensure ATAs exist before any token transfer — detect per-mint for pool tokens
         token_prog_a = self._get_token_program(pool["token_mint_a"])
@@ -1048,6 +1062,7 @@ class OrcaWriter(VenueWriter):
             tx1 = self._sign_and_broadcast_single(account, [decrease_ix],
                                                    extra_instructions=extra_ixs)
             tx_hashes.append(tx1)
+            self._close_capture["decrease_sig"] = tx1
             self._wait_for_confirmation(tx1, timeout=45)
             # After decrease, the ATA-creation extras are consumed; clear for subsequent TXs
             extra_ixs = []
@@ -1068,6 +1083,7 @@ class OrcaWriter(VenueWriter):
         tx2 = self._sign_and_broadcast_single(account, [collect_ix],
                                                extra_instructions=extra_ixs)
         tx_hashes.append(tx2)
+        self._close_capture["collect_sig"] = tx2
         self._wait_for_confirmation(tx2, timeout=45)
         extra_ixs = []  # Clear for subsequent transactions
         print(f"[orca-writer] collectFees ok: {tx2}")
@@ -1092,6 +1108,7 @@ class OrcaWriter(VenueWriter):
                 txr = self._sign_and_broadcast_single(account, [reward_ix],
                                                        extra_instructions=extras)
                 tx_hashes.append(txr)
+                self._close_capture["reward_sigs"].append(txr)
                 self._wait_for_confirmation(txr, timeout=45)
                 extra_ixs = []
                 print(f"[orca-writer] collectReward[{i}] ok: {txr}")
@@ -1100,13 +1117,140 @@ class OrcaWriter(VenueWriter):
         close_ix = self._build_close_position_ix(wallet, pos)
         tx3 = self._sign_and_broadcast_single(account, [close_ix])
         tx_hashes.append(tx3)
+        self._close_capture["close_sig"] = tx3
+        self._wait_for_confirmation(tx3, timeout=45)
         print(f"[orca-writer] closePosition ok: {tx3}")
+
+        # Build the CloseResult for the ledger recorder (GUI completion path).
+        # Read-only post-close capture; must never break the reported close.
+        try:
+            self.last_close_result = self._capture_close_result(wallet)
+        except Exception as e:
+            print(f"[orca-writer] close capture failed (non-fatal): {e}")
+            self.last_close_result = None
 
         return tx_hashes
 
     # ------------------------------------------------------------------
-    # Rebalance — multi-signer flow
+    # Close capture (ledger recorder feed) — read-only, post-close
     # ------------------------------------------------------------------
+
+    def _get_transaction_meta(self, sig: str) -> Dict[str, Any]:
+        """Read a confirmed tx's meta: blockTime (UTC ISO), fee (SOL), and the
+        wallet's pre/post balances for given mints → per-mint deltas. Read-only."""
+        result = self._rpc("getTransaction", [sig, {
+            "encoding": "jsonParsed", "commitment": "confirmed",
+            "maxSupportedTransactionVersion": 0,
+        }])
+        if not result or not isinstance(result, dict):
+            return {}
+        bt = result.get("blockTime")
+        iso = (datetime.fromtimestamp(bt, tz=timezone.utc).isoformat()
+               if isinstance(bt, int) else None)
+        meta = result.get("meta") or {}
+        fee_sol = (meta.get("fee", 0) or 0) / 1e9  # lamports → SOL
+        return {"block_time_iso": iso, "fee_sol": fee_sol, "meta": meta}
+
+    def _post_token_delta(self, wallet: str, meta: Dict[str, Any], mint: str,
+                          decimals: int) -> float:
+        """Net human-readable delta for a mint across a tx from its meta's
+        postTokenBalances minus preTokenBalances (owner == wallet)."""
+        def _sums(key):
+            total = 0.0
+            for b in meta.get(key, []) or []:
+                if b.get("mint") == mint and (b.get("owner") == wallet or not b.get("owner")):
+                    try:
+                        amt = float(b["uiTokenAmount"]["amount"] or 0)
+                    except (KeyError, TypeError, ValueError):
+                        amt = 0.0
+                    total += amt / (10 ** (b.get("uiTokenAmount", {}).get("decimals", decimals)
+                                            if isinstance(b.get("uiTokenAmount"), dict) else decimals))
+            return total
+        return _sums("postTokenBalances") - _sums("preTokenBalances")
+
+    def _capture_close_result(self, wallet: str) -> Optional["CloseResult"]:
+        """Assemble a CloseResult for the ledger recorder. All network reads happen
+        here, AFTER close — the recorder's DB write is network-free/atomic."""
+        from coldtrack.close_recorder import CloseLeg, CloseResult
+        cap = getattr(self, "_close_capture", None) or {}
+        if not cap.get("close_sig"):
+            return None
+        mint_a = cap["mint_a"]
+        mint_b = cap["mint_b"]
+        dec_a = cap["dec_a"]
+        dec_b = cap["dec_b"]
+        from venue_adapters.orca_adapter import _get_sol_token_symbol
+        sym_a = _get_sol_token_symbol(mint_a)
+        sym_b = _get_sol_token_symbol(mint_b)
+
+        legs: List[CloseLeg] = []
+        gas: Dict[str, float] = {}
+        block_iso: Optional[str] = None
+
+        # Liquidity legs — deltas from the decrease tx (or collect when decrease
+        # was skipped). Fee legs — the collect tx deltas.
+        if cap.get("decrease_sig"):
+            meta = self._get_transaction_meta(cap["decrease_sig"])
+            if meta.get("fee_sol"):
+                gas[cap["decrease_sig"]] = meta["fee_sol"]
+            block_iso = block_iso or meta.get("block_time_iso")
+            for sym, mint, dec in ((sym_a, mint_a, dec_a), (sym_b, mint_b, dec_b)):
+                delta = self._post_token_delta(wallet, meta.get("meta") or {}, mint, dec)
+                if delta > 0:
+                    legs.append(CloseLeg(asset=sym, amount=delta, kind="liquidity",
+                                          sig=cap["decrease_sig"]))
+        if cap.get("collect_sig"):
+            meta = self._get_transaction_meta(cap["collect_sig"])
+            if meta.get("fee_sol"):
+                gas[cap["collect_sig"]] = meta["fee_sol"]
+            block_iso = block_iso or meta.get("block_time_iso")
+            for sym, mint, dec in ((sym_a, mint_a, dec_a), (sym_b, mint_b, dec_b)):
+                delta = self._post_token_delta(wallet, meta.get("meta") or {}, mint, dec)
+                if delta > 0:
+                    legs.append(CloseLeg(asset=sym, amount=delta, kind="fee",
+                                          sig=cap["collect_sig"]))
+
+        # Prefer the close (burn) tx's blockTime for CLOSED_DATE.
+        close_meta = self._get_transaction_meta(cap["close_sig"]) if cap.get("close_sig") else {}
+        block_iso = (close_meta.get("block_time_iso") if close_meta else None) or block_iso
+
+        # Token prices at completion (USD) via the GUI-provided price engine when
+        # available; missing prices leave VALUE_USD NULL (Kimi's FX fills them later).
+        prices: Dict[str, float] = {}
+        pe = getattr(self, "price_engine", None)
+        if pe is not None:
+            try:
+                for sym in (sym_a, sym_b):
+                    pr = pe.get_price_usd(sym) if hasattr(pe, "get_price_usd") else None
+                    if isinstance(pr, (int, float)) and pr > 0:
+                        prices[sym] = float(pr)
+            except Exception:
+                pass
+
+        final_amounts: Dict[str, float] = {}
+        for leg in legs:
+            if leg.kind == "liquidity":
+                final_amounts[leg.asset] = final_amounts.get(leg.asset, 0.0) + leg.amount
+
+        for leg in legs:
+            pr = prices.get(leg.asset)
+            if pr:
+                leg.value_usd = round(leg.amount * pr, 6)
+
+        return CloseResult(
+            position_mint=cap["position_mint"],
+            platform="Orca",
+            chain="Solana",
+            legs=legs,
+            close_sig=cap.get("close_sig"),
+            collect_sig=cap.get("collect_sig"),
+            decrease_sig=cap.get("decrease_sig"),
+            block_time_iso=block_iso,
+            gas=gas,
+            gas_asset="SOL",
+            token_price_usd=prices,
+            final_amounts=final_amounts,
+        )
 
     def rebalance(self, params: RebalanceParams) -> List[str]:
         """Full rebalance on Orca Whirlpool: close → optional swap → openPosition at new range.

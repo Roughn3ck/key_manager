@@ -1,8 +1,59 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.15 (Sentinel Export emit hotfix — nfpm / liquidity / KP entry ordering)
+**Current Version:** v5.3.16 (LP Fetch minor fixes + Close-Position Ledger Recorder + Aerodrome close signer fix)
 **Last Updated:** 2026-09-22
+
+---
+
+## v5.3.16 - LP Fetch Minor Fixes + Close-Position Ledger Recorder + Aerodrome close signer fix (UNRELEASED — Kris builds)
+
+### Section A0 — Aerodrome close signer fix (owner-anchored signer resolution)
+
+**Summary.** The Aerodrome close failed with "Wallet has no ETH for gas" even though the Pack wallet `0xAe8E5FDb8857736C2218532Fd9D68430aAbAC6ae` holds ~0.003 ETH on Base — the node's error said the broadcasting account had **exactly 0**, so the signer was a different, unfunded derived address. Root cause: the close dialog passed the GUI-selected `account` to the writer, and when the vault had multiple EVM accounts the agent's key selection could derive a non-owner key. **Fix:** owner-anchored signer resolution — `_resolve_owner_signer(token_id, position_manager)` reads `ownerOf(tokenId)` on the Slipstream NFPM and matches the vault account whose derivable EVM address equals the owner; on no-match it aborts with a precise error naming the owner and the derivable Base set (never falls back). If the dialog-resolved account disagrees with the owner-anchored one, the close uses the owner-anchored account. Gas pre-check and the error message query/name the resolved signer. Every agent broadcast error now echoes the derived signer address (`[signer 0x…]`) so this bug class is diagnosable in one glance. Verified read-only: `ownerOf(#75255240)` = `0xAe8E…AC6ae` (the Pack wallet) on NFPM v1 `0x8279226…` — live `ownerOf` call confirms the anchor; the resolver maps it to the right account on stub and real vault-shaped data.
+
+### Section A — Close-Position Ledger Recorder (auto-record closes to coldtrack.db)
+
+**Summary.** A successful GUI close now writes the ledger automatically (policy change; ColdStack becomes a db writer for closes, alongside Kimi's tooling). On a confirmed close the completion path captures a `CloseResult` and the recorder writes all four tables in ONE `BEGIN IMMEDIATE` (busy_timeout 5s) sqlite transaction — no network inside the txn — then auto-exports `strategy_view.json` so the sentinel hot-reloads (~20s).
+
+**CloseResult fields** (captured by the writer post-close, read-only): `position_mint` (the LP_POSITIONS match key), `platform`, `chain`, `legs[]` (asset/amount/value_usd/kind/'liquidity'|'fee'/sig), `close_sig`/`collect_sig`/`decrease_sig`/`reward_sigs[]`, `block_time_iso`, `gas{}` (per-tx SOL), `token_price_usd{}`, `final_amounts{}`. Serializable to JSON for retry.
+
+**Per-table write mapping** (column-exact, mirroring KP db rows #68–72; USD-only, FX/CAD/EUR/AUD NULL — Kimi's FX backfills):
+- `TRANSACTIONS` — one row per leg: `TYPE='lp_withdraw'`/`CATEGORY='lp'` for liquidity legs, `TYPE='yield'`/`CATEGORY='yield'` for fee legs, `CHAIN='Solana'`, `TX_HASH=<the sig that moved those tokens>` (decrease sig for liquidity; collect sig for fees — the burn sig NEVER appears as a tx row), `FEE_ASSET='SOL'`/`FEE_AMOUNT=<that tx's gas>`.
+- `LP_POSITIONS` — `STATUS='closed'`, `CLOSED_DATE=<close-tx blockTime UTC ISO>`.
+- `LP_SNAPSHOTS` — one close row (upsert, `UNIQUE(LP_POSITION_ID,REPORT_DATE)`): final returned amounts + close prices, `IN_RANGE=0`, `NOTES` = all three sigs + "CLOSED via ColdStack".
+- `FEE_EVENTS` — dated row(s), `TX_HASH=<collect sig>`, `SOURCE='HARVEST'` (the CHECK stands — never altered), `NOTES="CLOSED via ColdStack"`.
+
+**Matching + safety.** The recorder matches `LP_POSITIONS` by `TOKEN_ID = position mint`; a missing or ambiguous match NEVER fabricates entry data — it writes a pending record (`coldstack_pending_records/pending_close_<mint>_<ts>.json`) and surfaces a retry path. On a DB write failure the on-chain close is still reported successful ("close succeeded; ledger write failed — saved to coldstack_pending_records/"); `retry_pending()` re-applies later. **Venue scope:** Orca end-to-end (tested, three-tx flow with reward legs). **Aerodrome (EVM)** end-to-end (decrease + collect; legs attributed via per-receipt ERC20 Transfer deltas to `recipient`, gas from receipts as ETH, blockTime from the receipt block, prices via PriceEngine). BSC / Project X log the explicit stub ("ledger recording not implemented for this venue yet") rather than silently skipping. Aerodrome test: `test_close_recorder_aerodrome.py` (atomic write + idempotent + no-match→pending on a pack-db copy).
+
+#### Section A — Tests + Files
+- `test_close_recorder.py` — atomic 4-table write column-exact, idempotent snapshot upsert, pending/retry on lock + unknown mint (no fabrication), all against a COPY of the K&P db (live DBs read-only): **PASS**.
+- `test_close_recorder_integration.py` — completion hook invokes recorder + auto-export; forced `database is locked` → close still reported success + pending file persisted next to the portfolio db: **PASS**.
+- `test_close_recorder_widget.py` — success / skipped / pending note states: **PASS**.
+- Files: `src/coldtrack/close_recorder.py` (NEW), `src/coldtrack/db.py` (`begin_immediate`/`commit`/`rollback`/`conn`), `src/venue_adapters/orca_writer.py` (close capture → `last_close_result`), `src/lp_tab.py` (record hook + portfolio db resolver + venue stub), `build_gui_v5.py` (hidden import), `STATUS.md`.
+
+### Section B — LP fetch UX fixes (same version, carried from 2026-09-22 fetch work)
+
+### Summary
+Three post-close LP fetch UX bugs plus a bonus closed-position state. Root cause of the saved-pool "Fetch failed" regression: the Solana READ path had **no retry/backoff** (`_solana_rpc_call` was single-shot and its fallback endpoints projectserum/rpc.ankr are deprecated/403), so under the public-RPC 429 storm every saved pool's adapter returned nothing and the placeholder renderer marked them all "Fetch failed". The write path (close, collect) was already resilient — unaffected and untouched.
+
+### Fixed
+- **Read-path RPC resilience** — `_solana_rpc_call_resilient` (retry/backoff + endpoint rotation, 429-aware); `_get_account_data` uses it; endpoints rotated to `api.mainnet-beta` / `solana-rpc.publicnode` / `solana.drpc` (projectserum + rpc.ankr dropped). New `_account_exists` distinguishes RPC-down from a real not-found.
+- **Closed vs failed** — `_fetch_by_position_mint`/`_fetch_by_position_address`/`_fetch_position_at_address` now return a distinct `error="Position closed"` when the position PDA is gone (or empty), or "Solana RPC unavailable — retry" on exhausted retries. Saved-pool placeholders render a calm **"✔ Position closed — nothing left on-chain. You can remove this entry."** state with a Remove affordance, instead of "Fetch failed".
+- **Platform-selector leak removed / saved-pool refresh isolation** — placeholder rendering is per-saved-pool only (one `card` per fetched-missed entry): a fetch-single can no longer poison other saved pools, and each saved pool's closed-check routes to its own venue's logic (`_lp_saved_pool_is_closed` — Orca uses the PDA/account-gone test; other venues pass through unchanged).
+- **Pair naming** — new `orca_display_pair(symbol_a, symbol_b)` (Orca convention: quote-style asset last — SOL last vs a non-stable, USDC last vs SOL, else account order). Applied at all Orca label construction sites (position fetch + pool-state fetch); the saved-pool label picks it up via the saved `pair`.
+
+### Verification (2026-09-22)
+- Live read-only checks (no broadcast): the live Pack Orca cbBTC/SOL position fetched by **position account address** (account `GMpFkUb…` decodes to a position with liquidity 2,762,882,930) → displays **cbBTC/SOL**, no error. The now-closed K&P position returns `error="Position closed"` by mint AND by address. `_account_exists` confirms the closed position PDA is gone.
+- New `test_lp_fetch_fixes.py`: naming-helper truth table (7 cases), closed/RPC-unavailable distinction, and venue-scoped refresh dispatch (Project X + Aerodrome saved pools render only their own placeholder in a stub frame — no cross-platform status mutation). **PASS**.
+- Regression: `test_sentinel_export.py`, `test_coldtrack_tab_widgets.py`, `test_orca_close_layout.py` — all **PASS**; write path (close/collect) untested-but-untouched and its layout/sim tests still green. `python -m py_compile` all touched files — **PASS**.
+- Per Kris: **no EXE build, no git push, no release** — source-only, ready for @kris to build + review.
+
+### Files Changed
+- `src/venue_adapters/orca_adapter.py` — resilient read RPC (`_solana_rpc_call_resilient`), `_account_exists`, `orca_display_pair`, closed/RPC-unavailable distinction in the three fetch entry points, endpoint rotation update
+- `src/lp_tab.py` — `_lp_render_saved_placeholder` (closed ↔ failed) + `_lp_saved_pool_is_closed` (venue-scoped); both placeholder sites use it
+- `src/gui_main_v5.py` — VERSION 5.3.16
+- `test_lp_fetch_fixes.py` — NEW
 
 ---
 

@@ -11,6 +11,7 @@ import math
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from venue_adapters.venue_writer import (
@@ -132,6 +133,56 @@ class AerodromeWriter(VenueWriter):
         if isinstance(result, dict):
             return result.get("address", "")
         return str(result)
+
+    def _get_position_owner(self, token_id: int, position_manager: str) -> Optional[str]:
+        """Read ownerOf(tokenId) from the position manager (read-only)."""
+        data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
+        result = _base_rpc_call("eth_call", [{"to": position_manager, "data": data}, "latest"])
+        if result and isinstance(result, str) and len(result) >= 66:
+            return "0x" + result[-40:]
+        return None
+
+    def _derived_base_address_for_account(self, account: str) -> str:
+        """The EVM/Base (chain_id 8453) address the vault derives for this account."""
+        return self._get_account_address(account)
+
+    def _resolve_owner_signer(self, token_id: int, position_manager: str) -> str:
+        """Resolve the vault account that signs this close by matching the
+        position's on-chain owner — never a default/selected/first account.
+
+        Enumerates the vault accounts (via the agent's `list_accounts`, no keys),
+        and returns the account whose derivable EVM address equals the position's
+        owner on this chain. Aborts with a precise error naming the owner and the
+        vault's derivable Base addresses when none match (no fallback — that is
+        the close-signer bug class).
+        """
+        owner = self._get_position_owner(token_id, position_manager)
+        if not owner:
+            raise RuntimeError(
+                f"Could not read ownerOf({token_id}) on {position_manager} — "
+                "cannot resolve the close signer."
+            )
+        owner_l = owner.lower()
+        accounts = self._agent_call("accounts")
+        accounts = accounts.get("result", accounts) if isinstance(accounts, dict) else accounts
+        derivable = []
+        if isinstance(accounts, dict):
+            for name, data in accounts.items():
+                for addr in (data or {}).get("addresses", []):
+                    a = (addr.get("address") or "").lower()
+                    if a.startswith("0x"):
+                        derivable.append((name, a))
+                        if a == owner_l:
+                            return name
+        addrs = ", ".join(sorted({a for _, a in derivable})) or "(none)"
+        raise RuntimeError(
+            f"position owner {owner} matches no account in this vault for Base "
+            f"(derivable: {addrs})."
+        )
+
+    def _validate_signer_matches_owner(self, account: str, owner: str) -> str:
+        """Confirm the dialog-resolved account derives to the position owner on
+        Base. If not, abort with both addresses named (no fallback)."""
 
     def _read_native_balance(self, address: str) -> int:
         """Read ETH balance (in wei) for an address on BASE."""
@@ -322,7 +373,19 @@ class AerodromeWriter(VenueWriter):
         position_manager = self._find_position_manager(token_id)
         tx_hashes: List[str] = []
 
-        # Resolve recipient address once for gas checks in this flow
+        # Owner-anchored signer resolution: the close must sign from the vault
+        # account whose derived Base address equals the position's on-chain
+        # owner. The dialog-resolved `account` can be wrong when the vault has
+        # multiple EVM accounts; resolve by ownerOf(tokenId) and, when a match
+        # exists, use that account for signing.
+        owner_resolved = self._resolve_owner_signer(token_id, position_manager)
+        if owner_resolved != account:
+            print(f"[aero-writer] close signer: dialog account '{account}' resolved "
+                  f"to owner account '{owner_resolved}' via ownerOf({token_id})")
+            account = owner_resolved
+
+        # Resolve recipient address once for gas checks in this flow — this is
+        # the Base address derived for the (owner-matched) account.
         recipient = self._get_account_address(account)
 
         data = SELECTOR_POSITIONS + _pad_int_to_64(token_id)
@@ -331,9 +394,29 @@ class AerodromeWriter(VenueWriter):
             raise RuntimeError(f"Could not read position {token_id}")
 
         body = result[2:]
+        token0 = _decode_address(body[128:192])
+        token1 = _decode_address(body[192:256])
         liquidity = int(body[448:512], 16)
+        dec0 = _get_token_decimals(token0)
+        dec1 = _get_token_decimals(token1)
+
+        # v5.3.16: close capture bookkeeping — per-tx sigs, then CloseResult on success.
+        self._close_capture = {
+            "position_id_str": str(token_id), "token0": token0, "token1": token1,
+            "dec0": dec0, "dec1": dec1, "recipient": recipient,
+            "decrease_sig": None, "collect_sig": None,
+        }
+        self.last_close_result = None
+        def _bal_of(token: str, addr: str, dec: int) -> float:
+            data = SELECTOR_BALANCE_OF + _pad_address(addr)
+            r = _base_rpc_call("eth_call", [{"to": token, "data": data}, "latest"])
+            if not r or not isinstance(r, str) or r in ("0x", "0x0"):
+                return 0.0
+            return int(r, 16) / (10 ** dec)
 
         if liquidity > 0:
+            pre0 = _bal_of(token0, recipient, dec0)
+            pre1 = _bal_of(token1, recipient, dec1)
             decrease_data = (
                 SELECTOR_DECREASE_LIQUIDITY
                 + _pad_int_to_64(token_id)
@@ -345,15 +428,126 @@ class AerodromeWriter(VenueWriter):
             tx1 = self._broadcast(account, position_manager, decrease_data,
                                   gas_check_address=recipient)
             tx_hashes.append(tx1)
+            self._close_capture["decrease_sig"] = tx1
             self._wait_for_tx_receipt(tx1, timeout=60)
 
+        pre0 = _bal_of(token0, recipient, dec0)
+        pre1 = _bal_of(token1, recipient, dec1)
         collect_tx = self.collect_fees(CollectFeesParams(
             account=account,
             position_id=position_id,
         ))
         tx_hashes.append(collect_tx)
+        self._close_capture["collect_sig"] = collect_tx
+        self._wait_for_tx_receipt(collect_tx, timeout=60)
+
+        # Build the CloseResult for the ledger recorder (GUI completion path).
+        try:
+            self.last_close_result = self._post_close_state(
+                recipient, pre0, pre1, token0, token1, dec0, dec1,
+            )
+        except Exception as e:
+            print(f"[aero-writer] close capture failed (non-fatal): {e}")
+            self.last_close_result = None
 
         return tx_hashes
+
+    # ------------------------------------------------------------------
+    # Close capture (ledger recorder feed) — read-only, post-close
+    # ------------------------------------------------------------------
+
+    def _post_close_state(self, recipient: str, token0: str, token1: str,
+                          dec0: int, dec1: int) -> Dict[str, Any]:
+        """After the close txs confirm: per-tx deltas from receipts + prices."""
+        from coldtrack.close_recorder import CloseLeg, CloseResult
+        cap = getattr(self, "_close_capture", {}) or {}
+        pos_mint = cap.get("position_id_str", "")
+        sigs = [s for s in (cap.get("decrease_sig"), cap.get("collect_sig")) if s]
+        receipts: Dict[str, Any] = {}
+        legs: List[CloseLeg] = []
+        gas: Dict[str, float] = {}
+        block_iso: Optional[str] = None
+
+        for sig in sigs:
+            rc = self._rpc_call("eth_getTransactionReceipt", [sig])
+            receipt = rc if isinstance(rc, dict) else None
+            if not receipt:
+                continue
+            if block_iso is None and receipt.get("blockHash"):
+                try:
+                    blk = self._rpc_call("eth_getBlockByNumber", [receipt.get("blockNumber", "0x0"), False])
+                    if isinstance(blk, dict) and blk.get("timestamp"):
+                        block_iso = datetime.fromtimestamp(int(blk["timestamp"], 16), tz=timezone.utc).isoformat()
+                except Exception:
+                    block_iso = None
+            gas_used = int(receipt.get("gasUsed", "0x0"), 16) or 0
+            gp = int(receipt.get("effectiveGasPrice", "0x0"), 16) or 0
+            gas[sig] = gas_used * gp / 1e18  # ETH
+            # Per-token delta attribution: which tx MOVED each token. The ERC20
+            # Transfer logs in the receipt name the recipient legs.
+            tx_legs: Dict[str, float] = {}
+            for log in (receipt.get("logs") or []):
+                try:
+                    topics = log.get("topics", [])
+                    # Transfer(topic0 == 0xddf252ad...) — token -> recipient
+                    if len(topics) >= 3 and topics[0].lower().startswith("0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"):
+                        to_addr = "0x" + topics[2][-40:]
+                        if to_addr.lower() != recipient.lower():
+                            continue
+                        token_addr = (log.get("address") or "").lower()
+                        val_raw = int(log.get("data", "0x0"), 16)
+                        tx_legs[token_addr] = tx_legs.get(token_addr, 0.0) + val_raw
+                except (ValueError, TypeError, IndexError):
+                    continue
+            sym0 = _get_token_symbol(token0)
+            sym1 = _get_token_symbol(token1)
+            dec_map = {token0.lower(): (sym0, dec0), token1.lower(): (sym1, dec1)}
+            for token_addr, raw in tx_legs.items():
+                m = dec_map.get(token_addr)
+                if not m:
+                    continue
+                sym, dec = m
+                amt = raw / (10 ** dec)
+                if amt > 0:
+                    kind = "fee" if sig == cap.get("collect_sig") else "liquidity"
+                    legs.append(CloseLeg(asset=sym, amount=amt, kind=kind, sig=sig))
+
+        # Prices at completion
+        prices: Dict[str, float] = {}
+        pe = getattr(self, "price_engine", None)
+        if pe is not None:
+            try:
+                for sym in (_get_token_symbol(token0), _get_token_symbol(token1)):
+                    pr = pe.get_price_usd(sym) if hasattr(pe, "get_price_usd") else None
+                    if isinstance(pr, (int, float)) and pr > 0:
+                        prices[sym] = float(pr)
+            except Exception:
+                pass
+
+        final_amounts: Dict[str, float] = {}
+        for leg in legs:
+            if leg.kind == "liquidity":
+                final_amounts[leg.asset] = final_amounts.get(leg.asset, 0.0) + leg.amount
+
+        for leg in legs:
+            pr = prices.get(leg.asset)
+            if pr:
+                leg.value_usd = round(leg.amount * pr, 6)
+
+        return CloseResult(
+            position_mint=pos_mint,
+            platform="Aerodrome",
+            chain="Base",
+            legs=legs,
+            close_sig=cap.get("collect_sig") or cap.get("decrease_sig"),
+            collect_sig=cap.get("collect_sig"),
+            decrease_sig=cap.get("decrease_sig"),
+            block_time_iso=block_iso,
+            gas=gas,
+            gas_asset="ETH",
+            token_price_usd=prices,
+            final_amounts=final_amounts,
+        )
 
     # ------------------------------------------------------------------
     # Stubs for operations not yet implemented on BASE
