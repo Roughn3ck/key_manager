@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-PyInstaller build script for ColdStack GUI v5.3.1.
+PyInstaller build script for ColdStack GUI v5.3.18.
 Creates a portable onefile EXE for use on encrypted USB drive.
 
-Version: v5.3.1 (August 2026) - ColdTrack + Orca Whirlpool + Railgun + Aerodrome + BSC V3
+Version: v5.3.18 (September 2026) - Saved-pool account binding + Aerodrome close loop
 Builds: src/gui_main_v5.py
 Output: USB_DEPLOYMENT/coldstack.exe (overwrites previous, with backup)
 
@@ -32,8 +32,8 @@ def clean_build_dirs():
 
 
 def build_gui_exe():
-    """Run PyInstaller to build the ColdStack v5.2.3 EXE."""
-    print("Building ColdStack v5.2.3 executable...")
+    """Run PyInstaller to build the ColdStack v5.3.18 EXE."""
+    print("Building ColdStack v5.3.18 executable...")
 
     project_dir = Path(__file__).parent.resolve()
 

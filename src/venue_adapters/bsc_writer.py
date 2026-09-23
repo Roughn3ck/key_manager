@@ -115,6 +115,10 @@ class BSCWriter(VenueWriter):
 
     def _broadcast(self, account: str, to: str, data: str, value: str = "0") -> str:
         """Sign and broadcast a transaction on BSC via the agent. Returns tx hash."""
+        # v5.3.17: writer-side chain guard. Gas-balance read and agent broadcast
+        # must use the same chain-verified RPC.
+        self._verify_rpc_chain(self.rpc_url, self.chain_id)
+
         # Pre-flight: check BNB gas balance
         vault_address = self._get_account_address(account)
         gas_balance = self._read_native_balance(vault_address)
@@ -123,6 +127,9 @@ class BSCWriter(VenueWriter):
                 f"Insufficient gas: wallet {vault_address} has 0 BNB. "
                 f"Send BNB to this address to pay for transaction gas on BSC."
             )
+
+        # Re-verify before the agent broadcast.
+        self._verify_rpc_chain(self.rpc_url, self.chain_id)
 
         result = self._agent_call(
             "broadcast_tx",

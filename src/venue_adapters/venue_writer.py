@@ -105,6 +105,32 @@ class VenueWriter(ABC):
 
     VENUE_KEY: str = ""
 
+    def _verify_rpc_chain(self, rpc: str, expected_chain_id: int) -> None:
+        """Verify that ``rpc`` serves ``expected_chain_id``.
+
+        Concrete writers call this before gas-balance checks and before the
+        agent broadcast call so a wrong-chain RPC cannot pass two independent
+        checks. Raises RuntimeError on mismatch, naming both ids and the URL.
+        """
+        import urllib.request
+        import json
+
+        payload = json.dumps({
+            "jsonrpc": "2.0", "id": 1, "method": "eth_chainId", "params": []
+        }).encode()
+        req = urllib.request.Request(
+            rpc, data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "coldstack-writer/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read())
+        actual = int(result["result"], 16)
+        if actual != expected_chain_id:
+            raise RuntimeError(
+                f"RPC {rpc} serves chain {actual}, expected {expected_chain_id} — "
+                "refusing gas/broadcast check"
+            )
+
     @abstractmethod
     def is_available(self) -> bool:
         """Return True if the writer's signer / backend is reachable."""

@@ -232,6 +232,10 @@ class HyperliquidWriter(VenueWriter):
         Raises:
             RuntimeError: If the agent returns an error or is unreachable.
         """
+        # v5.3.17: writer-side chain guard. Gas-balance read and agent broadcast
+        # must use the same chain-verified RPC.
+        self._verify_rpc_chain(self.rpc_url, self.chain_id)
+
         # Pre-flight: check signer's gas balance before attempting broadcast
         vault_address = self._get_account_address(account)
         gas_balance = self._read_native_balance(vault_address)
@@ -240,6 +244,9 @@ class HyperliquidWriter(VenueWriter):
                 f"Insufficient gas: wallet {vault_address} has 0 HYPE. "
                 f"Send HYPE to this address to pay for transaction gas."
             )
+
+        # Re-verify before the agent broadcast.
+        self._verify_rpc_chain(self.rpc_url, self.chain_id)
 
         # If nonce is provided (e.g. from compound_fees), verify it matches
         # the chain nonce for the vault address. If the key-derived address

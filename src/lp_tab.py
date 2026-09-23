@@ -10,7 +10,7 @@ from lp_engine import OfflineError
 from saved_pools import (
     load_saved_pools, save_pool, remove_saved_pool, is_pool_saved,
     update_position_tracking, get_position_tracking,
-    update_saved_pool_wallet,
+    update_saved_pool_wallet, update_saved_pool_binding, _find_pool_entry,
 )
 from venue_adapters.venue_writer import (
     CollectFeesParams, CompoundFeesParams,
@@ -2067,6 +2067,8 @@ class LPTab:
                 self.gui.show_notification("Pool already saved")
                 return
             pool_address = getattr(position, "pool_id", "") or ""
+            # v5.3.18: bind the owning vault account to the saved pool.
+            account_name, account_chain = self._lp_current_account_binding()
             ok = save_pool(
                 self.gui.key_manager.address_db,
                 wallet_address=wallet_address,
@@ -2074,6 +2076,8 @@ class LPTab:
                 venue=venue,
                 pool_address=pool_address,
                 pair=position.pair or "",
+                account_name=account_name,
+                account_chain=account_chain,
             )
             if ok and self.gui.current_password:
                 ok = self.gui.key_manager.save_encrypted_data(self.gui.current_password)
@@ -2112,8 +2116,15 @@ class LPTab:
         pool_address = position.pool_id or ""
         pair = position.pair or ""
         venue = position.venue or "HyperEVM"
+        # v5.3.18: bind the owning vault account to the saved pool.
+        account_name, account_chain = self._lp_current_account_binding()
         print(f"[saved_pools] saving token_id={token_id} to address_db id={id(self.gui.key_manager.address_db)}")
-        ok = save_pool(self.gui.key_manager.address_db, wallet_address, token_id, venue, pool_address, pair)
+        ok = save_pool(
+            self.gui.key_manager.address_db, wallet_address, token_id, venue,
+            pool_address, pair,
+            account_name=account_name,
+            account_chain=account_chain,
+        )
         if ok:
             # Re-encrypt the vault to persist the saved pool
             ok = self.gui.key_manager.save_encrypted_data(self.gui.current_password)
@@ -2740,6 +2751,10 @@ class LPTab:
 
         Returns:
             Tuple of (chain_display_name, gas_token_symbol, writer_venue_key).
+
+        DEPRECATED for dispatch: use `_lp_resolve_venue_for_position(position)`
+        so the venue comes from the saved position record, not from the id string.
+        This helper is retained for Solana card rendering only.
         """
         if position_id.startswith("bsc:"):
             return ("BNB Chain (BSC)", "BNB", "bsc")
@@ -2752,48 +2767,294 @@ class LPTab:
         elif position_id.startswith("hyperevm:"):
             return ("HyperEVM", "HYPE", "hyperliquid")
         else:
-            return ("HyperEVM", "HYPE", "hyperliquid")
+            # v5.3.17: remove the silent HyperEVM default that caused the
+            # Aerodrome G1 close to be dispatched to the wrong chain. Callers
+            # doing anything other than rendering a card must use
+            # _lp_resolve_venue_for_position() and abort on ambiguity.
+            return ("Unknown", "???", "")
+
+    def _lp_resolve_venue_for_position(self, position) -> tuple:
+        """Resolve (chain_name, gas_token, venue_key, writer) for a position.
+
+        The venue is taken from the saved position record first
+        (`position.venue` / `position.chain`), then from the position_id prefix
+        only as a secondary signal. A missing or ambiguous venue aborts with a
+        clear error — it NEVER falls back to a default writer.
+
+        Returns:
+            Tuple of (chain_display_name, gas_token_symbol, writer_venue_key).
+
+        Raises:
+            RuntimeError: if the venue cannot be determined or the resolved
+                writer's chain does not match the position's chain.
+        """
+        from lp_engine import LPPosition
+        if not isinstance(position, LPPosition):
+            raise RuntimeError("internal error: expected LPPosition object")
+
+        # 1. Primary: position record's venue / chain
+        venue = (getattr(position, "venue", "") or "").strip()
+        chain = (getattr(position, "chain", "") or "").strip()
+        pair = (getattr(position, "pair", "") or "").strip()
+
+        # Normalize common Aerodrome synonyms to the writer key
+        venue_key = ""
+        vnorm = venue.lower()
+        if vnorm in ("aerodrome", "aerodrome/base") or "aerodrome" in vnorm:
+            venue_key = "aerodrome"
+        elif vnorm in ("hyperliquid", "hyperevm", "project x", "hl1"):
+            venue_key = "hyperliquid"
+        elif vnorm in ("bsc", "pancakeswap", "uniswap_bsc"):
+            venue_key = "bsc"
+        elif vnorm in ("orca", "solana", "sol"):
+            venue_key = "orca"
+
+        # 2. Secondary: position_id prefix (only if record did not give a venue)
+        position_id = getattr(position, "position_id", "") or ""
+        if not venue_key:
+            if position_id.startswith("base:"):
+                venue_key = "aerodrome"
+            elif position_id.startswith("bsc:"):
+                venue_key = "bsc"
+            elif position_id.startswith("solana:"):
+                venue_key = "orca"
+            elif position_id.startswith("hyperevm:"):
+                venue_key = "hyperliquid"
+
+        if not venue_key:
+            raise RuntimeError(
+                f"could not determine venue for {position_id} — refetch the position"
+            )
+
+        # 3. Resolve human-readable chain/gas labels from the writer key
+        chain_name, gas_token = self._lp_chain_gas_for_venue(venue_key)
+
+        # 4. Validate against the position record's chain field
+        chain_norm = chain.lower()
+        expected_chain = {
+            "aerodrome": "base",
+            "hyperliquid": "hyperevm",
+            "bsc": "bnb chain",
+            "orca": "solana",
+        }.get(venue_key, venue_key)
+        if chain_norm and chain_norm != expected_chain and chain_norm != venue_key:
+            raise RuntimeError(
+                f"venue/chain mismatch for {position_id}: writer chain is "
+                f"'{chain_name}', position record says '{chain}' — refetch the position"
+            )
+
+        return (chain_name, gas_token, venue_key)
+
+    def _lp_chain_gas_for_venue(self, venue_key: str) -> tuple:
+        """Return (chain_display_name, gas_token_symbol) for a venue key."""
+        return {
+            "aerodrome": ("BASE", "ETH"),
+            "bsc": ("BNB Chain (BSC)", "BNB"),
+            "orca": ("Solana", "SOL"),
+            "hyperliquid": ("HyperEVM", "HYPE"),
+        }.get(venue_key, (venue_key.capitalize(), "???"))
+
+    def _lp_verify_evm_position_ownership(self, position, account_name: str,
+                                           venue_key: str) -> str:
+        """Fatal pre-flight check: the live NFT must be owned by the derived signer.
+
+        v5.3.18: this resolver now prefers the saved-pool account binding. If
+        the record has a binding, it is verified against the live owner. If the
+        binding is missing or stale, the owner-anchored path resolves the correct
+        account and PERSISTS it back into the saved-pool record (self-heal).
+
+        Returns:
+            The owner-resolved account name.
+
+        Raises:
+            RuntimeError: on any failure. Distinct messages for:
+                (a) owner matches no vault account on this chain — refetch
+                (b) record bound to account X (0x...) but owner is Y — refetch
+        """
+        position_id = getattr(position, "position_id", "") or ""
+        raw_id = position_id.split(":", 1)[1] if ":" in position_id else position_id
+        try:
+            token_id = int(raw_id)
+        except ValueError:
+            raise RuntimeError(
+                f"stale record — refetch this position: invalid position_id '{position_id}'"
+            )
+
+        writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
+        if writer is None or not writer.is_available():
+            raise RuntimeError(
+                "stale record — refetch this position: agent not available for ownership check"
+            )
+
+        # EVM-only for now
+        if venue_key != "aerodrome":
+            raise RuntimeError(
+                f"stale record — refetch this position: ownership pre-check not implemented "
+                f"for venue '{venue_key}'"
+            )
+
+        from venue_adapters.aerodrome_adapter import V3_POSITION_MANAGERS
+        from venue_adapters.aerodrome_writer import SELECTOR_OWNER_OF, _pad_int_to_64
+        from venue_adapters.aerodrome_writer import _base_rpc_call
+        from saved_pools import (
+            _find_pool_entry, update_saved_pool_binding,
+        )
+
+        def _read_owner(pm: str) -> Optional[str]:
+            data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
+            try:
+                result = _base_rpc_call("eth_call", [{"to": pm, "data": data}, "latest"])
+            except Exception:
+                return None
+            if result and isinstance(result, str) and len(result) >= 66:
+                return "0x" + result[-40:]
+            return None
+
+        owner: Optional[str] = None
+        owner_pm: Optional[str] = None
+        for pm in V3_POSITION_MANAGERS:
+            owner = _read_owner(pm)
+            if owner:
+                owner_pm = pm
+                break
+
+        if not owner:
+            raise RuntimeError(
+                f"stale record — refetch this position: ownerOf({token_id}) reverted on "
+                f"all Base position managers. The position id in this record is not a live NFT."
+            )
+
+        # 1. If the saved-pool record has a binding, verify it against the live owner.
+        saved_entry = None
+        if self.gui.key_manager:
+            saved_entry = _find_pool_entry(
+                self.gui.key_manager.address_db, token_id,
+                (position.venue or "Aerodrome"),
+            )
+        bound_account = (saved_entry.get("account_name") or "").strip() if saved_entry else ""
+        bound_address = (saved_entry.get("account_address") or "").strip() if saved_entry else ""
+
+        if bound_account and bound_address:
+            try:
+                derived_bound = writer._get_account_address(bound_account)
+            except Exception:
+                derived_bound = ""
+            if derived_bound and derived_bound.lower() == owner.lower():
+                # Binding is correct and matches live owner.
+                return bound_account
+            # Binding exists but does not match the live owner.
+            raise RuntimeError(
+                f"record is bound to account '{bound_account}' ({bound_address}), but "
+                f"ownerOf({token_id}) on {owner_pm} = {owner} — refetch this position"
+            )
+
+        # 2. Legacy self-heal path: no binding. Resolve owner-anchored account and persist it.
+        try:
+            owner_account = writer._resolve_owner_signer(token_id, owner_pm)
+        except RuntimeError as e:
+            msg = str(e)
+            if "matches no account" in msg or "derivable" in msg:
+                raise RuntimeError(
+                    f"position owner {owner} matches no vault account on this chain — refetch"
+                )
+            raise
+
+        derived_owner = writer._get_account_address(owner_account)
+        if saved_entry and self.gui.current_password:
+            try:
+                update_saved_pool_binding(
+                    self.gui.key_manager.address_db,
+                    token_id,
+                    (position.venue or "Aerodrome"),
+                    owner_account,
+                    derived_owner,
+                    "base",
+                )
+                self.gui.key_manager.save_encrypted_data(self.gui.current_password)
+            except Exception as e:
+                print(f"[verify_ownership] failed to persist binding (non-fatal): {e}")
+
+        return owner_account
+
+    def _lp_current_account_binding(self) -> tuple:
+        """Return (account_name, account_chain) for the current top-bar selector.
+
+        In Address mode this returns ("", ""); in Account mode it returns the
+        selected account name and its primary chain hint.
+        """
+        selector = self._lp_widgets.get("selector_menu")
+        mode = selector.get() if selector else "Address"
+        if mode == "Account":
+            account_name = self._lp_get_current_account_name()
+            if account_name:
+                return account_name, ""
+        return ("", "")
 
     def _lp_resolve_wallet_for_position(self, position) -> tuple:
         """Resolve (wallet_address, account_name) for a position.
 
-        Tries in order:
-        1. The address entry widget
-        2. The _lp_last_fetched_address from the fetch
-        3. The saved pool's wallet_address (by looking up the position in saved_pools)
+        v5.3.18 order:
+        1. The saved pool's account binding (account_name + account_address).
+        2. The saved pool's wallet_address.
+        3. The address entry widget / last fetched address.
+        4. The top-bar Account selector (for new fetches/opens only).
+
+        The saved-pool binding is authoritative for position actions; the
+        top-bar selector governs only new fetches/opens.
 
         Returns:
             Tuple of (wallet_address, account_name). May be ("", "") if unresolvable.
         """
-        # 1. Try the address entry
-        wallet_address = self._lp_get_current_wallet_address()
+        wallet_address = ""
+        account_name = ""
+        token_id = None
+        venue = (position.venue or "").strip()
+        try:
+            raw_id = position.position_id.split(":", 1)[1]
+            token_id = int(raw_id)
+        except (ValueError, IndexError, AttributeError):
+            token_id = None
+
+        # 1. Try the saved pool's account binding first.
+        if token_id is not None and self.gui.key_manager:
+            entry = _find_pool_entry(
+                self.gui.key_manager.address_db, token_id,
+                venue if venue else "HyperEVM",
+            )
+            if entry:
+                bound_account = entry.get("account_name", "").strip()
+                bound_address = entry.get("account_address", "").strip()
+                if bound_account and bound_address:
+                    # Verify the binding still derives to the recorded address.
+                    derived = self._lp_derive_address_for_account(
+                        bound_account, bound_address)
+                    if derived and derived.lower() == bound_address.lower():
+                        wallet_address = bound_address
+                        account_name = bound_account
+
+        # 2. Fall back to the saved pool's wallet_address.
+        if not wallet_address and token_id is not None and self.gui.key_manager:
+            all_saved = load_saved_pools(self.gui.key_manager.address_db)
+            for entry in all_saved:
+                if entry.get("token_id") == token_id and entry.get("venue", "") == venue:
+                    wallet_address = entry.get("wallet_address", "")
+                    break
+
+        # 3. Then the address entry / last fetched address.
+        if not wallet_address:
+            wallet_address = self._lp_get_current_wallet_address()
         if not wallet_address:
             wallet_address = getattr(self, "_lp_last_fetched_address", "")
 
-        # 2. Try to find the wallet from saved pools
-        if not wallet_address and self.gui.key_manager and position.position_id:
-            try:
-                raw_id = position.position_id.split(":", 1)[1]
-                token_id = int(raw_id)
-                venue = position.venue or "HyperEVM"
-                all_saved = load_saved_pools(self.gui.key_manager.address_db)
-                for entry in all_saved:
-                    if entry.get("token_id") == token_id and entry.get("venue", "") == venue:
-                        wallet_address = entry.get("wallet_address", "")
-                        break
-            except (ValueError, IndexError):
-                pass
-
-        # Pre-fill the address entry so the user sees which wallet is being used
+        # Pre-fill the address entry so the user sees which wallet is being used.
         if wallet_address:
             entry = self._lp_widgets.get("address_entry")
             if entry and not entry.get().strip():
                 entry.delete(0, "end")
                 entry.insert(0, wallet_address)
 
-        # 3. Resolve account name from wallet address
-        account_name = ""
-        if wallet_address and self.gui.key_manager:
+        # Resolve account name from wallet address if not already bound.
+        if wallet_address and not account_name and self.gui.key_manager:
             accounts_data = self.gui.key_manager.address_db.get("accounts", {})
             for acct, data in accounts_data.items():
                 for addr in data.get("addresses", []):
@@ -2803,11 +3064,29 @@ class LPTab:
                 if account_name:
                     break
 
-        # Also try _lp_get_current_account_name as fallback
+        # 4. Top-bar selector only as final fallback (for positions with no binding).
         if not account_name:
             account_name = self._lp_get_current_account_name()
 
         return wallet_address, account_name
+
+    def _lp_derive_address_for_account(self, account_name: str, expected_address: str) -> Optional[str]:
+        """Derive the on-chain address for an account and compare it to expected.
+
+        Returns the derived address if it matches the expected chain/format,
+        or None if it cannot be derived. Does not load private keys.
+        """
+        if not account_name or not self.gui.key_manager:
+            return None
+        chain_hint = ""
+        if expected_address.startswith("0x"):
+            chain_hint = "EVM"
+        elif len(expected_address) > 30 and not expected_address.startswith("0x"):
+            chain_hint = "Solana"
+        try:
+            return self._lp_resolve_account_address(account_name, prefer=chain_hint.lower())
+        except Exception:
+            return None
 
     def _lp_compound_fees_dialog(self, position):
         """Show confirmation dialog and compound fees for an LP position."""
@@ -2837,14 +3116,26 @@ class LPTab:
             self.gui.show_notification("Could not resolve vault account for this address", error=True)
             return
 
-        chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
+        try:
+            chain_name, gas_token, venue_key = self._lp_resolve_venue_for_position(position)
+        except RuntimeError as e:
+            self.gui.show_notification(str(e), error=True)
+            return
 
         # BSC compound is not yet supported (requires swap implementation)
-        if position.position_id.startswith("bsc:"):
+        if venue_key == "bsc":
             self.gui.show_notification(
                 "Compound fees is not yet implemented on BSC. Use Collect Fees instead."
             )
             return
+
+        # v5.3.17: fatal pre-flight ownership check for EVM positions.
+        if venue_key in ("aerodrome", "hyperliquid", "bsc"):
+            try:
+                account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
+            except RuntimeError as e:
+                self.gui.show_notification(str(e), error=True)
+                return
 
         confirm = messagebox.askyesno(
             "Confirm: Compound Fees",
@@ -3023,7 +3314,19 @@ class LPTab:
             self.gui.show_notification("Could not resolve vault account for this address", error=True)
             return
 
-        chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
+        try:
+            chain_name, gas_token, venue_key = self._lp_resolve_venue_for_position(position)
+        except RuntimeError as e:
+            self.gui.show_notification(str(e), error=True)
+            return
+
+        # v5.3.17: fatal pre-flight ownership check for EVM positions.
+        if venue_key in ("aerodrome", "hyperliquid", "bsc"):
+            try:
+                account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
+            except RuntimeError as e:
+                self.gui.show_notification(str(e), error=True)
+                return
 
         confirm = messagebox.askyesno(
             "Confirm: Collect Fees",
@@ -3328,7 +3631,19 @@ class LPTab:
             self.gui.show_notification("Could not resolve vault account for this address", error=True)
             return
 
-        chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
+        try:
+            chain_name, gas_token, venue_key = self._lp_resolve_venue_for_position(position)
+        except RuntimeError as e:
+            self.gui.show_notification(str(e), error=True)
+            return
+
+        # v5.3.17: fatal pre-flight ownership check for EVM positions.
+        if venue_key in ("aerodrome", "hyperliquid", "bsc"):
+            try:
+                account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
+            except RuntimeError as e:
+                self.gui.show_notification(str(e), error=True)
+                return
 
         confirm = messagebox.askyesno(
             "Confirm: Close Position",
@@ -3358,6 +3673,30 @@ class LPTab:
                     self.gui.root.after(0, lambda: self.gui.show_notification(
                         "Agent not running. Start key_manager_agent with --serve.", error=True))
                     return
+
+                # v5.3.17: final writer/chain guard. The resolved writer's chain
+                # must match the position record. This catches any residual
+                # dispatch bug before a transaction is signed.
+                writer_chain = getattr(writer, "chain_id", None)
+                expected_chain_id = {
+                    "aerodrome": 8453,
+                    "hyperliquid": 999,
+                    "bsc": 56,
+                }.get(venue_key)
+                if expected_chain_id is not None and writer_chain is not None:
+                    if writer_chain != expected_chain_id:
+                        self.gui.root.after(0, lambda: self.gui.show_notification(
+                            f"Chain mismatch: resolved {venue_key} writer serves chain "
+                            f"{writer_chain}, expected {expected_chain_id}. Refetch this position.",
+                            error=True))
+                        return
+
+                # Pass the live price engine so the close recorder can price legs.
+                try:
+                    writer.price_engine = self.gui.price_engine
+                except Exception:
+                    pass
+
                 tx_hashes = writer.close_position(position.position_id, account_name)
                 if tx_hashes:
                     # v5.3.4: fire-and-forget is gone. Wait for each receipt
@@ -3390,45 +3729,48 @@ class LPTab:
                                 f"TX: {unconfirmed[0][:20]}…", error=True))
                         # Keep the card — never claim success without receipts.
                         return
-                    if len(tx_hashes) == 2:
-                        # Full close: both receipts confirmed. Verify liquidity
-                        # is actually gone before removing the card.
+                    # Full close: decrease + collect confirmed. Verify the
+                    # position is empty (and, for Aerodrome, optionally burned)
+                    # before removing the card.
+                    token_id = None
+                    try:
+                        token_id = int(position.position_id.split(":", 1)[1])
+                    except (ValueError, IndexError, AttributeError):
                         token_id = None
+                    liquidity = 0
+                    if token_id is not None:
                         try:
-                            token_id = int(position.position_id.split(":", 1)[1])
-                        except (ValueError, IndexError, AttributeError):
-                            token_id = None
-                        liquidity = 0
-                        if token_id is not None:
-                            try:
-                                liquidity = writer._get_position_liquidity(token_id)
-                            except Exception as e:
-                                print(f"[close_position] post-close liquidity read failed: {e}")
-                                liquidity = 0
-                        if liquidity > 0:
-                            self.gui.root.after(0, lambda: self.gui.show_notification(
-                                "Liquidity still on-chain — retry Close or Collect Fees", error=True))
-                            return
-                        # v5.3.16: ledger auto-record — Aerodrome wired; others stub.
-                        vkey = (venue_key or "").lower()
-                        is_aero = vkey in ("aerodrome", "aerodrome/base") or "aerodrome" in vkey
-                        if is_aero:
-                            note = self._lp_record_close_for_writer(writer, venue="aerodrome")
-                        else:
-                            print(f"[close_position] ledger recording not implemented for venue "
-                                  f"'{venue_key}' yet — close confirmed on-chain; record via Kimi's tool.")
-                            note = ("close confirmed on-chain — ledger recording pending "
-                                    "(this venue's recorder is a follow-up)")
-                        self.gui.root.after(0, lambda n=note: self._lp_forget_position(
-                            position, notify=f"Position closed ✓ {n}"))
-                    elif len(tx_hashes) == 1:
-                        # Partial close (collect failed) — keep the card.
+                            liquidity = writer._get_position_liquidity(token_id)
+                        except Exception as e:
+                            print(f"[close_position] post-close liquidity read failed: {e}")
+                            liquidity = 0
+                    if liquidity > 0:
                         self.gui.root.after(0, lambda: self.gui.show_notification(
-                            "Partially closed: liquidity removed but collect failed. "
-                            "Retry 'Collect Fees' to withdraw funds."))
+                            "Liquidity still on-chain — retry Close or Collect Fees", error=True))
+                        return
+                    # v5.3.16: ledger auto-record — Aerodrome wired; others stub.
+                    vkey = (venue_key or "").lower()
+                    is_aero = vkey in ("aerodrome", "aerodrome/base") or "aerodrome" in vkey
+                    if is_aero:
+                        note = self._lp_record_close_for_writer(writer, venue="aerodrome")
+                        burn_note = ""
+                        # v5.3.18: if the writer burned the NFT, include it in the success note.
+                        if getattr(writer, "last_burn_sig", None):
+                            burn_note = f" · NFT burned ({writer.last_burn_sig[:12]}...)"
+                    else:
+                        print(f"[close_position] ledger recording not implemented for venue "
+                              f"'{venue_key}' yet — close confirmed on-chain; record via Kimi's tool.")
+                        note = ("close confirmed on-chain — ledger recording pending "
+                                "(this venue's recorder is a follow-up)")
+                        burn_note = ""
+                    self.gui.root.after(0, lambda n=note, b=burn_note: self._lp_forget_position(
+                        position, notify=f"Position closed ✓ {n}{b}"))
+                    return
                 else:
+                    # No transactions submitted.
                     self.gui.root.after(0, lambda: self.gui.show_notification(
                         "Close position: no transactions submitted", error=True))
+                    return
             except Exception as e:
                 error_msg = str(e)
                 print(f"[close_position] error: {error_msg}")

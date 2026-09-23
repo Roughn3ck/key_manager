@@ -51,12 +51,21 @@ def save_pool(
     venue: str,
     pool_address: Optional[str],
     pair: str,
+    account_name: Optional[str] = None,
+    account_chain: Optional[str] = None,
 ) -> bool:
     """Add or update a saved pool entry in the decrypted address_db.
 
     Deduplicates by ``(venue, token_id)``. Only stores public identifiers.
     The caller must re-encrypt the vault via KeyManager.save_encrypted_data(password)
     after calling this function to persist the change to key_vault.encrypted.
+
+    Args:
+        account_name: The vault account name that owns this position. Stored so
+            future close/collect/rebalance actions use the record's binding, not
+            the top-bar selector.
+        account_chain: The chain the account address belongs to (e.g. 'base',
+            'solana').
 
     Returns True on success, False on error.
     """
@@ -72,20 +81,29 @@ def save_pool(
                 and entry.get("venue") == venue
                 and entry.get("token_id") == token_id
             ):
-                # Already saved — update wallet/pair in case they changed
+                # Already saved — update wallet/pair/binding in case they changed
                 entry["wallet_address"] = wallet_address
                 entry["pair"] = pair
                 entry["pool_address"] = pool_address or ""
                 entry["date_saved"] = datetime.now(timezone.utc).isoformat()
+                if account_name is not None:
+                    entry["account_name"] = account_name
+                if account_chain is not None:
+                    entry["account_chain"] = account_chain
                 return True
-        pools.append({
+        new_entry = {
             "wallet_address": wallet_address,
             "token_id": token_id,
             "venue": venue,
             "pool_address": pool_address or "",
             "pair": pair,
             "date_saved": datetime.now(timezone.utc).isoformat(),
-        })
+        }
+        if account_name is not None:
+            new_entry["account_name"] = account_name
+        if account_chain is not None:
+            new_entry["account_chain"] = account_chain
+        pools.append(new_entry)
         return True
     except Exception:
         return False
@@ -141,16 +159,49 @@ def _find_pool_entry(address_db: Dict[str, Any], token_id: Union[int, str], venu
     return None
 
 
+def update_saved_pool_binding(
+    address_db: Dict[str, Any],
+    token_id: Union[int, str],
+    venue: str,
+    account_name: str,
+    account_address: str,
+    account_chain: str,
+) -> bool:
+    """Persist the owning vault account binding for a saved pool.
+
+    Used by the legacy self-heal path: when a saved pool has no account binding,
+    owner-anchored resolution finds the right account and writes it back.
+
+    The caller must re-encrypt the vault to persist the change.
+
+    Returns True on success, False if pool not found or error.
+    """
+    try:
+        entry = _find_pool_entry(address_db, token_id, venue)
+        if entry is None:
+            return False
+        entry["account_name"] = account_name
+        entry["account_address"] = account_address
+        entry["account_chain"] = account_chain
+        entry["date_bound"] = datetime.now(timezone.utc).isoformat()
+        return True
+    except Exception:
+        return False
+
+
 def update_saved_pool_wallet(
     address_db: Dict[str, Any],
     token_id: Union[int, str],
     venue: str,
     new_wallet_address: str,
+    account_name: Optional[str] = None,
+    account_chain: Optional[str] = None,
 ) -> bool:
-    """Update the wallet_address for a saved pool entry.
+    """Update the wallet_address (and optionally account binding) for a saved pool entry.
 
     Used when a pool was saved with the wrong wallet address (e.g. saved
-    while a different account was selected in the LP tab).
+    while a different account was selected in the LP tab), or when the binding
+    is self-healed via owner-anchored resolution.
 
     The caller must re-encrypt the vault to persist this change.
 
@@ -161,6 +212,10 @@ def update_saved_pool_wallet(
         if entry is None:
             return False
         entry["wallet_address"] = new_wallet_address
+        if account_name is not None:
+            entry["account_name"] = account_name
+        if account_chain is not None:
+            entry["account_chain"] = account_chain
         return True
     except Exception:
         return False

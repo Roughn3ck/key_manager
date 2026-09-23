@@ -57,6 +57,7 @@ SELECTOR_MINT = "0xb5007d1f"
 SELECTOR_APPROVE = "0x095ea7b3"
 SELECTOR_BALANCE_OF_ERC20 = "0x70a08231"
 SELECTOR_MULTICALL = "0xac9650d8"
+SELECTOR_BURN = "0x42966c68"  # burn(uint256 tokenId)
 
 
 class AerodromeWriter(VenueWriter):
@@ -206,6 +207,10 @@ class AerodromeWriter(VenueWriter):
                 (e.g. one for Ethereum mainnet, one for Base) — we need to check
                 the Base address specifically.
         """
+        # v5.3.17: writer-side chain guard. The RPC used for gas-balance read
+        # and agent broadcast must be the same verified chain.
+        self._verify_rpc_chain(self.rpc_url, self.chain_id)
+
         if gas_check_address:
             vault_address = gas_check_address
         else:
@@ -216,6 +221,10 @@ class AerodromeWriter(VenueWriter):
                 f"Insufficient gas: wallet {vault_address} has 0 ETH. "
                 f"Send ETH to this address to pay for transaction gas on BASE."
             )
+
+        # Re-verify the RPC right before the agent broadcast. Cheap relative to
+        # a signed tx on the wrong chain, and it catches runtime endpoint swaps.
+        self._verify_rpc_chain(self.rpc_url, self.chain_id)
 
         result = self._agent_call(
             "broadcast_tx",
@@ -441,10 +450,34 @@ class AerodromeWriter(VenueWriter):
         self._close_capture["collect_sig"] = collect_tx
         self._wait_for_tx_receipt(collect_tx, timeout=60)
 
+        # v5.3.18: after decrease+collect, read back the position. If liquidity
+        # and tokensOwed are both zero, burn the empty NFT. Burn is a cleanup
+        # step only; it never carries a principal/fee leg.
+        self.last_burn_sig = None
+        burn_sig = None
+        try:
+            post_liq, post_owed0, post_owed1 = self._get_position_state(token_id, position_manager)
+            if post_liq == 0 and post_owed0 == 0 and post_owed1 == 0:
+                burn_data = SELECTOR_BURN + _pad_int_to_64(token_id)
+                burn_sig = self._broadcast(account, position_manager, burn_data,
+                                             gas_check_address=recipient)
+                self.last_burn_sig = burn_sig
+                tx_hashes.append(burn_sig)
+                self._wait_for_tx_receipt(burn_sig, timeout=60)
+                print(f"[aero-writer] burn ok: token_id={token_id}, tx={burn_sig}")
+            else:
+                print(f"[aero-writer] skip burn: liq={post_liq}, owed0={post_owed0}, owed1={post_owed1}")
+        except Exception as e:
+            print(f"[aero-writer] burn failed (non-fatal): {e}")
+
         # Build the CloseResult for the ledger recorder (GUI completion path).
+        # BUGFIX v5.3.18: call site was passing pre0/pre1 as token addresses and
+        # token0/token1 as decimals since v5.3.16, so capture raised and the
+        # recorder never ran. Pass the correct (recipient, token0, token1, dec0, dec1).
         try:
             self.last_close_result = self._post_close_state(
-                recipient, pre0, pre1, token0, token1, dec0, dec1,
+                recipient, token0, token1, dec0, dec1,
+                burn_sig=burn_sig,
             )
         except Exception as e:
             print(f"[aero-writer] close capture failed (non-fatal): {e}")
@@ -456,19 +489,41 @@ class AerodromeWriter(VenueWriter):
     # Close capture (ledger recorder feed) — read-only, post-close
     # ------------------------------------------------------------------
 
+    def _get_position_state(self, token_id: int, position_manager: str) -> tuple:
+        """Read current liquidity and tokensOwed from positions(tokenId)."""
+        data = SELECTOR_POSITIONS + _pad_int_to_64(token_id)
+        result = _base_rpc_call("eth_call", [{"to": position_manager, "data": data}, "latest"])
+        if not result or not isinstance(result, str) or len(result) < 2 + 32 * 13:
+            return (0, 0, 0)
+        body = result[2:]
+        liquidity = int(body[448:512], 16)
+        # tokensOwed0 and tokensOwed1 are the last two uint128 slots (16 bytes each)
+        owed0 = int(body[512:576], 16) if len(body) >= 576 else 0
+        owed1 = int(body[576:640], 16) if len(body) >= 640 else 0
+        return (liquidity, owed0, owed1)
+
     def _post_close_state(self, recipient: str, token0: str, token1: str,
-                          dec0: int, dec1: int) -> Dict[str, Any]:
+                          dec0: int, dec1: int, burn_sig: Optional[str] = None) -> Dict[str, Any]:
         """After the close txs confirm: per-tx deltas from receipts + prices."""
         from coldtrack.close_recorder import CloseLeg, CloseResult
         cap = getattr(self, "_close_capture", {}) or {}
         pos_mint = cap.get("position_id_str", "")
-        sigs = [s for s in (cap.get("decrease_sig"), cap.get("collect_sig")) if s]
+        sigs = [s for s in (cap.get("decrease_sig"), cap.get("collect_sig"), burn_sig) if s]
         receipts: Dict[str, Any] = {}
         legs: List[CloseLeg] = []
         gas: Dict[str, float] = {}
         block_iso: Optional[str] = None
 
         for sig in sigs:
+            # Burn sig is recorded in notes/snapshot only; it never moves principal/fee.
+            if sig == burn_sig:
+                rc = self._rpc_call("eth_getTransactionReceipt", [sig])
+                receipt = rc if isinstance(rc, dict) else None
+                if receipt and receipt.get("status") == "0x1":
+                    gas_used = int(receipt.get("gasUsed", "0x0"), 16) or 0
+                    gp = int(receipt.get("effectiveGasPrice", "0x0"), 16) or 0
+                    gas[sig] = gas_used * gp / 1e18
+                continue
             rc = self._rpc_call("eth_getTransactionReceipt", [sig])
             receipt = rc if isinstance(rc, dict) else None
             if not receipt:
@@ -534,12 +589,15 @@ class AerodromeWriter(VenueWriter):
             if pr:
                 leg.value_usd = round(leg.amount * pr, 6)
 
+        # close_sig is the last successful funds-out tx; burn_sig is tracked in
+        # the snapshot NOTES only and never appears as a withdraw/yield row.
+        close_sig = burn_sig or cap.get("collect_sig") or cap.get("decrease_sig")
         return CloseResult(
             position_mint=pos_mint,
             platform="Aerodrome",
             chain="Base",
             legs=legs,
-            close_sig=cap.get("collect_sig") or cap.get("decrease_sig"),
+            close_sig=close_sig,
             collect_sig=cap.get("collect_sig"),
             decrease_sig=cap.get("decrease_sig"),
             block_time_iso=block_iso,

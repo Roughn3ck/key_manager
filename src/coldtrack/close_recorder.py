@@ -107,9 +107,52 @@ class CloseRecorder:
         account_id = match["account_id"]
         conn = self.db.conn()
 
+        # If the row is already closed (e.g. Kimi recorded it manually, or a
+        # previous close succeeded), do NOT duplicate close data. Just append the
+        # new sigs to NOTES and sync the live TOKEN_ID if needed.
+        cur = conn.cursor()
+        existing = cur.execute(
+            "SELECT STATUS, NOTES, TOKEN_ID FROM LP_POSITIONS WHERE ID=?", (pos_id,)
+        ).fetchone()
+        already_closed = bool(existing and existing["STATUS"] == "closed")
+
         # Begin the atomic write — everything was captured before this point.
         self.db.begin_immediate(busy_timeout_ms=5000)
         try:
+            # If we matched via the stale-id fallback, sync the live TOKEN_ID now,
+            # inside the same transaction.
+            sync_id = match.get("_sync_token_id")
+            if sync_id is not None:
+                old_id = match.get("_sync_token_id_old")
+                sync_note = f"identifier sync: TOKEN_ID {old_id} -> {sync_id}"
+                conn.execute(
+                    """UPDATE LP_POSITIONS SET TOKEN_ID = ?,
+                       NOTES = COALESCE(NOTES || '\n' || ?, ?),
+                       UPDATED_AT = datetime('now') WHERE ID = ?""",
+                    (sync_id, sync_note, sync_note, pos_id),
+                )
+
+            if already_closed:
+                sigs = ", ".join(s for s in (result.decrease_sig, result.collect_sig,
+                                              result.close_sig) if s)
+                append_note = f"ColdStack close replay sigs: {sigs}".strip()
+                if append_note:
+                    conn.execute(
+                        """UPDATE LP_POSITIONS SET
+                           NOTES = COALESCE(NOTES || '\n' || ?, ?),
+                           UPDATED_AT = datetime('now') WHERE ID = ?""",
+                        (append_note, append_note, pos_id),
+                    )
+                self.db.commit()
+                return {
+                    "ok": True,
+                    "position_id": pos_id,
+                    "account_id": account_id,
+                    "fee_events": 0,
+                    "transactions": 0,
+                    "note": "already closed — sigs appended to NOTES",
+                }
+
             self._insert_transactions(conn, result, account_id, match)
             self._close_position_row(conn, result, pos_id)
             self._upsert_snapshot(conn, result, pos_id, match)
@@ -130,34 +173,98 @@ class CloseRecorder:
     # -- matching ---------------------------------------------------------
 
     def _match_position(self, result: CloseResult) -> Dict[str, Any]:
-        """Match the close to a UNIQUE LP_POSITIONS row by TOKEN_ID = position mint.
-        Ambiguous or missing → never fabricate entry data; caller goes pending."""
+        """Match the close to a UNIQUE LP_POSITIONS row.
+
+        Primary match is by TOKEN_ID = position mint. If that misses (e.g. the
+        saved record carries a stale/dead NFT id), fall back to a unique match
+        on PLATFORM + POOL_NAME + STATUS='active'. On a unique fallback match,
+        the row's TOKEN_ID is synced to the live mint (noted in NOTES) so the
+        sentinel view uses the correct identifier.
+
+        Ambiguous or missing → never fabricate entry data; caller goes pending.
+        """
         token_id = result.position_mint
-        # Live row for this mint across all accounts.
         cur = self.db.conn().cursor()
+
+        # 1. Primary: exact TOKEN_ID match
         rows = cur.execute(
             "SELECT * FROM LP_POSITIONS WHERE TOKEN_ID = ? ORDER BY ID",
             (token_id,),
         ).fetchall()
         rows = [dict(r) for r in rows]
         if len(rows) > 1:
-            # Prefer the active one; if exactly one is active, it wins.
             active = [r for r in rows if r.get("STATUS") == "active"]
             if len(active) == 1:
                 rows = active
             else:
                 return {"error": f"ambiguous LP_POSITIONS match for {token_id} "
                                  f"({len(rows)} rows) — needs manual mapping"}
-        if not rows:
-            return {"error": f"no LP_POSITIONS row found for position mint {token_id}"}
-        row = rows[0]
-        return {
-            "position_id": row["ID"],
-            "account_id": row["ACCOUNT_ID"],
-            "pool_name": row.get("POOL_NAME"),
-            "token_a": row.get("TOKEN_A"),
-            "token_b": row.get("TOKEN_B"),
-        }
+        if rows:
+            row = rows[0]
+            return {
+                "position_id": row["ID"],
+                "account_id": row["ACCOUNT_ID"],
+                "pool_name": row.get("POOL_NAME"),
+                "token_a": row.get("TOKEN_A"),
+                "token_b": row.get("TOKEN_B"),
+            }
+
+        # 2. Fallback: unique active row by platform + pool + chain. This
+        # handles stale id records (e.g. Aerodrome G1 Pack row 7).
+        platform = (result.platform or "").strip()
+        chain = (result.chain or "").strip()
+        # Prefer an exact pool name, but also try the token pair if available.
+        pool_candidates = []
+        if result.legs:
+            pair_guess = "/".join(
+                dict.fromkeys(l.asset for l in result.legs if l.kind == "liquidity")
+            )
+            if pair_guess:
+                pool_candidates.append(pair_guess)
+        fallback_rows = cur.execute(
+            """SELECT * FROM LP_POSITIONS
+               WHERE (UPPER(PLATFORM) = UPPER(?) OR PLATFORM IS NULL)
+                 AND (UPPER(POOL_NAME) = UPPER(?)
+                      OR UPPER(TOKEN_A) || '/' || UPPER(TOKEN_B) = UPPER(?))
+                 AND STATUS = 'active'
+               ORDER BY ID""",
+            (platform, pool_candidates[0] if pool_candidates else "", pool_candidates[0] if pool_candidates else ""),
+        ).fetchall()
+        # If no leg-based pool guess, broaden to platform+chain active rows.
+        if not fallback_rows and platform and chain:
+            fallback_rows = cur.execute(
+                """SELECT * FROM LP_POSITIONS
+                   WHERE UPPER(PLATFORM) = UPPER(?)
+                     AND UPPER(CHAIN) = UPPER(?)
+                     AND STATUS = 'active'
+                   ORDER BY ID""",
+                (platform, chain),
+            ).fetchall()
+        fallback_rows = [dict(r) for r in fallback_rows]
+        if len(fallback_rows) == 1:
+            row = fallback_rows[0]
+            old_token_id = row.get("TOKEN_ID")
+            new_token_id = token_id
+            if old_token_id != new_token_id:
+                # Defer the identifier sync so it happens inside the recorder's
+                # atomic transaction. The caller will apply it via _sync_token_id.
+                row["_sync_token_id"] = new_token_id
+                row["_sync_token_id_old"] = old_token_id
+            return {
+                "position_id": row["ID"],
+                "account_id": row["ACCOUNT_ID"],
+                "pool_name": row.get("POOL_NAME"),
+                "token_a": row.get("TOKEN_A"),
+                "token_b": row.get("TOKEN_B"),
+                "_sync_token_id": row.get("_sync_token_id"),
+                "_sync_token_id_old": row.get("_sync_token_id_old"),
+            }
+        if len(fallback_rows) > 1:
+            return {"error": f"ambiguous LP_POSITIONS match for {platform}/{chain} "
+                             f"({len(fallback_rows)} active rows) — needs manual mapping"}
+
+        return {"error": f"no LP_POSITIONS row found for position mint {token_id} "
+                          f"or platform/pool {platform}/{chain}"}
 
     # -- per-table writers (raw SQL inside the caller's transaction) --------
 

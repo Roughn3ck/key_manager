@@ -1,8 +1,106 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.16 (LP Fetch minor fixes + Close-Position Ledger Recorder + Aerodrome close signer fix)
-**Last Updated:** 2026-09-22
+**Current Version:** v5.3.18 (Saved-pool account binding + Aerodrome close loop)
+**Last Updated:** 2026-09-23
+
+---
+
+## v5.3.18 - Saved-pool account binding + Aerodrome close loop (2026-09-23)
+
+### Summary
+This release finishes the G1 Aerodrome close loop. The end-to-end close had already been verified on-chain; the remaining work was making ColdStack's own ledger write actually happen, binding saved pools to their owning vault account so the top-bar selector cannot accidentally use the wrong signer, and cleaning up the empty NFT husk.
+
+### Section A — Saved-pool account binding
+
+A saved pool now stores its owning vault account (`account_name`, `account_address`, `account_chain`) when it is fetched/saved. Position actions (close, collect, compound, rebalance, refresh) resolve the account from the **record's binding**; the top-bar Account selector now governs only new fetches/opens.
+
+- `save_pool()` in `src/saved_pools.py` accepts and stores `account_name`/`account_chain`.
+- `_lp_resolve_wallet_for_position()` in `src/lp_tab.py` now tries the binding first, then falls back to wallet_address / address entry / top-bar selector.
+- Legacy records without a binding self-heal: `_lp_verify_evm_position_ownership()` runs the owner-anchored resolution and writes the correct account back into the saved-pool record.
+- Two distinct fatal pre-flight errors (no more generic "stale record"):
+  - `position owner 0x… matches no vault account on this chain — refetch`
+  - `record is bound to account X (0x…) but ownerOf(N) = Y — refetch`
+
+### Section B — Aerodrome close now writes to the database
+
+**Root cause of the missed write:** `AerodromeWriter._post_close_state()` was called with the wrong argument order since v5.3.16: `recipient, pre0, pre1, token0, token1, dec0, dec1` instead of `recipient, token0, token1, dec0, dec1`. The float balances were treated as token addresses, the method raised, `last_close_result` was set to `None`, and the GUI recorder hook returned early without touching `coldtrack.db`.
+
+**Fix:** corrected the call site in `src/venue_adapters/aerodrome_writer.py`. The recorder now runs and writes the four-table close record:
+- `TRANSACTIONS` — `lp_withdraw` rows for liquidity legs, `yield` rows for fee legs; `CHAIN='Base'`; gas in `FEE_ASSET`/`FEE_AMOUNT`.
+- `LP_POSITIONS` — `STATUS='closed'`, `CLOSED_DATE`; row 7 is matched by `PLATFORM + POOL_NAME + STATUS='active'` and its `TOKEN_ID` is corrected from the stale `74933503` to the live `75255240` (noted in `NOTES`).
+- `LP_SNAPSHOTS` — close row with amounts/prices/`TOTAL_VALUE_USD`, `IN_RANGE=0`, sigs in `NOTES`.
+- `FEE_EVENTS` — `SOURCE='HARVEST'`.
+
+If the row is already closed, the recorder appends the close sigs to `NOTES` only and never duplicates close data.
+
+### Section C — Burn the empty NFT
+
+After decrease+collect, `AerodromeWriter.close_position()` reads back `liquidity` and `tokensOwed0/1`. If all are zero, it calls `burn(tokenId)` on the SlipStream PositionManager. The burn hash is appended to the returned tx list for the UI and recorded in `NOTES`/snapshot gas only — it never appears as a withdraw or yield leg. Burn failure is non-fatal; funds-out is still reported successful with a clear "NFT burn failed — retry" state.
+
+### Section D — Post-close cleanup
+
+Card removal is gated on the position being empty. For Aerodrome that means either the burn confirmed or, if burn is unavailable, a `liquidity == 0` read-back.
+
+### Tests + Files
+- `src/saved_pools.py` — account binding fields + `update_saved_pool_binding()`.
+- `src/lp_tab.py` — binding capture, binding-first resolution, self-heal, refined error messages, burn note in success UI.
+- `src/venue_adapters/aerodrome_writer.py` — corrected `_post_close_state` call site, `_get_position_state`, `burn()` flow, `last_burn_sig`.
+- `src/coldtrack/close_recorder.py` — already-closed row NOTES-only append path.
+- `src/gui_main_v5.py` — `VERSION = "5.3.18"`.
+- `build_gui_v5.py` — version string updated to v5.3.18.
+- `README.md` — latest release link updated to v5.3.18.
+- Tests: `test_saved_pool_binding.py` (NEW), `test_aerodrome_burn_leg.py` (NEW), updated `test_close_recorder_aerodrome.py` (already-closed NOTES-only path).
+
+### Release
+- EXE built: `USB_DEPLOYMENT/coldstack.exe`.
+- GitHub release: v5.3.18 with `coldstack.exe` asset.
+
+---
+
+## v5.3.17 - LP wrong-venue dispatch fix + chain-identity guard + stale-id recorder sync (source-only train, merged into v5.3.18 release)
+
+### Summary
+The Aerodrome G1 Pack close (EURC/cbBTC Slipstream) was being dispatched to the Project X/HyperEVM writer because `lp_tab.py` resolved the venue from the `position_id` string with a silent HyperEVM fallback. The broadcast then went to HyperEVM, where the owner's wallet has 0 native, producing the misleading "insufficient funds" error. This release removes the silent default and adds redundant chain-identity guards so any residual wrong-chain dispatch aborts with a one-glance error.
+
+### Section A — Dispatch integrity (lp_tab.py)
+
+**`LPTab._lp_resolve_venue_for_position(position)`** is now the single dispatch resolver. The venue is taken from the saved position record (`position.venue` / `position.chain`) first; the `position_id` prefix is only a secondary signal. A missing or ambiguous venue aborts with `could not determine venue for <position_id> — refetch the position` and NEVER falls back to a default writer. `_lp_get_chain_info` is deprecated for dispatch; it now returns `("Unknown", "???", "")` for unrecognized prefixes instead of the old `("HyperEVM", "HYPE", "hyperliquid")` silent default.
+
+**Fatal pre-flight NFT ownership check.** `_lp_verify_evm_position_ownership(position, account_name, venue_key)` runs for every EVM close/collect/compound before the confirmation dialog. It checks `ownerOf(tokenId)` on all venue position managers (both Aerodrome SlipStream NFPMs for Base) and requires the live NFT to be owned by the vault-derived signer. On failure it aborts with `stale record — refetch this position: ...` and does not sign anything. This catches a stale id (e.g. the dead `74933503` in the Pack row) before a close is attempted.
+
+**Writer/chain mismatch guard.** Before `writer.close_position()` is called, the resolved writer's `chain_id` is compared to the expected id for the venue (`aerodrome=8453`, `hyperliquid=999`, `bsc=56`). A mismatch aborts naming both ids and asks the user to refetch.
+
+### Section B — Chain-identity guard in key_manager_agent.py
+
+`KeyManagerAgent` now has `_verify_rpc_chain(rpc, chain_id)`. `sign_tx` calls it when both `rpc` and `chain_id` are supplied; `broadcast_tx` re-verifies right before sending the signed tx. Mismatch raises `RPC <url> serves chain <id>, expected <chain_id> — refusing to sign/broadcast`. This is the class-killer guard that makes any future wrong-chain RPC a one-glance diagnosis.
+
+### Section C — Writer-side chain guard (venue_writer.py + EVM writers)
+
+`VenueWriter._verify_rpc_chain(rpc, expected_chain_id)` is a shared helper that makes a direct `eth_chainId` call and raises on mismatch. `AerodromeWriter._broadcast`, `HyperliquidWriter._broadcast`, and `BSCWriter._broadcast` call it both before the gas-balance read and before the agent broadcast. The gas-balance RPC and the broadcast RPC are therefore verified to be the same chain.
+
+### Section D — Recorder stale-id sync (close_recorder.py)
+
+`CloseRecorder._match_position` now tolerates a stale `TOKEN_ID` in the saved record. If exact `TOKEN_ID` lookup misses, it falls back to a unique active match on `PLATFORM + POOL_NAME` (or `PLATFORM + CHAIN` if needed). On a unique fallback match, the row's `TOKEN_ID` is corrected to the live NFT id and the old value is noted in `NOTES` (`identifier sync: TOKEN_ID <old> -> <new>`). Ambiguous fallback matches still go to the pending file; the on-chain close remains reported successful. This makes the Pack G1 row (currently carrying dead id `74933503`) closable with the live id `75255240`.
+
+### Section E — cbBTC address correction
+
+`CBBTC_BASE` in `src/venue_adapters/aerodrome_adapter.py` and the `cbBTC` entries in `src/balance_engine.py` were using the dead registry address `0xcbB45146687557Fd9B6F8cB1E2D51a65F3B1D1c1`. Verified on-chain `symbol()` showed the live cbBTC token at `0xcbb7c0000aB88B473b1f5afd9ef808440eed33bf`. All three occurrences have been corrected to the live address so recorder leg symbols, pool reads, and balance lookups use the real token.
+
+### Tests + Files
+- `src/lp_tab.py` — `_lp_resolve_venue_for_position`, `_lp_chain_gas_for_venue`, `_lp_verify_evm_position_ownership`, updated `_lp_close_position_dialog` / `_lp_collect_fees_dialog` / `_lp_compound_fees_dialog`, writer chain guard in `_do_close`.
+- `src/key_manager_agent.py` — `_verify_rpc_chain`, guard calls in `sign_tx` + `broadcast_tx`.
+- `src/venue_adapters/venue_writer.py` — shared `_verify_rpc_chain`.
+- `src/venue_adapters/aerodrome_writer.py`, `hyperliquid_writer.py`, `bsc_writer.py` — writer-side chain guard calls.
+- `src/coldtrack/close_recorder.py` — fallback platform/pool match + TOKEN_ID sync.
+- `src/venue_adapters/aerodrome_adapter.py`, `src/balance_engine.py` — corrected `CBBTC_BASE` / cbBTC addresses.
+- `src/gui_main_v5.py` — `VERSION = "5.3.17"`.
+- Tests: `test_lp_dispatch_guard.py` (NEW), `test_agent_chain_guard.py` (NEW), `test_writer_chain_guard.py` (NEW), updated `test_close_recorder_aerodrome.py` to exercise the stale-id sync path.
+
+### Acceptance
+- `python -m py_compile` on all touched files.
+- All existing tests green plus the three new tests.
+- No EXE build, no git push, no release — source-only.
 
 ---
 

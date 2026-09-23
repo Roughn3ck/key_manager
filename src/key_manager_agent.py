@@ -761,6 +761,20 @@ class KeyManagerAgent:
               f"(chain='{matches[0].get('chain', '')}')")
         return matches[0]["key"]
 
+    def _verify_rpc_chain(self, rpc: str, chain_id: int) -> None:
+        """Verify that the RPC serves the expected chain_id.
+
+        Raises a clear RuntimeError naming both the actual and expected ids.
+        This is the class-killer guard that turns a wrong-chain dispatch into
+        a one-glance error.
+        """
+        actual = get_chain_id(rpc)
+        if actual != chain_id:
+            raise RuntimeError(
+                f"RPC {rpc} serves chain {actual}, expected {chain_id} — "
+                "refusing to sign/broadcast"
+            )
+
     def sign_tx(self, account: str, to: str, data: str, value: str = "0",
                 chain_id: int = None, rpc: str = None, chain: str = "EVM",
                 gas_limit: int = None, gas_price: int = None,
@@ -781,6 +795,11 @@ class KeyManagerAgent:
                 chain_id = get_chain_id(rpc)
             elif chain_id is None:
                 return {"status": "error", "error": "chain_id or rpc required"}
+
+            # v5.3.17: chain-identity guard. If the caller passed both rpc and
+            # chain_id, the RPC must serve exactly that chain before we sign.
+            if rpc and chain_id is not None:
+                self._verify_rpc_chain(rpc, chain_id)
 
             # Get nonce from RPC if not provided
             if nonce is None and rpc:
@@ -925,6 +944,13 @@ class KeyManagerAgent:
 
             if not rpc:
                 return {"status": "error", "error": "rpc URL required for broadcast"}
+
+            # v5.3.17: chain-identity guard at broadcast time. Even if sign_tx
+            # succeeded (e.g. it inferred chain_id from the RPC), re-verify
+            # before broadcasting to the same RPC.
+            expected_chain_id = sign_result["result"].get("chain_id")
+            if expected_chain_id is not None:
+                self._verify_rpc_chain(rpc, expected_chain_id)
 
             # v5.3.16: echo the derived signer on every broadcast error so a
             # wrong-key close is diagnosable in one glance.

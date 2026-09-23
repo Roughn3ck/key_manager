@@ -107,7 +107,7 @@ TOKEN_CONTRACTS = {
         "WETH": {"address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2", "decimals": 18},
         "LINK": {"address": "0x514910771AF9Ca656af840dff83E8264EcF986CA", "decimals": 18},
         "UNI": {"address": "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984", "decimals": 18},
-        "cbBTC": {"address": "0xcbB45146687557Fd9B6F8cB1E2D51a65F3B1D1c1", "decimals": 8},
+        "cbBTC": {"address": "0xcbb7c0000aB88B473b1f5afd9ef808440eed33bf", "decimals": 8},
     },
     "arbitrum": {
         "USDC": {"address": "0xaf88d065e77c8cC2239327C5EDB3A432268e5831", "decimals": 6},
@@ -118,7 +118,7 @@ TOKEN_CONTRACTS = {
     "base": {
         "USDC": {"address": "0x833589fCD6eDb6E08357c3f4147D2935738F1a30", "decimals": 6},
         "WETH": {"address": "0x4200000000000000000000000000000000000006", "decimals": 18},
-        "cbBTC": {"address": "0xcbB45146687557Fd9B6F8cB1E2D51a65F3B1D1c1", "decimals": 8},
+        "cbBTC": {"address": "0xcbb7c0000aB88B473b1f5afd9ef808440eed33bf", "decimals": 8},
     },
     "bsc": {
         "USDT": {"address": "0x55d398326f99059fF775485246999027B3197955", "decimals": 18},

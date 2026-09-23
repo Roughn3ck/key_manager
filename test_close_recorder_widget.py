@@ -52,13 +52,20 @@ def main():
     note = rec(tab, _W(_res()), None, "")
     assert "ledger write skipped" in note
 
-    # 3) position not mapped → pending note
+    # 3) position not mapped → pending note (use a platform that cannot match)
     tmp = Path(tempfile.mkdtemp(prefix="close_widget_"))
     dbp = tmp / "coldtrack.db"
     import shutil
     shutil.copy(Path(r"B:\OpenClaw\.openclaw\workspace\kimi\portfolios\kitandpaul\coldtrack.db"), dbp)
     tab._lp_portfolio_db_path = lambda: dbp
-    note = rec(tab, _W(_res(mint="NoSuchMintXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX")), None, "")
+    bad_res = CloseResult(
+        position_mint="NoSuchMintXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+        platform="DefinitelyNotOrca", chain="Solana",
+        legs=[CloseLeg(asset="cbBTC", amount=0.01, value_usd=167.0, kind="fee", sig="CS")],
+        close_sig="CLOSE", collect_sig="CS", decrease_sig=None,
+        block_time_iso="2026-09-22T01:24:00+00:00", gas={}, gas_asset="SOL",
+        token_price_usd={}, final_amounts={})
+    note = rec(tab, _W(bad_res), None, "")
     assert "position not mapped" in note or "pending" in note, note
 
     print("✅ CLOSE COMPLETION WIDGET SMOKE PASS (success / skipped / pending notes)")

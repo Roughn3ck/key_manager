@@ -39,19 +39,26 @@ def main():
         shutil.copy(LIVE_PACK, db_path)
         db = ColdTrackDB(db_path); db.init_schema()
 
-        # Confirm the fixture row exists (pack db row 7: EURC/cbBTC, token_id 75255240).
+        # Confirm the fixture row exists (pack db row 7: EURC/cbBTC Aerodrome).
+        # v5.3.17: the live LP NFT id is 75255240; the saved row currently holds
+        # the dead id 74933503. This test exercises the fallback platform+pool
+        # match + TOKEN_ID sync path.
         cur = db._conn.cursor()
-        # The pack's G1 EURC/cbBTC Aerodrome row (ID 7, token_id 74933503 â€” confirmed
-        # by reading the live DB; the prompt's 75255240 figure was the Deposit#, not
-        # the LP token_id).
         hit = _rows(db._conn,
                     "SELECT ID, ACCOUNT_ID, TOKEN_ID, TOKEN_A, TOKEN_B FROM LP_POSITIONS WHERE TOKEN_ID=?",
                     ("74933503",))
-        assert hit, "pack db must contain the #75255240 fixture row"
+        if not hit:
+            # Row may have already been synced; fall back to the live id.
+            hit = _rows(db._conn,
+                        "SELECT ID, ACCOUNT_ID, TOKEN_ID, TOKEN_A, TOKEN_B FROM LP_POSITIONS WHERE TOKEN_ID=?",
+                        ("75255240",))
+        assert hit, "pack db must contain the EURC/cbBTC Aerodrome fixture row"
         pos_id = hit[0]["ID"]
+        assert hit[0]["TOKEN_A"] == "EURC" and hit[0]["TOKEN_B"] == "cbBTC", hit[0]
 
+        # Submit a CloseResult keyed to the LIVE NFT id.
         res = CloseResult(
-            position_mint="74933503",
+            position_mint="75255240",
             platform="Aerodrome", chain="Base",
             legs=[
                 CloseLeg(asset="EURC", amount=872.04, value_usd=940.0,
@@ -74,11 +81,13 @@ def main():
         out = CloseRecorder(db).record(res)
         assert out["ok"], out
 
-        # LP_POSITIONS â€” closed + CLOSED_DATE.
-        pos = _rows(db._conn, "SELECT STATUS, CLOSED_DATE FROM LP_POSITIONS WHERE ID=?", (pos_id,))[0]
+        # LP_POSITIONS — closed + CLOSED_DATE, and TOKEN_ID synced to live id.
+        pos = _rows(db._conn, "SELECT STATUS, CLOSED_DATE, TOKEN_ID, NOTES FROM LP_POSITIONS WHERE ID=?", (pos_id,))[0]
         assert pos["STATUS"] == "closed" and pos["CLOSED_DATE"] == "2026-09-22T07:30:00+00:00", pos
+        assert pos["TOKEN_ID"] == "75255240", pos
+        assert "identifier sync: TOKEN_ID 74933503 -> 75255240" in (pos["NOTES"] or ""), pos
 
-        # TRANSACTIONS â€” liquidity legs carry the DECREASE sig ('0xdec'); fee legs the
+        # TRANSACTIONS — liquidity legs carry the DECREASE sig ('0xdec'); fee legs the
         # COLLECT sig ('0xcol'); CHAIN='Base'; CATEGORY lp/yield; gas FEE_ASSET='ETH'.
         txs = _rows(db._conn, "SELECT * FROM TRANSACTIONS WHERE TX_HASH IN ('0xdec','0xcol') ORDER BY ID")
         assert len(txs) == 4, txs
@@ -91,14 +100,15 @@ def main():
         assert all(t["TX_HASH"] == "0xdec" for t in liq), "liquidity legs attribute the decrease tx"
         assert all(t["TX_HASH"] == "0xcol" for t in fees), "fee legs attribute the collect tx"
 
-        # FEE_EVENTS â€” SOURCE='HARVEST', TX_HASH=collect sig, A/B amounts in DB order
-        # (token_a/b from the row: EURC/cbBTC).
-        fe = _rows(db._conn, "SELECT * FROM FEE_EVENTS WHERE POSITION_ID=?", (pos_id,))
+        # FEE_EVENTS — SOURCE='HARVEST', TX_HASH=collect sig, A/B amounts in DB order
+        # (token_a/b from the row: EURC/cbBTC). The live Pack DB may already have
+        # a real collect fee row, so assert on the new ColdStack row specifically.
+        fe = _rows(db._conn, "SELECT * FROM FEE_EVENTS WHERE POSITION_ID=? AND TX_HASH=?", (pos_id, "0xcol"))
         assert len(fe) == 1, fe
-        assert fe[0]["SOURCE"] == "HARVEST" and fe[0]["TX_HASH"] == "0xcol"
+        assert fe[0]["SOURCE"] == "HARVEST"
         assert fe[0]["TOKEN_A_AMT"] == 3.21 and fe[0]["TOKEN_B_AMT"] == 0.00011
 
-        # LP_SNAPSHOTS â€” one close row, sigs + CLOSED marker in NOTES.
+        # LP_SNAPSHOTS — one close row, sigs + CLOSED marker in NOTES.
         sn = _rows(db._conn, "SELECT * FROM LP_SNAPSHOTS WHERE LP_POSITION_ID=?", (pos_id,))
         assert len(sn) == 1
         assert "CLOSED via ColdStack" in (sn[0]["NOTES"] or "")
@@ -107,7 +117,7 @@ def main():
         assert sn[0]["TOKEN_A_AMOUNT"] == 872.04 and sn[0]["TOKEN_B_AMOUNT"] == 0.01323
         db.close()
 
-        # Idempotency â€” snapshot stays single-row.
+        # Idempotency — snapshot stays single-row; re-record with same live id ok.
         db2 = ColdTrackDB(db_path); db2.init_schema()
         out2 = CloseRecorder(db2).record(res)
         assert out2["ok"]
@@ -115,19 +125,57 @@ def main():
         assert ns == 1, "snapshot upsert must stay single-row per (position,date)"
         db2.close()
 
-        # No-match â†’ pending, zero rows written.
+        # Direct TOKEN_ID match still works after the sync.
+        db4 = ColdTrackDB(db_path); db4.init_schema()
+        res2 = CloseResult(
+            position_mint="75255240",
+            platform="Aerodrome", chain="Base",
+            legs=[CloseLeg(asset="EURC", amount=1.0, kind="fee", sig="0xcol")],
+            collect_sig="0xcol", block_time_iso="2026-09-22T07:30:00+00:00",
+        )
+        out4 = CloseRecorder(db4).record(res2)
+        # Position is already closed, but match should still succeed.
+        assert out4.get("ok"), out4
+        db4.close()
+
+        # Already-closed row → NOTES-only append, no duplicate tx/fee rows.
+        db5 = ColdTrackDB(db_path); db5.init_schema()
+        before_tx = _rows(db5._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS")[0]["n"]
+        before_fe = _rows(db5._conn, "SELECT COUNT(*) AS n FROM FEE_EVENTS")[0]["n"]
+        replay = CloseResult(
+            position_mint="75255240",
+            platform="Aerodrome", chain="Base",
+            legs=[CloseLeg(asset="EURC", amount=872.04, kind="liquidity", sig="0xdec2")],
+            close_sig="0xdec2", collect_sig="0xcol2", decrease_sig="0xdec2",
+            block_time_iso="2026-09-23T07:30:00+00:00",
+        )
+        out5 = CloseRecorder(db5).record(replay)
+        assert out5.get("ok"), out5
+        assert out5["transactions"] == 0 and out5["fee_events"] == 0
+        after_tx = _rows(db5._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS")[0]["n"]
+        after_fe = _rows(db5._conn, "SELECT COUNT(*) AS n FROM FEE_EVENTS")[0]["n"]
+        assert after_tx == before_tx, "already-closed must not duplicate TRANSACTIONS"
+        assert after_fe == before_fe, "already-closed must not duplicate FEE_EVENTS"
+        notes5 = _rows(db5._conn, "SELECT NOTES FROM LP_POSITIONS WHERE ID=?", (pos_id,))[0]["NOTES"] or ""
+        assert "ColdStack close replay sigs: 0xdec2, 0xcol2" in notes5, notes5
+        db5.close()
+
+        # No-match → pending, zero rows written.
         bad = CloseResult(position_mint="999999999", platform="Aerodrome", chain="Base",
                           legs=[CloseLeg(asset="EURC", amount=1.0, kind="fee", sig="0xcol")],
                           collect_sig="0xcol", block_time_iso="2026-09-22T07:30:00+00:00")
         db3 = ColdTrackDB(db_path); db3.init_schema()
         before = _rows(db3._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS")[0]["n"]
         out3 = CloseRecorder(db3).record(bad)
-        assert not out3.get("ok") and "no LP_POSITIONS row" in out3["error"]
+        # With multiple Aerodrome/Base active rows in the pack db, the fallback
+        # returns ambiguous rather than no-match — both are valid "write nothing".
+        assert not out3.get("ok")
+        assert "no LP_POSITIONS row" in out3["error"] or "ambiguous" in out3["error"]
         after = _rows(db3._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS")[0]["n"]
         assert after == before, "no-match must write nothing"
         db3.close()
 
-        print("âœ… AERODROME CLOSE RECORDER TESTS PASS (4-table write + idempotent + pending)")
+        print("✅ AERODROME CLOSE RECORDER TESTS PASS (stale-id sync + 4-table write + idempotent + pending)")
         return 0
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
