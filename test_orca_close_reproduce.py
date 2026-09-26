@@ -4,7 +4,7 @@ authoritative 2.x layout (state/position.rs). Read-only, no broadcast, no keys.
 
 Run:  python test_orca_close_reproduce.py
 """
-import base64, json, struct, sys, time, urllib.error, urllib.request
+import base64, json, os, struct, sys, time, urllib.error, urllib.request
 from pathlib import Path
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -92,6 +92,10 @@ def hexdump_parse(data):
 
 
 def main():
+    if not (os.environ.get("COLDSATCK_E2E_RPC") or os.environ.get("COLDSTACK_E2E_RPC")):
+        print("⏭️  SKIP test_orca_close_reproduce — live Solana RPC e2e. "
+              "Set COLDSATCK_E2E_RPC=1 to run.")
+        return 0
     pos_addr = _derive_position_address(POSITION_MINT)
     print("resolved position PDA:", pos_addr)
     assert pos_addr == "F98SmNgmft21dRAwfXGPtWu95Kb1WcSm58WgaQzUZQQR", pos_addr

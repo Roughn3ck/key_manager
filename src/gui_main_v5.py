@@ -2,11 +2,11 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.3.18 (September 2026) - Saved-pool account binding + Aerodrome close loop
+Version: v5.3.19 (September 2026) - LP panel refresh + account labels
 """
 
 # Single source of truth for version — update this when bumping versions
-VERSION = "5.3.18"
+VERSION = "5.3.19"
 import sys
 import os
 

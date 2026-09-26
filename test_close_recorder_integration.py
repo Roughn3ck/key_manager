@@ -22,6 +22,25 @@ import coldtrack.close_recorder as cr  # noqa: E402
 
 LIVE_KP = Path(r"B:\OpenClaw\.openclaw\workspace\kimi\portfolios\kitandpaul\coldtrack.db")
 
+ORCA_MINT = "FbNHxe9VV797JWG7XH2msjwp5Rvb6dGzndwwkEXXXBKX"
+
+
+def _reset_fixture(db_path: Path) -> None:
+    """Reset the K&P Orca fixture row to pre-close (active) in the COPY and drop
+    prior close artifacts (keeps the test independent of live ledger state)."""
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("UPDATE LP_POSITIONS SET STATUS='active', CLOSED_DATE=NULL WHERE TOKEN_ID=?",
+                 (ORCA_MINT,))
+    row = conn.execute("SELECT ID FROM LP_POSITIONS WHERE TOKEN_ID=?", (ORCA_MINT,)).fetchone()
+    assert row is not None, "K&P Orca fixture row missing"
+    pid = row[0]
+    conn.execute("DELETE FROM LP_SNAPSHOTS WHERE LP_POSITION_ID=?", (pid,))
+    conn.execute("DELETE FROM FEE_EVENTS WHERE POSITION_ID=?", (pid,))
+    for sig in ("CS", "CLOSE"):
+        conn.execute("DELETE FROM TRANSACTIONS WHERE TX_HASH=?", (sig,))
+    conn.commit()
+    conn.close()
+
 
 class _FakeWriter:
     """Stands in for OrcaWriter post-close: last_close_result pre-populated."""
@@ -74,6 +93,7 @@ def main():
     try:
         db_path = tmp / "coldtrack.db"
         shutil.copy(LIVE_KP, db_path)
+        _reset_fixture(db_path)
         gui = _FakeGUI()
         tab = _FakeLPTab(gui, db_path)
 

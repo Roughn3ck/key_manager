@@ -24,6 +24,31 @@ from coldtrack.db import ColdTrackDB  # noqa: E402
 
 LIVE_PACK = Path(r"B:\OpenClaw\.openclaw\workspace\kimi\portfolios\the-pack-portfolio\coldtrack.db")
 
+AERO_STALE_ID = "74933503"
+AERO_LIVE_ID = "75255240"
+AERO_DUP_ID = "76866113"
+
+
+def _reset_fixture(db_path: Path) -> None:
+    """Reset the Pack Aerodrome fixture row to its pre-close (active) state in the
+    COPY, and close the duplicate active EURC/cbBTC row so the platform+pool
+    fallback is unique. Keeps the test independent of live ledger state."""
+    conn = sqlite3.connect(str(db_path))
+    row = conn.execute("SELECT ID FROM LP_POSITIONS WHERE TOKEN_ID=?", (AERO_STALE_ID,)).fetchone()
+    if row is None:
+        row = conn.execute("SELECT ID FROM LP_POSITIONS WHERE TOKEN_ID=?", (AERO_LIVE_ID,)).fetchone()
+    assert row is not None, "pack Aerodrome fixture row missing"
+    pid = row[0]
+    conn.execute("UPDATE LP_POSITIONS SET STATUS='active', CLOSED_DATE=NULL, TOKEN_ID=? WHERE ID=?",
+                 (AERO_STALE_ID, pid))
+    conn.execute("UPDATE LP_POSITIONS SET STATUS='closed' WHERE TOKEN_ID=? AND ID<>?", (AERO_DUP_ID, pid))
+    conn.execute("DELETE FROM LP_SNAPSHOTS WHERE LP_POSITION_ID=?", (pid,))
+    conn.execute("DELETE FROM FEE_EVENTS WHERE POSITION_ID=?", (pid,))
+    for sig in ("0xdec", "0xcol", "0xdec2", "0xcol2"):
+        conn.execute("DELETE FROM TRANSACTIONS WHERE TX_HASH=?", (sig,))
+    conn.commit()
+    conn.close()
+
 
 def _rows(conn, sql, params=()):
     c = conn.cursor()
@@ -37,6 +62,7 @@ def main():
     try:
         db_path = tmp / "coldtrack.db"
         shutil.copy(LIVE_PACK, db_path)
+        _reset_fixture(db_path)
         db = ColdTrackDB(db_path); db.init_schema()
 
         # Confirm the fixture row exists (pack db row 7: EURC/cbBTC Aerodrome).

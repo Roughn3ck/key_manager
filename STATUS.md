@@ -1,8 +1,13 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.18 (Saved-pool account binding + Aerodrome close loop)
-**Last Updated:** 2026-09-23
+**Current Version:** v5.3.19 (LP panel refresh + account labels)
+**Last Updated:** 2026-09-26
+
+---
+
+## v5.3.19 - LP panel refresh + account labels (2026-09-26)
+Fetch-single now refreshes every saved pool via its own bound venue + account (per-pool isolation, no cross-marking, no lock/unlock); pool cards show the bound account (`(unbound)` fallback); legacy bindings self-heal at render via vault lookup (on-chain `ownerOf` stays in the pre-flight path). Tests made hermetic: recorder fixtures reset in DB copies; live-RPC Orca e2e gated behind `COLDSATCK_E2E_RPC=1`.
 
 ---
 

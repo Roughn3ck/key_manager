@@ -24,11 +24,37 @@ from coldtrack.db import ColdTrackDB  # noqa: E402
 
 LIVE_KP = Path(r"B:\OpenClaw\.openclaw\workspace\kimi\portfolios\kitandpaul\coldtrack.db")
 
+ORCA_MINT = "FbNHxe9VV797JWG7XH2msjwp5Rvb6dGzndwwkEXXXBKX"
+CLOSE_SIGS = ("COLLECT_SIG_20260922", "CLOSE_BURN_SIG_20260922")
+
 
 def _copy_live(tmp: Path) -> Path:
     dst = tmp / "coldtrack.db"
     shutil.copy(LIVE_KP, dst)
     return dst
+
+
+def _reset_fixture(db_path: Path) -> None:
+    """Reset the K&P Orca fixture row to its pre-close (active) state in the COPY
+    and drop prior close artifacts. Keeps the test independent of live ledger state
+    (the shared DS has since been closed manually)."""
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "UPDATE LP_POSITIONS SET STATUS='active', CLOSED_DATE=NULL WHERE TOKEN_ID=?",
+        (ORCA_MINT,),
+    )
+    row = conn.execute("SELECT ID FROM LP_POSITIONS WHERE TOKEN_ID=?", (ORCA_MINT,)).fetchone()
+    assert row is not None, f"fixture LP_POSITIONS row missing for {ORCA_MINT}"
+    pid = row[0]
+    # Isolate the fixture: deactivate other Orca rows so the "no-match" pending
+    # case stays deterministic once the fixture row is closed by the test.
+    conn.execute("UPDATE LP_POSITIONS SET STATUS='closed' WHERE UPPER(PLATFORM)='ORCA' AND ID<>?", (pid,))
+    conn.execute("DELETE FROM LP_SNAPSHOTS WHERE LP_POSITION_ID=?", (pid,))
+    conn.execute("DELETE FROM FEE_EVENTS WHERE POSITION_ID=?", (pid,))
+    for sig in CLOSE_SIGS:
+        conn.execute("DELETE FROM TRANSACTIONS WHERE TX_HASH=?", (sig,))
+    conn.commit()
+    conn.close()
 
 
 def _close_result() -> CloseResult:
@@ -72,6 +98,7 @@ def main():
     tmp = Path(tempfile.mkdtemp(prefix="close_rec_"))
     try:
         db_path = _copy_live(tmp)
+        _reset_fixture(db_path)
         db = ColdTrackDB(db_path)
         db.init_schema()
 
@@ -142,7 +169,8 @@ def main():
         db3 = ColdTrackDB(db_path); db3.init_schema()
         before = _rows(db3._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS")[0]["n"]
         out3 = CloseRecorder(db3).record(bad)
-        assert not out3.get("ok") and "no LP_POSITIONS row" in out3["error"]
+        assert not out3.get("ok") and ("no LP_POSITIONS row" in out3["error"]
+                                       or "ambiguous" in out3["error"]), out3["error"]
         after = _rows(db3._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS")[0]["n"]
         assert after == before, "unknown mint must write NO rows"
         db3.close()

@@ -14,6 +14,7 @@ Run:  python test_orca_close_simulate.py
 """
 import base64
 import json
+import os
 import struct
 import sys
 import time
@@ -209,6 +210,10 @@ def current_fees_owed():
 
 
 def main():
+    if not (os.environ.get("COLDSATCK_E2E_RPC") or os.environ.get("COLDSTACK_E2E_RPC")):
+        print("⏭️  SKIP test_orca_close_simulate — live Solana RPC e2e. "
+              "Set COLDSATCK_E2E_RPC=1 to run.")
+        return 0
     owner, owner_ata = owner_of_position_nft()
     print("NFT holder ATA:", owner_ata)
     print("NFT owner (wallet):", owner)
