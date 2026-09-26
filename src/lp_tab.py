@@ -593,19 +593,23 @@ class LPTab:
         # Fetch saved positions in background (fast — 1-4 seconds)
         self._lp_fetch_saved_only(address)
 
-    def _lp_auto_fetch_all_saved(self):
+    def _lp_auto_fetch_all_saved(self, extra_positions=None):
         """Auto-fetch ALL saved pools on tab open / restore.
 
         Works without a wallet address in the entry by using each saved
         pool's stored wallet_address. Fetches all saved pools across all
         wallets and venues in a single background thread.
+
+        v5.3.19: accepts ``extra_positions`` (e.g. a just-fetched single
+        position) so a fetch-single can refresh every saved card in one render.
+        Each entry refreshes via its OWN bound account + venue adapter.
         """
         if not self.gui.lp_engine or not self.gui.online_mode:
             return
         if not self.gui.key_manager:
             return
         all_saved = load_saved_pools(self.gui.key_manager.address_db)
-        if not all_saved:
+        if not all_saved and not extra_positions:
             return
 
         from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
@@ -615,11 +619,13 @@ class LPTab:
         bsc_adapter = BSCAdapter()
 
         def _auto_fetch_thread():
-            positions = []
+            positions = list(extra_positions or [])
             for entry in all_saved:
                 tid = entry.get("token_id")
                 venue = entry.get("venue", "HyperEVM")
-                wallet = entry.get("wallet_address", "")
+                # v5.3.19: prefer the record's bound account address; fall back
+                # to the legacy wallet_address.
+                wallet = (entry.get("account_address") or entry.get("wallet_address") or "")
                 if not tid:
                     continue
                 # Convert token_id to int for EVM chains (stored as string in JSON)
@@ -691,7 +697,7 @@ class LPTab:
                     from venue_adapters.aerodrome_adapter import AerodromeAdapter
                     aero_adapter = AerodromeAdapter()
                     for entry in aero_saved:
-                        wallet = entry.get("wallet_address", "")
+                        wallet = (entry.get("account_address") or entry.get("wallet_address") or "")
                         if not wallet:
                             continue
                         staked = aero_adapter._find_staked_positions_via_saved_pools(
@@ -1399,8 +1405,10 @@ class LPTab:
         info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
 
         closed = self._lp_saved_pool_is_closed(entry, prefix, tid, venue)
+        acct = self._lp_pool_account_label(entry)
+        acct_suffix = f"  ·  {acct}" if acct else ""
         if closed:
-            ctk.CTkLabel(info, text=f"✔ {pair}  ·  {venue}",
+            ctk.CTkLabel(info, text=f"✔ {pair}  ·  {venue}{acct_suffix}",
                          font=ctk.CTkFont(size=14, weight="bold"),
                          text_color=("#2fa572", "#2fa572")).pack(anchor="w")
             ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
@@ -1408,7 +1416,7 @@ class LPTab:
             ctk.CTkLabel(info, text="Position closed — nothing left on-chain. You can remove this entry.",
                          font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
         else:
-            ctk.CTkLabel(info, text=f"⚠️ {pair}  ·  {venue}",
+            ctk.CTkLabel(info, text=f"⚠️ {pair}  ·  {venue}{acct_suffix}",
                          font=ctk.CTkFont(size=14, weight="bold"),
                          text_color=("#cccc00", "#cccc00")).pack(anchor="w")
             ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
@@ -1464,6 +1472,57 @@ class LPTab:
         except Exception:
             return False
         return False
+
+    def _lp_pool_account_label(self, entry) -> str:
+        """Bound vault account for a saved-pool entry (v5.3.19).
+
+        Prefers the v5.3.18 ``account_name`` binding. Legacy records without
+        one are resolved from the stored wallet address against the vault and
+        the binding is persisted (self-heal). Returns "(unbound)" when
+        unresolvable, or "" when no entry was supplied (e.g. an unsaved live
+        position).
+        """
+        if not entry:
+            return ""
+        name = (entry.get("account_name") or "").strip()
+        if name:
+            return name
+        wallet = (entry.get("account_address") or entry.get("wallet_address") or "").strip()
+        key_manager = getattr(self.gui, "key_manager", None)
+        if wallet and key_manager:
+            accounts_data = key_manager.address_db.get("accounts", {})
+            for acct, data in accounts_data.items():
+                for addr in data.get("addresses", []):
+                    if (addr.get("address", "") or "").lower() == wallet.lower():
+                        chain = entry.get("account_chain") or (addr.get("chain", "") or "")
+                        try:
+                            update_saved_pool_binding(
+                                key_manager.address_db, entry.get("token_id"),
+                                entry.get("venue", "HyperEVM"), acct, wallet, chain)
+                            pw = getattr(self.gui, "current_password", "")
+                            if pw:
+                                key_manager.save_encrypted_data(pw)
+                        except Exception:
+                            pass
+                        return acct
+        return "(unbound)"
+
+    def _lp_refresh_after_single(self, extra_positions=None, error=None):
+        """Refresh every saved-pool card after a fetch-single (v5.3.19).
+
+        A single fetch previously re-rendered all other saved pools as
+        "Fetch failed" placeholders. Instead, refetch each saved pool via its
+        own bound account + venue adapter (success OR failure). Only when there
+        are no saved pools do we surface the single result/error.
+        """
+        all_saved = load_saved_pools(self.gui.key_manager.address_db) if self.gui.key_manager else []
+        if all_saved:
+            self._lp_auto_fetch_all_saved(extra_positions=extra_positions or [])
+        elif error is not None:
+            self._lp_on_error(error)
+        else:
+            self._lp_on_loaded(list(extra_positions or []),
+                               getattr(self, "_lp_last_fetched_address", ""))
 
     def _lp_do_fetch_single(self):
         """Fetch a single LP position by NFT ID / position ID / pool address (threaded).
@@ -1582,12 +1641,14 @@ class LPTab:
                         self.gui.root.after(0, lambda: refresh_btn.configure(state="normal" if self.gui.online_mode else "disabled"))
                     if fetch_pos_btn:
                         self.gui.root.after(0, lambda: fetch_pos_btn.configure(state="normal" if self.gui.online_mode else "disabled"))
+                    # v5.3.19: keep saved cards live even when the single fetch fails.
+                    self.gui.root.after(0, lambda: self._lp_refresh_after_single())
                     return
-                self.gui.root.after(0, lambda: self._lp_on_loaded([position], wallet_address))
+                self.gui.root.after(0, lambda: self._lp_refresh_after_single([position] if position else []))
             except OfflineError:
-                self.gui.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
+                self.gui.root.after(0, lambda: self._lp_refresh_after_single(error="Offline mode enabled"))
             except Exception as e:
-                self.gui.root.after(0, lambda: self._lp_on_error(str(e)))
+                self.gui.root.after(0, lambda err=str(e): self._lp_refresh_after_single(error=err))
 
         threading.Thread(target=_fetch_single_thread, daemon=True).start()
 
@@ -1787,7 +1848,20 @@ class LPTab:
         info.pack(fill="x", padx=10, pady=(8, 2))
 
         # Line 1: tokens · venue · ID (on one line)
-        header_text = f"{position.health_emoji} {position.pair}  ·  {position.venue}  ·  ID: {position.position_id}"
+        # v5.3.19: append the bound account for saved pools (blank if unsaved).
+        _entry = None
+        if self.gui.key_manager and position.position_id:
+            _raw = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
+            if not position.position_id.startswith("solana:"):
+                try:
+                    _raw = int(_raw)
+                except (ValueError, TypeError):
+                    _raw = None
+            if _raw is not None:
+                _entry = _find_pool_entry(self.gui.key_manager.address_db, _raw, position.venue or "")
+        _acct = self._lp_pool_account_label(_entry)
+        _acct_suffix = f"  ·  {_acct}" if _acct else ""
+        header_text = f"{position.health_emoji} {position.pair}  ·  {position.venue}  ·  ID: {position.position_id}{_acct_suffix}"
         ctk.CTkLabel(info, text=header_text,
                      font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
 
@@ -2172,6 +2246,9 @@ class LPTab:
             info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
 
             header_text = f"⏳ {pair}  ·  {venue}"
+            _acct = self._lp_pool_account_label(entry)
+            if _acct:
+                header_text += f"  ·  {_acct}"
             ctk.CTkLabel(info, text=header_text,
                          font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
             ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
@@ -2258,6 +2335,9 @@ class LPTab:
             info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
 
             header_text = f"⏳ {pair}  ·  {venue}  ·  ID: {prefix}:{tid}"
+            _acct = self._lp_pool_account_label(entry)
+            if _acct:
+                header_text += f"  ·  {_acct}"
             ctk.CTkLabel(info, text=header_text,
                          font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
             if pool_address:
