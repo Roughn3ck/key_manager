@@ -27,9 +27,12 @@ from lp_engine import LPPosition, OfflineError, VenueAdapter, register_adapter
 from price_engine import PriceEngine
 from sui_assets import DEFAULT_SUI_RPC, get_coin_metadata, parse_coin_type
 
-# Cetus Move type suffix. Matched as a suffix so any published package version
-# resolves; the sentinel knows the N1 position but ships no decode, so this
-# adapter decodes from JSON content instead.
+# Cetus Move position type. Verified on-chain 2026-09-26 (sui-rpc.publicnode.com):
+# the N1 wallet holds exactly one object of this type. Used as the suix_getOwnedObjects
+# StructType filter; the suffix check below stays as a guard for package upgrades.
+CETUS_POSITION_TYPE = (
+    "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position"
+)
 CETUS_POSITION_TYPE_SUFFIX = "::position::Position"
 
 _MAX_OWNED_PAGES = 10
@@ -77,16 +80,21 @@ def _get_object_json(object_id: str) -> Tuple[str, Dict[str, Any]]:
 
 
 def _get_owned_objects(owner: str) -> List[Dict[str, Any]]:
-    """Return owned object JSON envelopes (type + fields), paged."""
+    """Return owned Cetus-position objects (type + fields), paged.
+
+    Params are the canonical ``suix_getOwnedObjects(owner, query, cursor, limit)``
+    shape with a ``StructType`` filter on the exact Cetus position type. (An
+    earlier version put ``limit`` inside the query object and applied no filter,
+    which the node rejects -- the scan found nothing.)
+    """
     out: List[Dict[str, Any]] = []
     cursor: Optional[str] = None
     for _ in range(_MAX_OWNED_PAGES):
-        params: List[Any] = [owner, {
+        query: Dict[str, Any] = {
+            "filter": {"StructType": CETUS_POSITION_TYPE},
             "options": {"showType": True, "showContent": True},
-            "limit": _OWNED_PAGE_SIZE,
-        }]
-        if cursor:
-            params[1]["cursor"] = cursor
+        }
+        params: List[Any] = [owner, query, cursor, _OWNED_PAGE_SIZE]
         result = _sui_rpc(_rpc_urls()[0], "suix_getOwnedObjects", params)
         page = (result or {}).get("data") or []
         for item in page:
@@ -244,14 +252,16 @@ def decode_position(fields: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def decode_pool(fields: Dict[str, Any]) -> Dict[str, Any]:
-    """Decode a Cetus CLPool object's JSON fields into a normalized dict."""
+    """Decode a Cetus CLPool object's JSON fields into a normalized dict.
+
+    Coin types live in the pool *type* generics, not the fields — symbols come
+    from the position's coin_type_a/b; only price/tick geometry is read here.
+    """
     tick = fields.get("current_tick_index", fields.get("current_tick"))
     return {
         "current_sqrt_price": _as_int(fields.get("current_sqrt_price")),
         "tick_current": _as_i32(tick),
         "tick_spacing": _as_int(fields.get("tick_spacing")),
-        "coin_type_a": _typename_str(fields.get("coin_a") or fields.get("coin_type_a")),
-        "coin_type_b": _typename_str(fields.get("coin_b") or fields.get("coin_type_b")),
     }
 
 
@@ -405,13 +415,19 @@ class CetusAdapter(VenueAdapter):
         sqrt_price = pool.get("current_sqrt_price")
         if tick_current is not None:
             current_price = _tick_to_price(tick_current, dec_a, dec_b)
-            if tick_lower is not None and tick_upper is not None and tick_upper != tick_lower:
-                # Linear tick position — matches the Orca adapter and the
-                # sentinel's N1 read (range [60,159-112,276] -> ~89.5%).
-                in_range_pct = (tick_current - tick_lower) / (tick_upper - tick_lower) * 100.0
-        if (current_price is None and sqrt_price is not None):
+        if current_price is None and sqrt_price is not None:
             sqrt_p = sqrt_price / (2 ** 64)
             current_price = (sqrt_p ** 2) * (10 ** (dec_a - dec_b))
+
+        # In-range %: linear in SQRT price, matching the sentinel's rangePct
+        # (lp-sentinel/kp_monitor.js buildPosition). Decimal-independent.
+        if tick_lower is not None and tick_upper is not None and tick_upper != tick_lower:
+            sqrt_lo = 1.0001 ** (tick_lower / 2.0)
+            sqrt_hi = 1.0001 ** (tick_upper / 2.0)
+            sqrt_now = (sqrt_price / (2 ** 64)) if sqrt_price is not None else (
+                1.0001 ** (tick_current / 2.0) if tick_current is not None else None)
+            if sqrt_now is not None and sqrt_hi > sqrt_lo:
+                in_range_pct = max(0.0, min(100.0, (sqrt_now - sqrt_lo) / (sqrt_hi - sqrt_lo) * 100.0))
 
         if sqrt_price is not None and tick_lower is not None and tick_upper is not None \
                 and tick_current is not None:

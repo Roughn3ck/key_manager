@@ -69,6 +69,7 @@ def test_fetch_single_refreshes_all_saved():
     calls = []
     rendered = []
     placeholders = []
+    order = []
 
     saved = [
         {"token_id": 545983, "venue": "HyperEVM", "pair": "WHYPE/UBTC",
@@ -81,9 +82,13 @@ def test_fetch_single_refreshes_all_saved():
     accounts = {"G1": {}, "G2": {}, "G3": {}}
     tab = _new_tab(saved, accounts)
 
-    tab._lp_render_card = lambda pos: rendered.append(pos)
-    tab._lp_render_saved_placeholder = lambda scroll, entry, prefix, tid, venue, pair: placeholders.append(entry)
+    tab._lp_render_card = lambda pos: (order.append("card"), rendered.append(pos))
+    tab._lp_render_saved_placeholder = lambda scroll, entry, prefix, tid, venue, pair, state="auto": (
+        order.append(("ph", state)), placeholders.append(entry))
     tab._lp_update_button_states = lambda: None
+    # v5.3.20: the neutral "Fetching…" state must be rendered BEFORE any result.
+    real_fs = tab._lp_render_fetching_state
+    tab._lp_render_fetching_state = lambda a, e: (order.append("fetching"), real_fs(a, e))
 
     real_thread = lt.threading.Thread
     real = {
@@ -140,7 +145,58 @@ def test_fetch_single_refreshes_all_saved():
     assert len(placeholders) == 1, placeholders
     assert placeholders[0]["token_id"] == 75269474, placeholders[0]
 
+    # v5.3.20: the neutral "Fetching…" state is rendered before any result card.
+    assert order and order[0] == "fetching", order
+    assert ("ph", "auto") in order, order  # warning only for the genuinely failed pool
+
     print("✅ fetch-single refreshes all saved pools (own venue+account, no cross-marking)")
+
+
+def test_fetching_state_is_neutral():
+    """v5.3.20: the in-flight state shows 'Fetching positions…' and never probes
+    on-chain closed or renders a warning."""
+    import customtkinter as ctk
+    ctk.set_appearance_mode("dark")
+    root = ctk.CTk()
+    root.withdraw()
+
+    saved = [{"token_id": 545983, "venue": "HyperEVM", "pair": "WHYPE/UBTC",
+              "account_name": "G1"}]
+    tab = _new_tab(saved, {"G1": {}})
+
+    rendered = []
+
+    class _StubFrame:
+        def __init__(self, *a, **k): pass
+        def pack(self, *a, **k): pass
+        def winfo_children(self): return []
+
+    class _StubLabel(_StubFrame):
+        def __init__(self, parent, text="", **k):
+            rendered.append(text)
+
+    class _StubButton(_StubFrame):
+        def __init__(self, *a, **k): pass
+
+    class _Status:
+        def configure(self, **k): pass
+
+    real = (ctk.CTkFrame, ctk.CTkLabel, ctk.CTkButton)
+    ctk.CTkFrame, ctk.CTkLabel, ctk.CTkButton = _StubFrame, _StubLabel, _StubButton
+    closed_probes = []
+    try:
+        tab._lp_saved_pool_is_closed = lambda *a, **k: closed_probes.append(True) or False
+        tab._lp_update_button_states = lambda: None
+        tab._lp_widgets = {"scroll": _StubFrame(), "status_label": _Status()}
+        tab._lp_render_fetching_state(saved, [])
+    finally:
+        ctk.CTkFrame, ctk.CTkLabel, ctk.CTkButton = real
+        root.destroy()
+
+    assert any("Fetching positions" in t for t in rendered), rendered
+    assert not any("Fetch failed" in t for t in rendered), rendered
+    assert closed_probes == [], "fetching state must not probe on-chain closed status"
+    print("✅ fetching state is neutral (no closed probe, no warning)")
 
 
 def test_refresh_failure_does_not_wipe_saved_cards():
@@ -220,6 +276,7 @@ def test_account_label_resolution_and_render_smoke():
 
 def main():
     test_fetch_single_refreshes_all_saved()
+    test_fetching_state_is_neutral()
     test_refresh_failure_does_not_wipe_saved_cards()
     test_account_label_resolution_and_render_smoke()
     print("✅ ALL LP PANEL REFRESH + ACCOUNT LABEL TESTS PASS")

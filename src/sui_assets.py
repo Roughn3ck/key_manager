@@ -68,6 +68,27 @@ def parse_coin_type(coin_type: str) -> tuple:
     return address, module, symbol
 
 
+def _ensure_0x(coin_type: str) -> str:
+    """Prefix the address segment with 0x if missing.
+
+    Sui object JSON renders some coin types without the 0x prefix (e.g.
+    ``3e8e...::lbtc::LBTC``); suix_getCoinMetadata needs a 0x-prefixed type.
+    """
+    parts = (coin_type or "").split("::")
+    if parts and parts[0] and not parts[0].startswith("0x"):
+        parts[0] = "0x" + parts[0]
+    return "::".join(parts)
+
+
+def _canon_coin_type(coin_type: str) -> str:
+    """Canonical registry/cache key: 0x-prefixed address with leading zeros trimmed."""
+    parts = (coin_type or "").split("::")
+    if parts and parts[0].startswith("0x"):
+        hexpart = parts[0][2:].lstrip("0") or "0"
+        parts[0] = "0x" + hexpart.lower()
+    return "::".join(parts)
+
+
 def get_all_balances(address: str, url: Optional[str] = None) -> List[Dict[str, Any]]:
     """Return ``[{"coin_type", "total_balance"}]`` for every held coin.
 
@@ -98,12 +119,13 @@ def get_coin_metadata(coin_type: str, url: Optional[str] = None) -> Dict[str, An
 
     Returns ``{}`` when the RPC has no metadata (e.g. unregistered coin).
     """
-    if coin_type in _META_CACHE:
-        return _META_CACHE[coin_type]
+    key = _canon_coin_type(coin_type)
+    if key in _META_CACHE:
+        return _META_CACHE[key]
     url = url or DEFAULT_SUI_RPC
     meta: Dict[str, Any] = {}
     try:
-        result = _rpc(url, "suix_getCoinMetadata", [coin_type])
+        result = _rpc(url, "suix_getCoinMetadata", [_ensure_0x(coin_type)])
         if isinstance(result, dict):
             meta = {
                 "symbol": result.get("symbol") or "",
@@ -112,7 +134,7 @@ def get_coin_metadata(coin_type: str, url: Optional[str] = None) -> Dict[str, An
             }
     except Exception:
         meta = {}
-    _META_CACHE[coin_type] = meta
+    _META_CACHE[key] = meta
     return meta
 
 
@@ -124,7 +146,7 @@ def resolve_symbol_decimals(coin_type: str, registry: Optional[Dict[str, Any]] =
     > module name. Decimals default to 9 (Sui's native scale) when unknown.
     """
     reg = (registry or {}).get("coins", {})
-    entry = reg.get(coin_type) if isinstance(reg, dict) else {}
+    entry = reg.get(_canon_coin_type(coin_type)) if isinstance(reg, dict) else {}
     entry = entry if isinstance(entry, dict) else {}
     _, module, parsed = parse_coin_type(coin_type)
     meta = {} if entry else get_coin_metadata(coin_type, url=url)

@@ -612,6 +612,10 @@ class LPTab:
         if not all_saved and not extra_positions:
             return
 
+        # v5.3.20: immediate neutral state — never flash a warning while the
+        # (serial) rescan is in flight; warnings land only on real failures.
+        self._lp_render_fetching_state(all_saved, extra_positions or [])
+
         from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
         from venue_adapters.bsc_adapter import BSCAdapter
 
@@ -1422,38 +1426,51 @@ class LPTab:
     # Saved-pool placeholder rendering (closed vs fetch-failed)
     # ------------------------------------------------------------------
 
-    def _lp_render_saved_placeholder(self, scroll, entry, prefix, tid, venue, pair):
+    def _lp_render_saved_placeholder(self, scroll, entry, prefix, tid, venue, pair, state="auto"):
         """Render a saved pool that did not resolve to a live card.
 
         Distinguishes a CLOSED position (account gone / is_position_empty) from a
         transient fetch failure, so a gone position shows 'Position closed' with a
         clean Remove affordance instead of an alarming 'Fetch failed'. Only the
         specific saved pool's card is rendered — other saved pools are untouched.
+
+        v5.3.20: ``state="fetching"`` renders a NEUTRAL in-flight card (no
+        on-chain closed check, no warning styling) while the saved-pool rescan
+        runs — so a card never flashes "Fetch failed" before its refetch lands.
         """
         card = ctk.CTkFrame(scroll, corner_radius=10)
         card.pack(fill="x", pady=5, padx=5)
         info = ctk.CTkFrame(card, fg_color="transparent")
         info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
 
-        closed = self._lp_saved_pool_is_closed(entry, prefix, tid, venue)
         acct = self._lp_pool_account_label(entry)
         acct_suffix = f"  ·  {acct}" if acct else ""
-        if closed:
-            ctk.CTkLabel(info, text=f"✔ {pair}  ·  {venue}{acct_suffix}",
+        if state == "fetching":
+            ctk.CTkLabel(info, text=f"⏳ {pair}  ·  {venue}{acct_suffix}",
                          font=ctk.CTkFont(size=14, weight="bold"),
-                         text_color=("#2fa572", "#2fa572")).pack(anchor="w")
+                         text_color=("#666666", "#9a9a9a")).pack(anchor="w")
             ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
                          font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-            ctk.CTkLabel(info, text="Position closed — nothing left on-chain. You can remove this entry.",
+            ctk.CTkLabel(info, text="Fetching positions…",
                          font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
         else:
-            ctk.CTkLabel(info, text=f"⚠️ {pair}  ·  {venue}{acct_suffix}",
-                         font=ctk.CTkFont(size=14, weight="bold"),
-                         text_color=("#cccc00", "#cccc00")).pack(anchor="w")
-            ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
-                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-            ctk.CTkLabel(info, text="Fetch failed — live data unavailable. Click Scan Wallet to retry.",
-                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+            closed = self._lp_saved_pool_is_closed(entry, prefix, tid, venue)
+            if closed:
+                ctk.CTkLabel(info, text=f"✔ {pair}  ·  {venue}{acct_suffix}",
+                             font=ctk.CTkFont(size=14, weight="bold"),
+                             text_color=("#2fa572", "#2fa572")).pack(anchor="w")
+                ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
+                             font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+                ctk.CTkLabel(info, text="Position closed — nothing left on-chain. You can remove this entry.",
+                             font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+            else:
+                ctk.CTkLabel(info, text=f"⚠️ {pair}  ·  {venue}{acct_suffix}",
+                             font=ctk.CTkFont(size=14, weight="bold"),
+                             text_color=("#cccc00", "#cccc00")).pack(anchor="w")
+                ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
+                             font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+                ctk.CTkLabel(info, text="Fetch failed — live data unavailable. Click Scan Wallet to retry.",
+                             font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
 
         button_frame = ctk.CTkFrame(card, fg_color="transparent")
         button_frame.pack(side="right", padx=10, pady=8)
@@ -1537,6 +1554,54 @@ class LPTab:
                             pass
                         return acct
         return "(unbound)"
+
+    def _lp_venue_prefix(self, venue: str) -> str:
+        """Map a saved venue name to its position_id prefix (v5.3.20)."""
+        v = (venue or "").lower()
+        if v in ("hyperevm", "hyperliquid", "project x"):
+            return "hyperevm"
+        if v in ("aerodrome", "base"):
+            return "base"
+        if v in ("orca", "solana"):
+            return "solana"
+        if v in ("cetus", "sui"):
+            return "sui"
+        return "bsc"
+
+    def _lp_render_fetching_state(self, all_saved, extra_positions):
+        """Immediate neutral state while the saved-pool rescan runs (v5.3.20).
+
+        Renders the just-fetched positions as live cards and every other saved
+        pool as a neutral "Fetching positions…" card — so a warning is never
+        shown before a pool's own refetch has actually failed.
+        """
+        scroll = self._lp_widgets.get("scroll")
+        if not scroll:
+            return
+        for widget in scroll.winfo_children():
+            widget.destroy()
+        rendered_ids = set()
+        for pos in extra_positions or []:
+            key = f"{pos.venue}:{pos.position_id}"
+            if key in rendered_ids:
+                continue
+            rendered_ids.add(key)
+            self._lp_render_card(pos)
+        for entry in all_saved or []:
+            tid = entry.get("token_id")
+            venue = entry.get("venue", "HyperEVM")
+            pair = entry.get("pair", "Unknown Pair")
+            if not tid:
+                continue
+            prefix = self._lp_venue_prefix(venue)
+            if f"{prefix}:{tid}" in rendered_ids:
+                continue
+            self._lp_render_saved_placeholder(
+                scroll, entry, prefix, tid, venue, pair, state="fetching")
+        status = self._lp_widgets.get("status_label")
+        if status:
+            status.configure(text="Fetching positions…")
+        self._lp_update_button_states()
 
     def _lp_refresh_after_single(self, extra_positions=None, error=None):
         """Refresh every saved-pool card after a fetch-single (v5.3.19).

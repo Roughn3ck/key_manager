@@ -168,10 +168,74 @@ def test_cetus_adapter_position():
     assert pos.pair == "LBTC/SUI", pos.pair
     assert pos.range_low is not None and pos.range_high is not None
     assert pos.position_in_range_pct is not None
-    assert abs(pos.position_in_range_pct - 89.49) < 0.1, pos.position_in_range_pct
+    # rangePct is sqrt-price-linear (sentinel convention, kp_monitor buildPosition)
+    _sq = lambda t: 1.0001 ** (t / 2.0)
+    expected = (_sq(106800) - _sq(60159)) / (_sq(112276) - _sq(60159)) * 100.0
+    assert abs(pos.position_in_range_pct - expected) < 0.01, pos.position_in_range_pct
     assert pos.deposit_amounts, pos.deposit_amounts
     assert pos.raw_data["tick_current"] == 106800
     print(f"✅ CetusAdapter position (pair {pos.pair}, in-range {pos.position_in_range_pct:.1f}%)")
+
+
+def test_cetus_owned_objects_fixture():
+    """Fix 1: the exact on-chain position type filter returns the N1 position."""
+    import venue_adapters.cetus_adapter as ca
+    from venue_adapters.cetus_adapter import CetusAdapter, CETUS_POSITION_TYPE
+
+    owner = "0x04887176a0791ac1837bc654533990820a33f2c289b8636c7066a1865191b314"
+    obj_id = "0x18bee062d705e1e1fded90663b015b23f2c4b2ef57ada55d1f774e4999de4fad"
+    pos_fields = {
+        "pool": "0x" + "f" * 64,
+        "liquidity": "1234567890",
+        "tick_lower_index": {"bits": "60159"},
+        "tick_upper_index": {"bits": "112276"},
+        "coin_type_a": {"name": LBTC},
+        "coin_type_b": {"name": SUI},
+        "fee_owed_a": "0",
+        "fee_owed_b": "0",
+    }
+    pool_fields = {
+        "current_sqrt_price": str(int(1.0001 ** (106800 / 2.0) * 2 ** 64)),
+        "current_tick_index": {"bits": "106800"},
+        "tick_spacing": "10",
+        "coin_a": {"name": LBTC},
+        "coin_b": {"name": SUI},
+    }
+    seen = {}
+
+    def fake_rpc(url, method, params, timeout=20):
+        if method == "suix_getOwnedObjects":
+            seen["params"] = params
+            return {"data": [{"data": {
+                "objectId": obj_id, "type": CETUS_POSITION_TYPE,
+                "content": {"fields": pos_fields},
+            }}], "hasNextPage": False, "nextCursor": None}
+        if method == "sui_getObject":
+            return {"data": {"objectId": params[0], "type": "0xpool::pool::Pool",
+                             "content": {"fields": pool_fields}}}
+        raise AssertionError(f"unexpected method {method}")
+
+    real_rpc = ca._sui_rpc
+    real_meta = ca.get_coin_metadata
+    try:
+        ca._sui_rpc = fake_rpc
+        ca.get_coin_metadata = lambda ct, url=None: {
+            LBTC: {"symbol": "LBTC", "decimals": 8, "name": "Lombard"},
+            SUI: {"symbol": "SUI", "decimals": 9, "name": "Sui"},
+        }.get(ct, {})
+        positions = CetusAdapter().fetch_all_positions(owner, online_mode=True)
+    finally:
+        ca._sui_rpc = real_rpc
+        ca.get_coin_metadata = real_meta
+
+    assert len(positions) == 1, [p.position_id for p in positions]
+    assert positions[0].position_id == f"sui:{obj_id}", positions[0].position_id
+    assert positions[0].pair == "LBTC/SUI", positions[0].pair
+    # RPC shape: StructType filter + limit as the 4th positional param (not in query).
+    p = seen["params"]
+    assert p[1]["filter"]["StructType"] == CETUS_POSITION_TYPE, p
+    assert len(p) == 4 and p[3] == 50, p
+    print("✅ Cetus owned-objects fixture -> 1 position (exact StructType filter)")
 
 
 def test_cetus_writer_stub():
@@ -199,29 +263,35 @@ def test_cetus_can_handle():
 
 
 def test_live_sui_cetus_e2e():
-    """Read-only live check — gated so the default suite is offline-green."""
+    """Read-only live check — gated so the default suite is offline-green.
+
+    Defaults to the N1 wallet/position (verified 2026-09-26); override with
+    SUI_E2E_ADDRESS / SUI_E2E_POSITION_ID.
+    """
     if not (os.environ.get("COLDSATCK_E2E_RPC") or os.environ.get("COLDSTACK_E2E_RPC")):
-        print("⏭️  SKIP live Sui/Cetus e2e — set COLDSATCK_E2E_RPC=1 (and "
-              "SUI_E2E_ADDRESS / SUI_E2E_POSITION_ID) to run.")
+        print("⏭️  SKIP live Sui/Cetus e2e — set COLDSATCK_E2E_RPC=1 to run.")
         return
-    addr = os.environ.get("SUI_E2E_ADDRESS", "")
-    if not addr:
-        print("⏭️  SKIP live Sui balances — SUI_E2E_ADDRESS not set.")
-    else:
-        assets = fetch_sui_assets(addr)
-        print(f"   live Sui assets for {addr[:12]}...: "
-              f"{[(a['symbol'], round(a['balance'], 6)) for a in assets]}")
-        assert any(a["symbol"] == "SUI" for a in assets), assets
-    pos_id = os.environ.get("SUI_E2E_POSITION_ID", "")
-    if not pos_id:
-        print("⏭️  SKIP live Cetus position — SUI_E2E_POSITION_ID not set.")
-        return
+    n1_wallet = "0x04887176a0791ac1837bc654533990820a33f2c289b8636c7066a1865191b314"
+    n1_pos = "0x18bee062d705e1e1fded90663b015b23f2c4b2ef57ada55d1f774e4999de4fad"
+    addr = os.environ.get("SUI_E2E_ADDRESS", "") or n1_wallet
+    pos_id = os.environ.get("SUI_E2E_POSITION_ID", "") or n1_pos
+
+    assets = fetch_sui_assets(addr)
+    syms = {a["symbol"] for a in assets}
+    print(f"   live Sui assets for {addr[:12]}...: "
+          f"{[(a['symbol'], round(a['balance'], 6)) for a in assets]}")
+    assert "SUI" in syms, assets
+
     from venue_adapters.cetus_adapter import CetusAdapter
-    pos = CetusAdapter().fetch_position(pos_id, online_mode=True)
-    print(f"   live Cetus: pair={pos.pair} range%={pos.position_in_range_pct} "
-          f"amounts={pos.deposit_amounts} error={pos.error}")
-    assert not pos.error, pos.error
-    assert pos.pair, "pair must decode"
+    positions = CetusAdapter().fetch_all_positions(addr, online_mode=True)
+    ids = [p.position_id for p in positions]
+    print(f"   live Cetus scan -> {ids}")
+    assert f"sui:{pos_id}" in ids, ids
+    p = CetusAdapter().fetch_position(pos_id, online_mode=True)
+    print(f"   live Cetus: pair={p.pair} range={p.range_low}-{p.range_high} "
+          f"range%={p.position_in_range_pct} amounts={p.deposit_amounts} error={p.error}")
+    assert not p.error, p.error
+    assert p.pair == "LBTC/SUI", p.pair
 
 
 def main():
@@ -231,6 +301,7 @@ def main():
     test_balance_engine_sui_hook()
     test_cetus_decode()
     test_cetus_adapter_position()
+    test_cetus_owned_objects_fixture()
     test_cetus_writer_stub()
     test_cetus_can_handle()
     test_live_sui_cetus_e2e()
