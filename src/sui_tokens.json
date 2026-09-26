@@ -1,0 +1,6 @@
+{
+  "_comment": "ColdStack v5.3.20 Sui asset registry. Extendable: add a full coin type under 'coins' to pin its symbol/decimals (overrides on-chain suix_getCoinMetadata). This JSON is the manual 'manage tokens' path for Sui. Any held coin is auto-detected via suix_getAllBalances even without an entry here.",
+  "coins": {
+    "0x2::sui::SUI": {"symbol": "SUI", "decimals": 9}
+  }
+}

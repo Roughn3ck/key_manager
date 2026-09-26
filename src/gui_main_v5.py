@@ -2,11 +2,11 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.3.19 (September 2026) - LP panel refresh + account labels
+Version: v5.3.20 (September 2026) - Sui token auto-detection + Cetus venue (read-only)
 """
 
 # Single source of truth for version — update this when bumping versions
-VERSION = "5.3.19"
+VERSION = "5.3.20"
 import sys
 import os
 
@@ -320,6 +320,7 @@ class ColdStackGUI:
         "BSC (BNB Chain)": "bsc",
         "Aerodrome (BASE)": "aerodrome",
         "Orca (Solana)": "orca",
+        "Cetus (Sui)": "cetus",
     }
     # Reverse map for converting adapter keys to friendly display names.
     LP_PLATFORM_MAP_reverse = {v: k for k, v in LP_PLATFORM_MAP.items()}

@@ -629,7 +629,7 @@ class LPTab:
                 if not tid:
                     continue
                 # Convert token_id to int for EVM chains (stored as string in JSON)
-                if venue not in ("Orca", "orca") and isinstance(tid, str):
+                if venue not in ("Orca", "orca", "Cetus", "cetus") and isinstance(tid, str):
                     try:
                         tid = int(tid)
                     except ValueError:
@@ -677,6 +677,20 @@ class LPTab:
                         from venue_adapters.orca_adapter import OrcaAdapter
                         pos = OrcaAdapter()._fetch_by_position_mint(
                             tid, self.gui.price_engine, wallet_address=wallet
+                        )
+                        if pos and not pos.error:
+                            if wallet:
+                                pos.wallet_address = wallet
+                            positions.append(pos)
+                    except Exception:
+                        pass
+                elif venue in ("Cetus", "cetus"):
+                    # Cetus (Sui): tid is the position object id (0x+64 hex)
+                    try:
+                        from venue_adapters.cetus_adapter import CetusAdapter
+                        pos = CetusAdapter().fetch_position(
+                            tid, online_mode=True, price_engine=self.gui.price_engine,
+                            wallet_address=wallet,
                         )
                         if pos and not pos.error:
                             if wallet:
@@ -751,6 +765,8 @@ class LPTab:
                 prefix = "base"
             elif venue in ("Orca", "orca"):
                 prefix = "solana"
+            elif venue in ("Cetus", "cetus"):
+                prefix = "sui"
             else:
                 prefix = "bsc"
             pos_key = f"{venue}:{prefix}:{tid}"
@@ -955,7 +971,7 @@ class LPTab:
                 if not tid:
                     continue
                 # Convert token_id to int for EVM chains (stored as string in JSON)
-                if venue not in ("Orca", "orca") and isinstance(tid, str):
+                if venue not in ("Orca", "orca", "Cetus", "cetus") and isinstance(tid, str):
                     try:
                         tid = int(tid)
                     except ValueError:
@@ -1001,6 +1017,21 @@ class LPTab:
                         )
                         if pos and not pos.error:
                             # Attach wallet address for display
+                            if address:
+                                pos.wallet_address = address
+                            if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
+                                positions.append(pos)
+                    except Exception:
+                        pass
+                elif venue in ("Cetus", "cetus"):
+                    # Cetus (Sui): tid is the position object id (0x+64 hex)
+                    try:
+                        from venue_adapters.cetus_adapter import CetusAdapter
+                        pos = CetusAdapter().fetch_position(
+                            tid, online_mode=True, price_engine=self.gui.price_engine,
+                            wallet_address=address,
+                        )
+                        if pos and not pos.error:
                             if address:
                                 pos.wallet_address = address
                             if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
@@ -1062,7 +1093,7 @@ class LPTab:
                         if not tid:
                             continue
                         # Convert token_id to int for EVM chains (stored as string in JSON)
-                        if venue not in ("Orca", "orca") and isinstance(tid, str):
+                        if venue not in ("Orca", "orca", "Cetus", "cetus") and isinstance(tid, str):
                             try:
                                 tid = int(tid)
                             except ValueError:
@@ -1680,6 +1711,8 @@ class LPTab:
                 adapter_key = "aerodrome"
             elif adapter_key in ("orca", "solana"):
                 adapter_key = "orca"
+            elif adapter_key in ("cetus", "sui"):
+                adapter_key = "cetus"
             friendly = self.gui.LP_PLATFORM_MAP_reverse.get(adapter_key, venue_key)
             platform_menu.set(friendly)
         # Fetch by token ID (strip venue prefix if present)
@@ -1738,6 +1771,8 @@ class LPTab:
                 prefix = "base"
             elif venue in ("Orca", "orca"):
                 prefix = "solana"
+            elif venue in ("Cetus", "cetus"):
+                prefix = "sui"
             else:
                 prefix = "bsc"
             # Check if this pool was already rendered as a live card
@@ -1905,6 +1940,11 @@ class LPTab:
             position.position_id.startswith("base:") or
             position.position_id.startswith("solana:")
         )
+        # v5.3.20: Cetus (Sui) is read-only — no Collect/Compound/Close, but the
+        # pool can still be saved/removed (token_id is the Sui object id string).
+        can_save_lp = can_manage_lp or bool(
+            position.position_id and position.position_id.startswith("sui:")
+        )
 
         if can_manage_lp:
             collect_btn = ctk.CTkButton(button_frame, text="💰 Collect", width=75, height=24,
@@ -1939,9 +1979,9 @@ class LPTab:
                               command=lambda pid=position.position_id: self.gui.copy_to_clipboard(pid))
             copy_btn.pack(side="left", padx=(0, 2))
 
-        if can_manage_lp:
-            if position.position_id.startswith("solana:"):
-                # Solana: token_id is the base58 position mint string
+        if can_save_lp:
+            if position.position_id.startswith("solana:") or position.position_id.startswith("sui:"):
+                # Solana: base58 mint string; Sui/Cetus: position object id string
                 _token_id = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
             else:
                 try:
@@ -2123,17 +2163,20 @@ class LPTab:
         """Save the current position's public identifiers to saved_pools."""
         if not position.position_id:
             return
-        if position.position_id.startswith("solana:"):
-            # Orca positions: token_id is the base58 position mint string
+        if position.position_id.startswith("solana:") or position.position_id.startswith("sui:"):
+            # Orca / Cetus positions: token_id is the base58 mint (Orca) or the
+            # Sui position object id (Cetus) — both stored as strings.
+            is_sui = position.position_id.startswith("sui:")
             mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
-            venue = position.venue or "Orca"
+            venue = position.venue or ("Cetus" if is_sui else "Orca")
             wallet_address = self._lp_get_current_wallet_address()
             if not wallet_address:
                 wallet_address = getattr(self, "_lp_last_fetched_address", "")
             if not wallet_address:
                 account_name = self._lp_get_current_account_name()
                 if account_name:
-                    wallet_address = self._lp_resolve_account_address(account_name, prefer="solana")
+                    wallet_address = self._lp_resolve_account_address(
+                        account_name, prefer=("sui" if is_sui else "solana"))
             if not wallet_address:
                 self.gui.show_notification("Could not resolve wallet address", error=True)
                 return
@@ -2146,7 +2189,7 @@ class LPTab:
             ok = save_pool(
                 self.gui.key_manager.address_db,
                 wallet_address=wallet_address,
-                token_id=mint,         # Base58 string — saved_pools accepts int or str
+                token_id=mint,         # base58 / Sui object id — saved_pools accepts int or str
                 venue=venue,
                 pool_address=pool_address,
                 pair=position.pair or "",
@@ -2237,6 +2280,8 @@ class LPTab:
                 prefix = "base"
             elif venue in ("Orca", "orca"):
                 prefix = "solana"
+            elif venue in ("Cetus", "cetus"):
+                prefix = "sui"
             else:
                 prefix = "bsc"
             # Placeholder card
@@ -2327,6 +2372,8 @@ class LPTab:
                 prefix = "base"
             elif venue in ("Orca", "orca"):
                 prefix = "solana"
+            elif venue in ("Cetus", "cetus"):
+                prefix = "sui"
             else:
                 prefix = "bsc"
             card = ctk.CTkFrame(scroll, corner_radius=10)
@@ -2565,10 +2612,14 @@ class LPTab:
 
         # Resolve (venue, token_id) the same way for Solana and EVM ids.
         pid = position.position_id
-        if pid.startswith("solana:"):
+        if pid.startswith("solana:") or pid.startswith("sui:"):
             token_id = pid.split(":", 1)[1] if ":" in pid else pid
-            venue = position.venue or "Orca"
-            prefix = "solana"
+            if pid.startswith("sui:"):
+                venue = position.venue or "Cetus"
+                prefix = "sui"
+            else:
+                venue = position.venue or "Orca"
+                prefix = "solana"
         else:
             try:
                 token_id = int(pid.split(":", 1)[1])
@@ -2844,6 +2895,9 @@ class LPTab:
             # v5.2.5: Orca adapter with write support via OrcaWriter.
             # Writer available via get_writer("orca") -> OrcaWriter instance.
             return ("Solana", "SOL", "orca")
+        elif position_id.startswith("sui:"):
+            # v5.3.20: Cetus read-only adapter (Sui). Writes are Phase 2.
+            return ("Sui", "SUI", "cetus")
         elif position_id.startswith("hyperevm:"):
             return ("HyperEVM", "HYPE", "hyperliquid")
         else:
@@ -2888,6 +2942,8 @@ class LPTab:
             venue_key = "bsc"
         elif vnorm in ("orca", "solana", "sol"):
             venue_key = "orca"
+        elif vnorm in ("cetus", "sui"):
+            venue_key = "cetus"
 
         # 2. Secondary: position_id prefix (only if record did not give a venue)
         position_id = getattr(position, "position_id", "") or ""
@@ -2898,6 +2954,8 @@ class LPTab:
                 venue_key = "bsc"
             elif position_id.startswith("solana:"):
                 venue_key = "orca"
+            elif position_id.startswith("sui:"):
+                venue_key = "cetus"
             elif position_id.startswith("hyperevm:"):
                 venue_key = "hyperliquid"
 
@@ -2916,6 +2974,7 @@ class LPTab:
             "hyperliquid": "hyperevm",
             "bsc": "bnb chain",
             "orca": "solana",
+            "cetus": "sui",
         }.get(venue_key, venue_key)
         if chain_norm and chain_norm != expected_chain and chain_norm != venue_key:
             raise RuntimeError(
@@ -2932,6 +2991,7 @@ class LPTab:
             "bsc": ("BNB Chain (BSC)", "BNB"),
             "orca": ("Solana", "SOL"),
             "hyperliquid": ("HyperEVM", "HYPE"),
+            "cetus": ("Sui", "SUI"),
         }.get(venue_key, (venue_key.capitalize(), "???"))
 
     def _lp_verify_evm_position_ownership(self, position, account_name: str,

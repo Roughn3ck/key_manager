@@ -1061,6 +1061,15 @@ class BalanceEngine:
 
             # Sui
             elif "sui" in chain_lower:
+                # v5.3.20: exhaustive asset detection (SUI + LBTC/DEEP/...).
+                # Falls back to the native SUI-only balance on any failure.
+                try:
+                    from sui_assets import fetch_sui_assets
+                    assets = fetch_sui_assets(address, self._get_url("sui"), self._get_fallback("sui"))
+                except Exception:
+                    assets = []
+                if assets:
+                    return {"balances": assets, "error": ""}
                 balance = self.fetch_sui_balance(address)
                 if balance is not None:
                     return {"balances": [{"chain": "sui", "balance": balance, "symbol": "SUI"}], "error": ""}

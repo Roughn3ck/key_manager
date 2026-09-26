@@ -1,8 +1,13 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.19 (LP panel refresh + account labels)
+**Current Version:** v5.3.20 (Sui token auto-detection + Cetus venue, read-only)
 **Last Updated:** 2026-09-26
+
+---
+
+## v5.3.20 - Sui token auto-detection + Cetus venue (read-only) (2026-09-26)
+Sui balances are now exhaustive: `src/sui_assets.py` enumerates every held coin via `suix_getAllBalances`, resolves symbol/decimals from `suix_getCoinMetadata` with an extendable `src/sui_tokens.json` override registry, and feeds the balance engine's `sui` entry (native SUI-only path kept as fallback). New read-only `CetusAdapter` (Cetus CLMM on Sui) decodes Position/Pool JSON via `sui_getObject` (Q64.64 price, tick range, in-range %, holdings, uncollected fees, USD) and discovers positions via `suix_getOwnedObjects`; `CetusWriter` is a Phase-2 stub. Wiring: Cetus registered in the venue map + `sui:` chain/prefix handling; pool cards show the v5.3.18 account label. Writes (PTB/BCS/intent signing) are out of scope — the agent has Ed25519 signing but no Sui intent/PTB path yet. No EXE build.
 
 ---
 
