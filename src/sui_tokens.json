@@ -1,5 +1,9 @@
 {
-  "_comment": "ColdStack v5.3.20 Sui asset registry. Extendable: add a full coin type under 'coins' to pin its symbol/decimals (overrides on-chain suix_getCoinMetadata). This JSON is the manual 'manage tokens' path for Sui. Any held coin is auto-detected via suix_getAllBalances even without an entry here.",
+  "_comment": "ColdStack v5.3.21 Sui asset registry. Extendable: add a full coin type under 'coins' to pin its symbol/decimals (overrides on-chain suix_getCoinMetadata). 'price_as' maps a Sui token symbol to a PriceEngine-known symbol (e.g. LBTC -> BTC). This JSON is the manual 'manage tokens' path for Sui. Any held coin is auto-detected via suix_getAllBalances even without an entry here.",
+  "price_as": {
+    "LBTC": "BTC",
+    "DEEP": "SUI"
+  },
   "coins": {
     "0x2::sui::SUI": {"symbol": "SUI", "decimals": 9}
   }

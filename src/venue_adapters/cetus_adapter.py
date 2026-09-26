@@ -25,7 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from lp_engine import LPPosition, OfflineError, VenueAdapter, register_adapter
 from price_engine import PriceEngine
-from sui_assets import DEFAULT_SUI_RPC, get_coin_metadata, parse_coin_type
+from sui_assets import DEFAULT_SUI_RPC, get_coin_metadata, load_registry, parse_coin_type
+from sui_ptb import sui_int, sui_i32
 
 # Cetus Move position type. Verified on-chain 2026-09-26 (sui-rpc.publicnode.com):
 # the N1 wallet holds exactly one object of this type. Used as the suix_getOwnedObjects
@@ -34,6 +35,7 @@ CETUS_POSITION_TYPE = (
     "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position"
 )
 CETUS_POSITION_TYPE_SUFFIX = "::position::Position"
+CETUS_POOL_TYPE_SUFFIX = "::pool::Pool"
 
 _MAX_OWNED_PAGES = 10
 _OWNED_PAGE_SIZE = 50
@@ -115,43 +117,6 @@ def _get_owned_objects(owner: str) -> List[Dict[str, Any]]:
     return out
 
 
-def _as_int(value: Any) -> Optional[int]:
-    """Coerce a Sui JSON scalar to int.
-
-    Handles plain numbers/strings and Move struct wrappers (``{"bits": ...}``,
-    ``{"fields": {"bits": ...}}``, or a single-key struct value).
-    """
-    if value is None or isinstance(value, bool):
-        return None
-    if isinstance(value, int):
-        return value
-    if isinstance(value, str):
-        try:
-            return int(value)
-        except ValueError:
-            return None
-    if isinstance(value, dict):
-        for key in ("bits", "value"):
-            if key in value:
-                return _as_int(value[key])
-        inner = value.get("fields")
-        if isinstance(inner, dict):
-            return _as_int(inner)
-        if len(value) == 1:
-            return _as_int(next(iter(value.values())))
-    return None
-
-
-def _as_i32(value: Any) -> Optional[int]:
-    """Coerce a Sui I32 (two's-complement ``bits`` u32) to a signed tick."""
-    n = _as_int(value)
-    if n is None:
-        return None
-    if n >= 2 ** 31:
-        n -= 2 ** 32
-    return n
-
-
 def _typename_str(value: Any) -> str:
     """Extract the string from a Sui ``TypeName`` (JSON ``{"name": ...}``)."""
     if value is None:
@@ -208,17 +173,37 @@ def _compute_holdings(liquidity: int, sqrt_price_x64: int, tick_lower: int,
     return amount_a / (10 ** dec_a), amount_b / (10 ** dec_b)
 
 
-def _usd(amount: Optional[float], symbol: str, price_engine: Optional[PriceEngine]) -> Optional[float]:
+def _price_as_symbol(symbol: str, registry: Optional[Dict[str, Any]]) -> str:
+    """Return the pricing symbol for ``symbol`` from the Sui token registry.
+
+    The registry's ``price_as`` table maps Sui token symbols to PriceEngine-known
+    symbols (e.g. ``LBTC -> BTC``). Defaults to the input symbol.
+    """
+    if not registry:
+        return symbol
+    mapping = registry.get("price_as") if isinstance(registry, dict) else None
+    if isinstance(mapping, dict):
+        return mapping.get(symbol.upper(), symbol)
+    return symbol
+
+
+def _usd(amount: Optional[float], symbol: str, price_engine: Optional[PriceEngine],
+         registry: Optional[Dict[str, Any]] = None) -> Optional[float]:
     if amount is None or amount <= 0 or not price_engine:
         return None
+    price_symbol = _price_as_symbol(symbol, registry)
     try:
-        return price_engine.convert_balance_to_fiat(amount, symbol, currency="usd")
+        return price_engine.convert_balance_to_fiat(amount, price_symbol, currency="usd")
     except Exception:
         return None
 
 
 def _is_cetus_position_type(type_str: str) -> bool:
     return CETUS_POSITION_TYPE_SUFFIX in (type_str or "")
+
+
+def _is_cetus_pool_type(type_str: str) -> bool:
+    return CETUS_POOL_TYPE_SUFFIX in (type_str or "")
 
 
 def _is_sui_object_id(value: str) -> bool:
@@ -232,6 +217,12 @@ def _is_sui_object_id(value: str) -> bool:
     return len(h) == 64 and all(c in "0123456789abcdefABCDEF" for c in h)
 
 
+def _is_numeric(value: str) -> bool:
+    """True for a bare decimal integer (e.g. a Cetus registry pool id)."""
+    s = (value or "").strip()
+    return bool(s) and s.isdigit()
+
+
 def decode_position(fields: Dict[str, Any]) -> Dict[str, Any]:
     """Decode a Cetus Position object's JSON fields into a normalized dict."""
     pool_id = fields.get("pool")
@@ -241,13 +232,13 @@ def decode_position(fields: Dict[str, Any]) -> Dict[str, Any]:
     coin_b = _typename_str(fields.get("coin_type_b"))
     return {
         "pool": pool_id,
-        "liquidity": _as_int(fields.get("liquidity")) or 0,
-        "tick_lower": _as_i32(fields.get("tick_lower_index")),
-        "tick_upper": _as_i32(fields.get("tick_upper_index")),
+        "liquidity": sui_int(fields.get("liquidity")) or 0,
+        "tick_lower": sui_i32(fields.get("tick_lower_index")),
+        "tick_upper": sui_i32(fields.get("tick_upper_index")),
         "coin_type_a": coin_a,
         "coin_type_b": coin_b,
-        "fee_owed_a": _as_int(fields.get("fee_owed_a")) or 0,
-        "fee_owed_b": _as_int(fields.get("fee_owed_b")) or 0,
+        "fee_owed_a": sui_int(fields.get("fee_owed_a")) or 0,
+        "fee_owed_b": sui_int(fields.get("fee_owed_b")) or 0,
     }
 
 
@@ -259,9 +250,9 @@ def decode_pool(fields: Dict[str, Any]) -> Dict[str, Any]:
     """
     tick = fields.get("current_tick_index", fields.get("current_tick"))
     return {
-        "current_sqrt_price": _as_int(fields.get("current_sqrt_price")),
-        "tick_current": _as_i32(tick),
-        "tick_spacing": _as_int(fields.get("tick_spacing")),
+        "current_sqrt_price": sui_int(fields.get("current_sqrt_price")),
+        "tick_current": sui_i32(tick),
+        "tick_spacing": sui_int(fields.get("tick_spacing")),
     }
 
 
@@ -297,9 +288,16 @@ class CetusAdapter(VenueAdapter):
         if not online_mode:
             raise OfflineError("Cetus adapter requires online mode.")
 
-        obj_id = (address_or_id or "").strip()
-        if obj_id.startswith("sui:"):
-            obj_id = obj_id.split(":", 1)[1]
+        raw_id = (address_or_id or "").strip()
+        obj_id = raw_id.split(":", 1)[1] if raw_id.startswith("sui:") else raw_id
+        if _is_numeric(obj_id):
+            return LPPosition(
+                position_id=f"sui:{obj_id}", venue="Cetus", chain="Sui",
+                error=(
+                    f"{obj_id} is a Cetus registry pool id, not an on-chain object id — "
+                    "paste the position or pool object id (0x + 64 hex)."
+                ),
+            )
         if not _is_sui_object_id(obj_id):
             return LPPosition(
                 position_id=f"sui:{obj_id}", venue="Cetus", chain="Sui",
@@ -311,6 +309,14 @@ class CetusAdapter(VenueAdapter):
             return LPPosition(
                 position_id=f"sui:{obj_id}", venue="Cetus", chain="Sui",
                 error=f"Sui RPC unavailable — retry ({e})",
+            )
+        if _is_cetus_pool_type(type_str):
+            return LPPosition(
+                position_id=f"sui:{obj_id}", venue="Cetus", chain="Sui",
+                error=(
+                    "That's a Cetus POOL object — paste a POSITION object id "
+                    "(also 0x + 64 hex; positions are NFT objects in the wallet)."
+                ),
             )
         if not _is_cetus_position_type(type_str):
             return LPPosition(
@@ -384,6 +390,9 @@ class CetusAdapter(VenueAdapter):
                 error="Could not decode Cetus position coin types.",
             )
 
+        # v5.3.21: load the Sui token registry once per position for price_as mappings.
+        registry = load_registry()
+
         sym_a, dec_a = _symbol_decimals(pos["coin_type_a"])
         sym_b, dec_b = _symbol_decimals(pos["coin_type_b"])
         pair = f"{sym_a}/{sym_b}"
@@ -446,29 +455,35 @@ class CetusAdapter(VenueAdapter):
             fees_earned[sym_b] = fee_b
 
         fees_usd = 0.0
-        unpriced: List[str] = []
+        unpriced_fees: List[str] = []
         for amt, sym in ((fee_a, sym_a), (fee_b, sym_b)):
-            val = _usd(amt, sym, price_engine)
+            val = _usd(amt, sym, price_engine, registry=registry)
             if val is None and amt > 0:
-                unpriced.append(sym)
+                unpriced_fees.append(sym)
             fees_usd += val or 0.0
         fees_earned_usd = fees_usd if fees_usd > 0 else (0.0 if fees_earned else None)
 
         current_value_usd = None
+        unpriced_value: List[str] = []
         for amt, sym in ((deposit_amounts.get(sym_a, 0.0), sym_a),
                          (deposit_amounts.get(sym_b, 0.0), sym_b)):
-            val = _usd(amt, sym, price_engine)
+            val = _usd(amt, sym, price_engine, registry=registry)
             if val is None and amt > 0:
-                unpriced.append(sym)
+                unpriced_value.append(sym)
             current_value_usd = (current_value_usd or 0.0) + (val or 0.0)
         if current_value_usd == 0.0:
             current_value_usd = None
 
+        all_unpriced = sorted(set(unpriced_fees + unpriced_value))
         notes = []
         if pool == {} and pos.get("pool"):
             notes.append("pool state unavailable")
-        if unpriced:
-            notes.append(f"⚠ unpriced: {', '.join(sorted(set(unpriced)))}")
+        if all_unpriced:
+            leg_word = "leg" if len(all_unpriced) == 1 else "legs"
+            notes.append(
+                f"⚠ unpriced: {', '.join(all_unpriced)} "
+                f"({len(all_unpriced)} {leg_word} unpriced; USD totals are partial)"
+            )
 
         return LPPosition(
             position_id=f"sui:{obj_id}",
@@ -502,15 +517,19 @@ class CetusAdapter(VenueAdapter):
                 "coin_type_b": pos["coin_type_b"],
                 "fee_owed_a": pos["fee_owed_a"],
                 "fee_owed_b": pos["fee_owed_b"],
+                "unpriced_symbols": all_unpriced,
+                "unpriced_count": len(all_unpriced),
+                "price_as_registry": registry.get("price_as", {}),
             },
         )
 
     # -- Write support -------------------------------------------------------
 
     def can_write(self) -> bool:
-        """Read-only phase: Cetus writes land in Phase 2."""
-        return False
+        """v5.3.21: Cetus PTB writer is available."""
+        return True
 
     def get_writer(self):
-        """No writer during the read-only phase (see cetus_writer.py stub)."""
-        return None
+        """Return a CetusWriter instance."""
+        from venue_adapters.cetus_writer import CetusWriter
+        return CetusWriter()

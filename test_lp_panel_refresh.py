@@ -83,8 +83,8 @@ def test_fetch_single_refreshes_all_saved():
     tab = _new_tab(saved, accounts)
 
     tab._lp_render_card = lambda pos: (order.append("card"), rendered.append(pos))
-    tab._lp_render_saved_placeholder = lambda scroll, entry, prefix, tid, venue, pair, state="auto": (
-        order.append(("ph", state)), placeholders.append(entry))
+    tab._lp_render_saved_placeholder = lambda scroll, entry, prefix, tid, venue, pair, state="auto", error=None: (
+        order.append(("ph", state, error)), placeholders.append(entry))
     tab._lp_update_button_states = lambda: None
     # v5.3.20: the neutral "Fetching…" state must be rendered BEFORE any result.
     real_fs = tab._lp_render_fetching_state
@@ -145,9 +145,13 @@ def test_fetch_single_refreshes_all_saved():
     assert len(placeholders) == 1, placeholders
     assert placeholders[0]["token_id"] == 75269474, placeholders[0]
 
+    # v5.3.21: the failed pool receives its specific error message.
+    auto_ph = [o for o in order if isinstance(o, tuple) and o[0] == "ph" and o[1] == "auto"]
+    assert len(auto_ph) == 1, order
+    assert "simulated Aerodrome RPC failure" in (auto_ph[0][2] or ""), auto_ph[0]
+
     # v5.3.20: the neutral "Fetching…" state is rendered before any result card.
     assert order and order[0] == "fetching", order
-    assert ("ph", "auto") in order, order  # warning only for the genuinely failed pool
 
     print("✅ fetch-single refreshes all saved pools (own venue+account, no cross-marking)")
 
@@ -274,11 +278,49 @@ def test_account_label_resolution_and_render_smoke():
     print("✅ account label resolves/persists and renders (bound + unbound)")
 
 
+def test_rescan_resolves_address_per_chain():
+    """Part 2: saved-pool rescan resolves the wallet address from the pool's chain."""
+    sui_addr = "0x04887176a0791ac1837bc654533990820a33f2c289b8636c7066a1865191b314"
+    sol_addr = "FbNHxe9VV797JWG7XH2msjwp5Rvb6dGzndwwkEXXXBKX"
+    evm_addr = "0x" + "a" * 40
+
+    saved = [
+        {"token_id": 1, "venue": "HyperEVM", "pair": "WHYPE/UBTC",
+         "account_name": "G1", "account_address": evm_addr},
+        {"token_id": 2, "venue": "Aerodrome", "pair": "EURC/cbBTC",
+         "account_name": "G2", "account_address": "0x" + "b" * 40},
+        {"token_id": "obj" * 11, "venue": "Orca", "pair": "cbBTC/SOL",
+         "account_name": "G3", "account_address": sol_addr},
+        {"token_id": sui_addr, "venue": "Cetus", "pair": "LBTC/SUI",
+         "account_name": "N1", "account_address": sui_addr},
+    ]
+    accounts = {
+        "G1": {"addresses": [{"address": evm_addr, "chain": "EVM"}]},
+        "G2": {"addresses": [{"address": "0x" + "b" * 40, "chain": "Base"}]},
+        "G3": {"addresses": [{"address": sol_addr, "chain": "SOL"}]},
+        "N1": {"addresses": [{"address": sui_addr, "chain": "SUI"}]},
+    }
+    tab = _new_tab(saved, accounts)
+
+    assert tab._lp_resolve_wallet_for_saved_pool(saved[0]) == (evm_addr, "evm", "G1")
+    assert tab._lp_resolve_wallet_for_saved_pool(saved[1]) == ("0x" + "b" * 40, "evm", "G2")
+    assert tab._lp_resolve_wallet_for_saved_pool(saved[2]) == (sol_addr, "solana", "G3")
+    assert tab._lp_resolve_wallet_for_saved_pool(saved[3]) == (sui_addr, "sui", "N1")
+
+    # Wrong-chain stored address is corrected by deriving from the bound account.
+    wrong = {"token_id": 1, "venue": "HyperEVM", "pair": "WHYPE/UBTC",
+             "account_name": "G1", "account_address": sui_addr}
+    assert tab._lp_resolve_wallet_for_saved_pool(wrong) == (evm_addr, "evm", "G1")
+
+    print("✅ rescan resolves wallet address per venue/chain")
+
+
 def main():
     test_fetch_single_refreshes_all_saved()
     test_fetching_state_is_neutral()
     test_refresh_failure_does_not_wipe_saved_cards()
     test_account_label_resolution_and_render_smoke()
+    test_rescan_resolves_address_per_chain()
     print("✅ ALL LP PANEL REFRESH + ACCOUNT LABEL TESTS PASS")
     return 0
 

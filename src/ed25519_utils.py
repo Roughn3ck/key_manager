@@ -113,6 +113,30 @@ def b58encode(data: bytes) -> str:
     return ("1" * pad) + out
 
 
+def b58decode(s: str) -> bytes:
+    """Decode a base58 string (Bitcoin/Solana alphabet) to bytes."""
+    if not isinstance(s, str):
+        raise TypeError("b58decode expects a string")
+    n = 0
+    for ch in s:
+        idx = _B58_ALPHABET.find(ch)
+        if idx < 0:
+            raise ValueError(f"invalid base58 character: {ch!r}")
+        n = n * 58 + idx
+    # Count leading '1' chars (which encode zero bytes).
+    pad = 0
+    for ch in s:
+        if ch == "1":
+            pad += 1
+        else:
+            break
+    # Convert to big-endian bytes and preserve leading zeros.
+    if n == 0:
+        return b"\x00" * pad
+    data = n.to_bytes((n.bit_length() + 7) // 8, "big")
+    return b"\x00" * pad + data
+
+
 # ============================================================================
 # SLIP-0010 Ed25519 HD derivation (all-hardened paths)
 # ============================================================================

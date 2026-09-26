@@ -1,13 +1,50 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.20 (Sui token auto-detection + Cetus venue, read-only)
+**Current Version:** v5.3.21 (Cetus Sui writes + v5.3.21 completion fixes)
 **Last Updated:** 2026-09-26
 
 ---
 
+## v5.3.21 - Cetus (Sui) writes + I32 fix + pricing/rescan/binding completion (2026-09-26)
+
+### Summary
+Completes the v5.3.21 train: Cetus on Sui is now a full read/write venue (collect / close / compound via PTB), plus the three completion items surfaced by Kris's live test.
+
+### Cetus writes (Part 3)
+- `src/sui_ptb.py` — pure-stdlib BCS writer + Sui Programmable Transaction Block serializer + RPC helpers (`sui_dryRunTransactionBlock` gate, `sui_executeTransactionBlock`).
+- `src/key_manager_agent.py` — `get_sui_address`, `sign_sui_ptb`, `broadcast_sui_ptb`; Sui address reuses the Solana Ed25519 key (`BLAKE2b-256(pubkey)`).
+- `src/venue_adapters/cetus_writer.py` — `CetusWriter` implementing `collect_fees`, `close_position`, `compound_fees`; every PTB is dry-run before signing/broadcast; captures a proper `CloseResult` for coldtrack.
+- `src/venue_adapters/cetus_adapter.py` — write-enabled (`can_write=True`, `get_writer()` returns `CetusWriter`).
+- `src/lp_tab.py` — Cetus Collect/Compound/Close buttons wired; Sui address resolution fixed; close dialog records Cetus closes into coldtrack.
+
+### Completion fixes (Parts 1, 2, binding)
+- **I32 tick crash** — `sui_ptb.sui_int` / `sui_i32` / `encode_i32_bits` are now the shared helpers; they correctly decode the Cetus `i32::I32` wrapper `{"type": "...::i32::I32", "fields": {"bits": N}}` and encode signed ticks back to two's-complement u32. Applied in `cetus_adapter` and `cetus_writer`.
+- **LBTC pricing + honest totals** — `src/sui_tokens.json` already maps `LBTC → BTC` and `DEEP → SUI`; the adapter uses `price_as` consistently. Unpriced legs stay visible with a count suffix and the symbols named; USD totals are partial rather than silently dropped.
+- **Rescan integrity** — saved-pool auto-rescan now heals stale bindings first, captures per-pool errors, and renders each failed pool's specific error on its own placeholder card instead of a generic "Fetch failed". Adapter RPC calls already carry bounded timeouts (e.g. Cetus 20s, EVM 15s).
+- **Initial load state** — `_lp_restore_state` now shows the honest "Fetching positions…" state immediately when online; the address entry starts blank on tab/account switches instead of prepopulating with the selected account's EVM address.
+- **Stale account label (G6 → G1)** — `_lp_auto_fetch_all_saved` now runs `_lp_heal_saved_pool_bindings` in its background thread before resolving wallets, so a saved-pool record bound to the wrong account is relabelled and persisted from the on-chain owner.
+
+### Tests + Files
+- New `test_sui_ptb.py`; updated `test_sui_cetus.py`.
+- Updated `test_lp_panel_refresh.py` to assert per-pool error propagation.
+- `python -m py_compile` clean; full suite green.
+- No EXE build, no git push, no release. Live DBs read-only; no on-chain broadcasts in dev tests.
+
+---
+
 ## v5.3.20 - Sui token auto-detection + Cetus venue (read-only) (2026-09-26)
-Sui balances are now exhaustive: `src/sui_assets.py` enumerates every held coin via `suix_getAllBalances`, resolves symbol/decimals from `suix_getCoinMetadata` with an extendable `src/sui_tokens.json` override registry, and feeds the balance engine's `sui` entry (native SUI-only path kept as fallback). New read-only `CetusAdapter` (Cetus CLMM on Sui) decodes Position/Pool JSON via `sui_getObject` (Q64.64 price, tick range, in-range %, holdings, uncollected fees, USD) and discovers positions via `suix_getOwnedObjects`; `CetusWriter` is a Phase-2 stub. Wiring: Cetus registered in the venue map + `sui:` chain/prefix handling; pool cards show the v5.3.18 account label. Follow-up (same version, not yet shipped): fixed the Cetus wallet scan — the `suix_getOwnedObjects` call now passes the exact `StructType` filter (`0x1eabed72…::position::Position`) with `limit` as the 4th positional param (the prior call put `limit` inside the query with no filter, so the node rejected it and the scan found nothing); pasted object ids fetch directly. Fetch UX now renders a neutral "Fetching positions…" state while the saved-pool rescan runs and shows a warning only on a pool whose refetch actually failed (rescan still serial). Writes (PTB/BCS/intent signing) are out of scope — the agent has Ed25519 signing but no Sui intent/PTB path yet. No EXE build.
+Sui balances are now exhaustive: `src/sui_assets.py` enumerates every held coin via `suix_getAllBalances`, resolves symbol/decimals from `suix_getCoinMetadata` with an extendable `src/sui_tokens.json` override registry, and feeds the balance engine's `sui` entry (native SUI-only path kept as fallback). New read-only `CetusAdapter` (Cetus CLMM on Sui) decodes Position/Pool JSON via `sui_getObject` (Q64.64 price, tick range, in-range %, holdings, uncollected fees, USD) and discovers positions via `suix_getOwnedObjects`; `CetusWriter` is a Phase-2 stub. Wiring: Cetus registered in the venue map + `sui:` chain/prefix handling; pool cards show the v5.3.18 account label.
+
+Follow-up 1 (same version, shipped): fixed the Cetus wallet scan — the `suix_getOwnedObjects` call now passes the exact `StructType` filter (`0x1eabed72…::position::Position`) with `limit` as the 4th positional param (the prior call put `limit` inside the query with no filter, so the node rejected it and the scan found nothing); pasted object ids fetch directly. Fetch UX now renders a neutral "Fetching positions…" state while the saved-pool rescan runs and shows a warning only on a pool whose refetch actually failed (rescan still serial).
+
+Follow-up 2 (same version, not yet shipped):
+- **Cetus scan now resolves the account's Sui address.** Blank-input + Cetus (or full-scan with a selected account) no longer scans the account's EVM address; `_lp_resolve_account_address(..., prefer="sui")` is used in `_lp_do_filtered_full_scan` and `_lp_do_full_scan`, matching the Orca/Solana routing added in v5.3.4.
+- **Blank-input Cetus scan shows an informational empty state.** Zero positions renders "No Cetus positions found for 0x0488…1b314" (neutral gray, no warning); "Fetch failed" is reserved for real RPC errors.
+- **Cetus input UX guards.** Pasting a Cetus POOL object id now explains the difference vs a POSITION NFT; entering a numeric registry pool id explains that it is not an on-chain object id.
+- **Saved-pool account binding self-heal.** For position-bearing records the binding is validated against the on-chain owner (`ownerOf` for EVM venues; `sui_getObject` `showOwner` for Sui/Cetus). A stale top-bar-selector binding (e.g. EURC/cbBTC Aerodrome card showing G6 while the live owner is G1) is corrected and persisted; the old binding is logged as the poison source. Pre-flight ownership checks also self-heal stale bindings instead of erroring.
+
+Writes (PTB/BCS/intent signing) are out of scope — the agent has Ed25519 signing but no Sui intent/PTB path yet. No EXE build.
 
 ---
 

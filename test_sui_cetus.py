@@ -238,17 +238,199 @@ def test_cetus_owned_objects_fixture():
     print("✅ Cetus owned-objects fixture -> 1 position (exact StructType filter)")
 
 
-def test_cetus_writer_stub():
-    from venue_adapters.cetus_writer import CetusWriter, CetusPhase2Error
-    w = CetusWriter()
-    assert w.is_available() is False
+def test_cetus_price_as_mapping():
+    """Part 1: LBTC is priced as BTC via the Sui token registry."""
+    import venue_adapters.cetus_adapter as ca
+    registry = {"price_as": {"LBTC": "BTC"}}
+    assert ca._price_as_symbol("LBTC", registry) == "BTC"
+    assert ca._price_as_symbol("deep", registry) == "deep"
+    assert ca._price_as_symbol("LBTC", None) == "LBTC"
+
+    class FakePriceEngine:
+        def convert_balance_to_fiat(self, amount, symbol, currency="usd"):
+            if symbol == "BTC":
+                return amount * 84000.0
+            if symbol == "SUI":
+                return amount * 1.16
+            return None
+
+    # N1 ground truth: ~0.0106822 LBTC + 358.925 SUI -> ~$1313.07
+    lbtc_amt = 0.0106822
+    sui_amt = 358.925
+    lbtc_usd = ca._usd(lbtc_amt, "LBTC", FakePriceEngine(), registry=registry)
+    sui_usd = ca._usd(sui_amt, "SUI", FakePriceEngine(), registry=registry)
+    total = (lbtc_usd or 0.0) + (sui_usd or 0.0)
+    assert abs(total - 1313.07) < 5.0, total
+    print(f"✅ LBTC price_as BTC -> Pool Value ~${total:.2f}")
+
+
+def test_cetus_honest_unpriced_total():
+    """Part 1: unpriced legs are not silently dropped from USD totals."""
+    import venue_adapters.cetus_adapter as ca
+    registry = {"price_as": {}}
+
+    class FakePriceEngine:
+        def convert_balance_to_fiat(self, amount, symbol, currency="usd"):
+            if symbol == "SUI":
+                return amount * 1.16
+            return None
+
+    raw_fields = {
+        "pool": "0x" + "c" * 64,
+        "liquidity": "1234567890",
+        "tick_lower_index": {"bits": "60159"},
+        "tick_upper_index": {"bits": "112276"},
+        "coin_type_a": {"name": "0x3::lbtc::LBTC"},
+        "coin_type_b": {"name": "0x2::sui::SUI"},
+        "fee_owed_a": "100000",
+        "fee_owed_b": "200000",
+    }
+    raw_pool_fields = {
+        "current_sqrt_price": str(int(1.0001 ** (106800 / 2.0) * 2 ** 64)),
+        "current_tick_index": {"bits": "106800"},
+        "tick_spacing": "10",
+    }
+    real_obj = ca._get_object_json
+    real_meta = ca.get_coin_metadata
     try:
-        w.close_position("sui:0x1", "G1")
-    except CetusPhase2Error as e:
-        assert "Phase 2" in str(e), str(e)
-    else:
-        raise AssertionError("CetusWriter must raise in the read-only phase")
-    print("✅ CetusWriter Phase-2 stub raises")
+        ca._get_object_json = lambda oid: ("0xpkg::pool::Pool", raw_pool_fields)
+        ca.get_coin_metadata = lambda ct, url=None: {
+            "0x3::lbtc::LBTC": {"symbol": "LBTC", "decimals": 8},
+            "0x2::sui::SUI": {"symbol": "SUI", "decimals": 9},
+        }.get(ct, {})
+        lp = ca.CetusAdapter()._position_from_fields("0x" + "e" * 64, raw_fields, FakePriceEngine())
+    finally:
+        ca._get_object_json = real_obj
+        ca.get_coin_metadata = real_meta
+
+    assert lp.current_value_usd is not None and lp.current_value_usd > 0, lp.current_value_usd
+    assert lp.fees_note and "unpriced" in lp.fees_note, lp.fees_note
+    assert "LBTC" in lp.fees_note, lp.fees_note
+    assert "1 leg unpriced" in lp.fees_note, lp.fees_note
+    assert lp.raw_data.get("unpriced_count") == 1, lp.raw_data
+    print("✅ unpriced legs flagged with count suffix")
+
+
+def test_cetus_writer_construction():
+    from venue_adapters.cetus_writer import CetusWriter
+    from venue_adapters.cetus_adapter import CetusAdapter
+
+    # Writer is now real; it reports unavailable when the agent is not running.
+    w = CetusWriter()
+    assert w.VENUE_KEY == "cetus"
+
+    # Adapter exposes the writer.
+    adapter = CetusAdapter()
+    assert adapter.can_write() is True
+    writer = adapter.get_writer()
+    assert isinstance(writer, CetusWriter)
+    print("✅ CetusWriter construction + adapter can_write")
+
+
+def test_cetus_writer_ptb_shapes():
+    """Offline PTB shape test: verify collect/close build valid transaction bytes."""
+    import sui_ptb
+    import venue_adapters.cetus_writer as cw
+    from venue_adapters.cetus_writer import CetusWriter
+    from venue_adapters.venue_writer import CollectFeesParams
+
+    pos_id = "0x" + "e" * 64
+    pool_id = "0x" + "d" * 64
+    sender = "0x" + "a" * 64
+    coin_a = "0x" + "f" * 64 + "::coin::A"
+    coin_b = "0x2::sui::SUI"
+
+    pos_fields = {
+        "pool": pool_id,
+        "liquidity": "1234567890",
+        "tick_lower_index": {"bits": "60159"},
+        "tick_upper_index": {"bits": "112276"},
+        "coin_type_a": {"name": coin_a},
+        "coin_type_b": {"name": coin_b},
+        "fee_owed_a": "100000",
+        "fee_owed_b": "200000",
+    }
+    pool_fields = {
+        "current_sqrt_price": str(int(1.0001 ** (106800 / 2.0) * 2 ** 64)),
+        "current_tick_index": {"bits": "106800"},
+    }
+
+    gas_coin = {"object_id": "0x" + "b" * 64, "version": 1, "digest": "0x" + "c" * 64}
+
+    real_get_obj_cw = cw.sui_rpc
+    real_get_obj_sp = sui_ptb.sui_rpc
+    real_get_gas = cw.get_gas_coin_object
+    real_get_shared = cw.get_shared_object_initial_version
+    real_get_ref = cw.get_object_ref
+    real_agent_call = CetusWriter._agent_call
+    real_serialize = cw.serialize_transaction_data_v1
+    real_dry = cw.dry_run_transaction_block
+
+    def fake_rpc(url, method, params, timeout=30):
+        if method == "sui_getObject" and params[0] == pos_id:
+            return {"data": {
+                "objectId": pos_id,
+                "type": f"0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::position::Position<{coin_a}, {coin_b}>",
+                "content": {"fields": pos_fields},
+            }}
+        if method == "sui_getObject" and params[0] == pool_id:
+            return {"data": {"objectId": pool_id, "type": "0xpkg::pool::Pool", "content": {"fields": pool_fields}}}
+        raise AssertionError(f"unexpected RPC {method} {params}")
+
+    call_log: List[dict] = []
+
+    def fake_agent_call(self, cmd, **params):
+        call_log.append({"cmd": cmd, **params})
+        if cmd == "get_sui_address":
+            return {"address": sender}
+        if cmd == "sign_sui_ptb":
+            # _agent_call normally unwraps result["result"]; mimic that.
+            return {"tx_hash": "0x" + "1" * 64, "signature_b64": "dummy"}
+        raise AssertionError(f"unexpected agent cmd {cmd}")
+
+    def fake_serialize(tx):
+        # Capture the built PTB and return dummy bytes.
+        call_log.append({"_ptb": tx})
+        return b"\x00" * 32
+
+    try:
+        cw.sui_rpc = fake_rpc
+        sui_ptb.sui_rpc = fake_rpc
+        cw.get_gas_coin_object = lambda url, sender, amount_mist=50_000_000: gas_coin
+        cw.get_shared_object_initial_version = lambda url, oid: 1
+        cw.get_object_ref = lambda url, oid: {"object_id": oid, "version": 1, "digest": "0x" + "c" * 64}
+        CetusWriter._agent_call = fake_agent_call
+        cw.serialize_transaction_data_v1 = fake_serialize
+        cw.dry_run_transaction_block = lambda url, tx_b64: {"effects": {"status": {"status": "success"}}}
+
+        writer = CetusWriter()
+        tx_hash = writer.collect_fees(CollectFeesParams(account="N1", position_id=f"sui:{pos_id}"))
+        assert tx_hash == "0x" + "1" * 64, tx_hash
+        ptb = [c for c in call_log if "_ptb" in c][0]["_ptb"]
+        commands = ptb["programmable_transaction"]["commands"]
+        assert commands[0]["move_call"]["function"] == "collect_fee"
+        assert commands[-1]["kind"] == "transfer_objects"
+        call_log.clear()
+
+        tx_hashes = writer.close_position(f"sui:{pos_id}", "N1")
+        assert len(tx_hashes) == 1
+        ptb = [c for c in call_log if "_ptb" in c][0]["_ptb"]
+        commands = ptb["programmable_transaction"]["commands"]
+        funcs = [c["move_call"]["function"] for c in commands if c.get("kind") == "move_call"]
+        assert "remove_liquidity" in funcs
+        assert "collect_fee" in funcs
+        assert "close_position" in funcs
+    finally:
+        cw.sui_rpc = real_get_obj_cw
+        sui_ptb.sui_rpc = real_get_obj_sp
+        cw.get_gas_coin_object = real_get_gas
+        cw.get_shared_object_initial_version = real_get_shared
+        cw.get_object_ref = real_get_ref
+        CetusWriter._agent_call = real_agent_call
+        cw.serialize_transaction_data_v1 = real_serialize
+        cw.dry_run_transaction_block = real_dry
+
+    print("✅ CetusWriter collect/close PTB shapes")
 
 
 def test_cetus_can_handle():
@@ -260,6 +442,37 @@ def test_cetus_can_handle():
     assert a.can_handle("545983") is False
     assert a.can_handle("anything", chain_hint="cetus") is True
     print("✅ CetusAdapter.can_handle")
+
+
+def test_cetus_numeric_registry_id_message():
+    """Fix 4: numeric Cetus registry ids get a clear explanatory error."""
+    from venue_adapters.cetus_adapter import CetusAdapter
+    pos = CetusAdapter().fetch_position("24184", online_mode=True)
+    assert pos.error and "registry pool id" in pos.error, pos.error
+    assert "paste the position or pool object id" in pos.error, pos.error
+    print("✅ Cetus numeric registry id message")
+
+
+def test_cetus_pool_object_message():
+    """Fix 3: pasting a Pool object id explains the difference vs a Position."""
+    import venue_adapters.cetus_adapter as ca
+    pool_id = "0x" + "d" * 64
+
+    def fake_rpc(url, method, params, timeout=20):
+        if method == "sui_getObject" and params[0] == pool_id:
+            return {"data": {"objectId": pool_id, "type": "0x1eabed72c53feb3805120a081dc15963c204dc8d091542592abaf7a35689b2fb::pool::Pool<0x2::sui::SUI, 0x3::lbtc::LBTC>", "content": {"fields": {}}}}
+        raise AssertionError(f"unexpected {method} {params}")
+
+    real_rpc = ca._sui_rpc
+    try:
+        ca._sui_rpc = fake_rpc
+        pos = ca.CetusAdapter().fetch_position(pool_id, online_mode=True)
+    finally:
+        ca._sui_rpc = real_rpc
+
+    assert pos.error and "POOL object" in pos.error, pos.error
+    assert "POSITION object id" in pos.error, pos.error
+    print("✅ Cetus pool object message")
 
 
 def test_live_sui_cetus_e2e():
@@ -302,8 +515,13 @@ def main():
     test_cetus_decode()
     test_cetus_adapter_position()
     test_cetus_owned_objects_fixture()
-    test_cetus_writer_stub()
+    test_cetus_price_as_mapping()
+    test_cetus_honest_unpriced_total()
+    test_cetus_writer_construction()
+    test_cetus_writer_ptb_shapes()
     test_cetus_can_handle()
+    test_cetus_numeric_registry_id_message()
+    test_cetus_pool_object_message()
     test_live_sui_cetus_e2e()
     print("✅ ALL SUI + CETUS TESTS PASS")
     return 0

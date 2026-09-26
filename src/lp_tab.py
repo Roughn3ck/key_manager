@@ -271,24 +271,31 @@ class LPTab:
                     self._lp_update_saved_pools_count(addr)
 
     def _lp_on_account_change(self, choice: str):
-        """Handle account selection from dropdown."""
+        """Handle account selection from dropdown.
+
+        v5.3.21: do NOT prepopulate the address entry with the account's EVM
+        address — the address entry stays blank on tab/account switches.  The
+        account selection is authoritative; ``_lp_get_current_wallet_address``
+        resolves the right chain address directly from the vault when needed.
+        """
         if not choice or choice == "(no accounts)":
             return
         self.gui.lp_selected_account = choice
-        addr = self._lp_resolve_account_address(choice)
+        # Save config
+        if self.gui.key_manager and self.gui.current_password:
+            cfg = self.gui.key_manager.address_db.setdefault("config", {})
+            cfg["lp_selected_account"] = choice
+            self.gui.key_manager.save_encrypted_data(self.gui.current_password)
+        # Clear the address entry so the user does not see a stale EVM address.
         entry = self._lp_widgets.get("address_entry")
-        if entry and addr:
+        if entry:
             entry.delete(0, "end")
-            entry.insert(0, addr)
-            # Save config
-            if self.gui.key_manager and self.gui.current_password:
-                cfg = self.gui.key_manager.address_db.setdefault("config", {})
-                cfg["lp_selected_account"] = choice
-                self.gui.key_manager.save_encrypted_data(self.gui.current_password)
-            # Update saved-pools counter, button states, and auto-fetch
+        # Update saved-pools counter, button states, and auto-fetch
+        addr = self._lp_resolve_account_address(choice)
+        if addr:
             self._lp_update_saved_pools_count(addr)
-            self._lp_update_button_states()
-            self._lp_maybe_auto_fetch()
+        self._lp_update_button_states()
+        self._lp_maybe_auto_fetch()
 
     def _lp_resolve_account_address(self, account_name: str, prefer: str = "") -> str:
         """Resolve an account name to a wallet address.
@@ -470,19 +477,20 @@ class LPTab:
                         account_menu.configure(values=account_names)
                     if acct in account_names:
                         account_menu.set(acct)
+                        # v5.3.21: only update internal state; do not fill the address entry.
                         self._lp_on_account_change(acct)
         else:
-            # Address mode: update saved-pools counter if address entry has content
+            # Address mode: start blank; do not restore a stale address into the entry.
             entry = self._lp_widgets.get("address_entry")
             if entry:
-                addr = entry.get().strip()
-                if addr:
-                    self._lp_update_saved_pools_count(addr)
-        # Auto-load saved pool placeholders (all wallets, not filtered)
-        self._lp_render_all_saved_placeholders()
-        # Auto-fetch all saved pools in background (works even without a wallet address in the entry)
+                entry.delete(0, "end")
+        # Auto-fetch all saved pools in background (works even without a wallet address in the entry).
+        # This renders the honest "Fetching positions…" state immediately.
         if self.gui.online_mode:
             self._lp_auto_fetch_all_saved()
+        else:
+            # Auto-load saved pool placeholders (all wallets, not filtered) only when offline.
+            self._lp_render_all_saved_placeholders()
         # Ensure Scan Wallet / Fetch Position buttons are enabled after restore
         refresh_btn = self._lp_widgets.get("refresh_btn")
         if refresh_btn and self.gui.online_mode:
@@ -623,14 +631,22 @@ class LPTab:
         bsc_adapter = BSCAdapter()
 
         def _auto_fetch_thread():
+            # v5.3.21: heal stale bindings first so every pool resolves the right
+            # wallet/account.  This fixes labels like G6->G1 before any fetch.
+            self._lp_heal_saved_pool_bindings(all_saved)
+
             positions = list(extra_positions or [])
+            # Per-pool error map: position key -> human-readable error.
+            errors: Dict[str, str] = {}
+
             for entry in all_saved:
                 tid = entry.get("token_id")
                 venue = entry.get("venue", "HyperEVM")
-                # v5.3.19: prefer the record's bound account address; fall back
-                # to the legacy wallet_address.
-                wallet = (entry.get("account_address") or entry.get("wallet_address") or "")
+                # v5.3.21: resolve the wallet address from the pool's own chain,
+                # not from a stale top-bar or mismatched saved address.
+                wallet, chain, bound_account = self._lp_resolve_wallet_for_saved_pool(entry)
                 if not tid:
+                    print(f"[rescan] {venue}: skip — no token_id")
                     continue
                 # Convert token_id to int for EVM chains (stored as string in JSON)
                 if venue not in ("Orca", "orca", "Cetus", "cetus") and isinstance(tid, str):
@@ -638,43 +654,36 @@ class LPTab:
                         tid = int(tid)
                     except ValueError:
                         pass
+
+                prefix = self._lp_venue_prefix(venue)
+                pos_key = f"{venue}:{prefix}:{tid}"
+                short_wallet = f"{wallet[:10]}...{wallet[-6:]}" if len(wallet) > 16 else wallet
+                print(f"[rescan] {venue} #{tid}: chain={chain} wallet={short_wallet} bound={bound_account or '(unbound)'}")
+
+                pos = None
+                error = None
                 if venue == "HyperEVM":
                     try:
                         pos = hype_adapter.fetch_evm_position_by_token_id(
                             tid, self.gui.price_engine, wallet_address=wallet
                         )
-                        if pos and not pos.error:
-                            # Attach wallet address for display
-                            if wallet:
-                                pos.wallet_address = wallet
-                            positions.append(pos)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        error = str(e)
                 elif venue in ("Aerodrome", "aerodrome"):
                     try:
                         from venue_adapters.aerodrome_adapter import AerodromeAdapter
                         pos = AerodromeAdapter()._fetch_position_by_token_id(
                             tid, self.gui.price_engine, wallet_address=wallet
                         )
-                        if pos and not pos.error:
-                            # Attach wallet address for display
-                            if wallet:
-                                pos.wallet_address = wallet
-                            positions.append(pos)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        error = str(e)
                 elif venue in ("BSC", "bsc"):
                     try:
                         pos = bsc_adapter._fetch_position_by_token_id(
                             tid, self.gui.price_engine, wallet_address=wallet
                         )
-                        if pos and not pos.error:
-                            # Attach wallet address for display
-                            if wallet:
-                                pos.wallet_address = wallet
-                            positions.append(pos)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        error = str(e)
                 elif venue in ("Orca", "orca"):
                     # Orca: tid is the base58 position mint string
                     try:
@@ -682,12 +691,8 @@ class LPTab:
                         pos = OrcaAdapter()._fetch_by_position_mint(
                             tid, self.gui.price_engine, wallet_address=wallet
                         )
-                        if pos and not pos.error:
-                            if wallet:
-                                pos.wallet_address = wallet
-                            positions.append(pos)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        error = str(e)
                 elif venue in ("Cetus", "cetus"):
                     # Cetus (Sui): tid is the position object id (0x+64 hex)
                     try:
@@ -696,12 +701,22 @@ class LPTab:
                             tid, online_mode=True, price_engine=self.gui.price_engine,
                             wallet_address=wallet,
                         )
-                        if pos and not pos.error:
-                            if wallet:
-                                pos.wallet_address = wallet
-                            positions.append(pos)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        error = str(e)
+
+                if error:
+                    print(f"[rescan] {venue} #{tid}: ERROR {error}")
+                    errors[pos_key] = error
+                    continue
+                if pos and pos.error:
+                    print(f"[rescan] {venue} #{tid}: ERROR {pos.error}")
+                    errors[pos_key] = pos.error
+                    continue
+                if pos:
+                    if wallet:
+                        pos.wallet_address = wallet
+                    positions.append(pos)
+                    print(f"[rescan] {venue} #{tid}: OK pair={pos.pair}")
 
             # v5.2.2: Also check gauges for saved Aerodrome pools. The direct
             # token-id fetch above catches unstaked NFTs; this catches staked
@@ -730,14 +745,20 @@ class LPTab:
                 except Exception:
                     pass
 
-            self.gui.root.after(0, lambda: self._lp_on_loaded_all_saved(positions))
+            self.gui.root.after(0, lambda: self._lp_on_loaded_all_saved(positions, errors=errors))
+
 
         threading.Thread(target=_auto_fetch_thread, daemon=True).start()
 
-    def _lp_on_loaded_all_saved(self, positions):
-        """Render auto-fetched saved pools. Keep unfetched saved pools as placeholders."""
+    def _lp_on_loaded_all_saved(self, positions, errors: Optional[Dict[str, str]] = None):
+        """Render auto-fetched saved pools. Keep unfetched saved pools as placeholders.
+
+        v5.3.21: ``errors`` maps position key -> adapter/RPC error so each failed
+        saved pool shows its own failure reason instead of a generic "Fetch failed".
+        """
         if not positions:
             positions = []
+        errors = errors or {}
         scroll = self._lp_widgets.get("scroll")
         if scroll:
             for widget in scroll.winfo_children():
@@ -783,7 +804,10 @@ class LPTab:
             if already_rendered:
                 continue
             # Saved-pool placeholder: only this pool's card (closed ↔ failed).
-            self._lp_render_saved_placeholder(scroll, entry, prefix, tid, venue, pair)
+            # v5.3.21: pass the per-pool error so the user sees WHY this pool failed.
+            self._lp_render_saved_placeholder(
+                scroll, entry, prefix, tid, venue, pair,
+                error=errors.get(pos_key))
 
         status = self._lp_widgets.get("status_label")
         if status:
@@ -968,6 +992,10 @@ class LPTab:
         include_closed = include_closed_var.get() if include_closed_var else False
 
         def _fast_thread():
+            # v5.3.20: validate saved-pool bindings against on-chain owners before
+            # rendering, so stale top-bar-selector bindings cannot poison labels.
+            self._lp_heal_saved_pool_bindings(saved)
+
             positions = []
             for entry in saved:
                 tid = entry.get("token_id")
@@ -1086,6 +1114,8 @@ class LPTab:
                 # v5.1: Merge saved pools for this wallet (fast token-ID lookup)
                 saved = load_saved_pools(self.gui.key_manager.address_db, wallet_address=address)
                 print(f"[saved_pools] loaded {len(saved)} saved pools for {address}")
+                # v5.3.20: validate + self-heal saved-pool bindings before rendering.
+                self._lp_heal_saved_pool_bindings(saved)
                 if saved:
                     from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
                     hype_adapter = HyperliquidAdapter()
@@ -1208,6 +1238,33 @@ class LPTab:
                     except Exception as e:
                         print(f"[lp_fetch] Orca scan error for {sol_address[:8]}...: {e}")
 
+                # v5.3.20: Cetus scan routing — resolve a Sui address for the
+                # selected account and scan Cetus CLMM positions. Only run when
+                # the primary input is not already a Sui address (avoids double
+                # scanning when the user pasted a Sui address in Address mode).
+                sui_address = ""
+                cetus_skip_note = ""
+                primary_was_sui = bool(address and address.startswith("0x") and len(address) == 66)
+                if not primary_was_sui:
+                    account_name = self._lp_get_current_account_name()
+                    if account_name:
+                        sui_address = self._lp_resolve_account_address(account_name, prefer="sui")
+                        if not sui_address:
+                            cetus_skip_note = " · Cetus skipped (no Sui address for account)"
+
+                if sui_address:
+                    try:
+                        from venue_adapters.cetus_adapter import _is_sui_object_id, CetusAdapter
+                        if _is_sui_object_id(sui_address):
+                            cetus_positions = CetusAdapter().fetch_all_positions(
+                                sui_address, online_mode=True, price_engine=self.gui.price_engine
+                            )
+                            for pos in cetus_positions:
+                                if pos and not pos.error and pos not in positions:
+                                    positions.append(pos)
+                    except Exception as e:
+                        print(f"[lp_fetch] Cetus scan error for {sui_address[:8]}...: {e}")
+
                 # v5.2.2: If full scan found no Aerodrome positions, guide the
                 # user to manually enter their NFT token ID (staked positions
                 # are held by gauges and invisible to wallet scans).
@@ -1226,7 +1283,8 @@ class LPTab:
                         "4. Enter that number in the Position ID / NFT ID field and click Fetch Position",
                     ))
 
-                self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address, orca_skip_note))
+                skip_note = orca_skip_note + cetus_skip_note
+                self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address, skip_note))
             except OfflineError:
                 self.gui.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
             except Exception as e:
@@ -1278,26 +1336,34 @@ class LPTab:
         status = self._lp_widgets.get("status_label")
 
         # v5.3.4: Orca scan routing — resolve a Solana address first.
-        if venue_key == "orca":
-            from venue_adapters.orca_adapter import _is_solana_address
-            if not _is_solana_address(address or ""):
-                sol_address = ""
-                # Account mode: resolve the account's Solana address
+        # v5.3.20: Cetus scan routing — resolve a Sui address first.
+        if venue_key in ("orca", "cetus"):
+            if venue_key == "orca":
+                from venue_adapters.orca_adapter import _is_solana_address
+                is_chain_address = _is_solana_address
+                prefer = "solana"
+                chain_name = "Solana"
+            else:
+                from venue_adapters.cetus_adapter import _is_sui_object_id
+                is_chain_address = _is_sui_object_id
+                prefer = "sui"
+                chain_name = "Sui"
+            if not is_chain_address(address or ""):
+                chain_address = ""
                 account_name = self._lp_get_current_account_name()
                 if account_name:
-                    sol_address = self._lp_resolve_account_address(account_name, prefer="solana")
-                    if sol_address and _is_solana_address(sol_address):
-                        address = sol_address
-                if not (sol_address and _is_solana_address(sol_address)):
+                    chain_address = self._lp_resolve_account_address(account_name, prefer=prefer)
+                    if chain_address and is_chain_address(chain_address):
+                        address = chain_address
+                if not (chain_address and is_chain_address(chain_address)):
+                    skip_msg = (
+                        f"{chain_name} scan skipped — no {chain_name} address saved for this account. "
+                        f"Add the wallet's {chain_name} address to the vault, or scan the "
+                        f"{chain_name} address directly in Address mode."
+                    )
                     if status:
-                        status.configure(
-                            text="Orca scan skipped — no Solana address saved for this account. "
-                                 "Add the wallet's Solana address to the vault, or scan the "
-                                 "Solana address directly in Address mode.")
-                    self.gui.show_notification(
-                        "Orca scan skipped — no Solana address saved for this account. "
-                        "Add the wallet's Solana address to the vault, or scan the "
-                        "Solana address directly in Address mode.", error=True)
+                        status.configure(text=skip_msg)
+                    self.gui.show_notification(skip_msg, error=True)
                     return
         else:
             if status:
@@ -1314,6 +1380,8 @@ class LPTab:
                 )
                 # Merge saved pools for this wallet
                 saved = load_saved_pools(self.gui.key_manager.address_db, wallet_address=address)
+                # v5.3.20: validate + self-heal saved-pool bindings before rendering.
+                self._lp_heal_saved_pool_bindings(saved)
                 if saved:
                     from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
                     from venue_adapters.bsc_adapter import BSCAdapter
@@ -1414,7 +1482,10 @@ class LPTab:
                         "saved pools for fast future lookups.",
                     ))
 
-                self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address))
+                venue_label = venue_key.capitalize()
+                addr_short = address if len(address) <= 16 else f"{address[:10]}...{address[-6:]}"
+                empty_msg = f"No {venue_label} positions found for {addr_short}"
+                self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address, empty_message=empty_msg))
             except OfflineError:
                 self.gui.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
             except Exception as e:
@@ -1426,7 +1497,7 @@ class LPTab:
     # Saved-pool placeholder rendering (closed vs fetch-failed)
     # ------------------------------------------------------------------
 
-    def _lp_render_saved_placeholder(self, scroll, entry, prefix, tid, venue, pair, state="auto"):
+    def _lp_render_saved_placeholder(self, scroll, entry, prefix, tid, venue, pair, state="auto", error: Optional[str] = None):
         """Render a saved pool that did not resolve to a live card.
 
         Distinguishes a CLOSED position (account gone / is_position_empty) from a
@@ -1437,6 +1508,9 @@ class LPTab:
         v5.3.20: ``state="fetching"`` renders a NEUTRAL in-flight card (no
         on-chain closed check, no warning styling) while the saved-pool rescan
         runs — so a card never flashes "Fetch failed" before its refetch lands.
+
+        v5.3.21: ``error`` carries the adapter/RPC failure text for this pool so
+        the placeholder explains *why* it could not be fetched.
         """
         card = ctk.CTkFrame(scroll, corner_radius=10)
         card.pack(fill="x", pady=5, padx=5)
@@ -1469,7 +1543,13 @@ class LPTab:
                              text_color=("#cccc00", "#cccc00")).pack(anchor="w")
                 ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
                              font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-                ctk.CTkLabel(info, text="Fetch failed — live data unavailable. Click Scan Wallet to retry.",
+                # Keep the message concise; very long RPC traces would dominate the card.
+                if error:
+                    err_text = error if len(error) <= 120 else error[:117] + "..."
+                    label_text = f"Fetch failed: {err_text}"
+                else:
+                    label_text = "Fetch failed — live data unavailable. Click Scan Wallet to retry."
+                ctk.CTkLabel(info, text=label_text,
                              font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
 
         button_frame = ctk.CTkFrame(card, fg_color="transparent")
@@ -1555,6 +1635,203 @@ class LPTab:
                         return acct
         return "(unbound)"
 
+    def _lp_evm_rpc_call(self, chain_key: str, method: str, params: list) -> Any:
+        """Make a JSON-RPC call to the configured EVM endpoint for ``chain_key``."""
+        import json
+        import urllib.request
+        from rpc_config import load_rpc_config
+
+        cfg = load_rpc_config().get(chain_key, {})
+        urls = [cfg.get("url")] if cfg.get("url") else []
+        if cfg.get("fallback"):
+            urls.append(cfg["fallback"])
+        payload = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode("utf-8")
+        for url in urls:
+            if not url:
+                continue
+            try:
+                req = urllib.request.Request(
+                    url, data=payload,
+                    headers={"Content-Type": "application/json", "User-Agent": "ColdStack/5.3.20"},
+                )
+                with urllib.request.urlopen(req, timeout=15) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                if isinstance(data, dict) and "error" not in data:
+                    return data.get("result")
+            except Exception:
+                continue
+        return None
+
+    def _lp_read_evm_owner(self, token_id: int, venue_key: str) -> Optional[str]:
+        """Read ``ownerOf(token_id)`` for an EVM venue (Aerodrome/BSC/HyperEVM)."""
+        SELECTOR_OWNER_OF = "0x6352211e"
+
+        def _pad_int_to_64(value: int) -> str:
+            return hex(value)[2:].zfill(64)
+
+        data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
+        if venue_key == "aerodrome":
+            from venue_adapters.aerodrome_adapter import V3_POSITION_MANAGERS
+            chain_key = "base"
+            managers = V3_POSITION_MANAGERS
+        elif venue_key == "bsc":
+            from venue_adapters.bsc_adapter import V3_POSITION_MANAGERS
+            chain_key = "bsc"
+            managers = V3_POSITION_MANAGERS
+        elif venue_key == "hyperliquid":
+            from venue_adapters.hyperliquid_adapter import POSITION_MANAGER
+            chain_key = "hyperliquid_evm"
+            managers = [POSITION_MANAGER]
+        else:
+            return None
+
+        for pm in managers:
+            result = self._lp_evm_rpc_call(chain_key, "eth_call", [{"to": pm, "data": data}, "latest"])
+            if result and isinstance(result, str) and len(result) >= 66:
+                return "0x" + result[-40:]
+        return None
+
+    def _lp_read_sui_owner(self, object_id: str) -> Optional[str]:
+        """Read the ``AddressOwner`` of a Sui object via ``sui_getObject``."""
+        try:
+            import venue_adapters.cetus_adapter as ca
+            result = ca._sui_rpc(ca._rpc_urls()[0], "sui_getObject", [object_id, {"showOwner": True}])
+            data = (result or {}).get("data") or {}
+            owner = data.get("owner")
+            if isinstance(owner, dict):
+                return owner.get("AddressOwner") or owner.get("addressOwner")
+        except Exception:
+            pass
+        return None
+
+    def _lp_find_account_by_address(self, address: str, chain_hint: str = "") -> Optional[str]:
+        """Return the vault account name whose stored address matches ``address``.
+
+        Optional ``chain_hint`` ("evm", "sui", etc.) prefers an address whose
+        stored coin/chain contains the hint.
+        """
+        if not self.gui.key_manager or not address:
+            return None
+        address_l = address.lower()
+        hint = (chain_hint or "").lower()
+        accounts_data = self.gui.key_manager.address_db.get("accounts", {})
+        matches = []
+        for acct, data in accounts_data.items():
+            for addr in data.get("addresses", []):
+                if (addr.get("address", "") or "").lower() == address_l:
+                    coin = (addr.get("coin", "") or "").lower()
+                    chain = (addr.get("chain", "") or "").lower()
+                    if hint and (hint in coin or hint in chain):
+                        return acct
+                    matches.append(acct)
+        return matches[0] if matches else None
+
+    def _lp_heal_saved_pool_bindings(self, saved_entries: Optional[List[Dict[str, Any]]] = None) -> None:
+        """Validate saved-pool bindings against on-chain owners and self-heal mismatches.
+
+        v5.3.20: EVM venues use ``ownerOf(tokenId)``; Sui/Cetus uses
+        ``sui_getObject`` ``showOwner``. Wrong bindings are corrected and
+        persisted; the old binding is logged as the poison source.
+        """
+        if not self.gui.key_manager or not getattr(self.gui, "current_password", None):
+            return
+        if saved_entries is None:
+            saved_entries = load_saved_pools(self.gui.key_manager.address_db)
+
+        for entry in saved_entries:
+            if not isinstance(entry, dict):
+                continue
+            venue = (entry.get("venue") or "").strip()
+            token_id = entry.get("token_id")
+            if not venue or token_id is None:
+                continue
+
+            venue_key = venue.lower()
+            if venue_key in ("aerodrome", "base"):
+                venue_key = "aerodrome"
+            elif venue_key in ("hyperliquid", "hyperevm", "project x"):
+                venue_key = "hyperliquid"
+            elif venue_key == "bsc":
+                pass
+            elif venue_key in ("cetus", "sui"):
+                venue_key = "cetus"
+            else:
+                continue
+
+            owner = None
+            chain_hint = ""
+            display_id = token_id
+            if venue_key == "cetus":
+                obj_id = str(token_id)
+                if obj_id.startswith("sui:"):
+                    obj_id = obj_id.split(":", 1)[1]
+                owner = self._lp_read_sui_owner(obj_id)
+                chain_hint = "sui"
+            else:
+                try:
+                    tid = int(token_id)
+                except (ValueError, TypeError):
+                    continue
+                display_id = tid
+                owner = self._lp_read_evm_owner(tid, venue_key)
+                chain_hint = "evm"
+
+            if not owner:
+                continue
+
+            bound_account = (entry.get("account_name") or "").strip()
+            bound_address = (entry.get("account_address") or "").strip()
+
+            # Derive the currently-bound account to compare with the live owner.
+            derived_bound = ""
+            if bound_account:
+                derived_bound = self._lp_resolve_account_address(bound_account, prefer=chain_hint)
+                if not derived_bound and chain_hint == "evm":
+                    derived_bound = self._lp_resolve_account_address(bound_account)
+
+            if derived_bound and derived_bound.lower() == owner.lower():
+                # Binding is correct; ensure account_address is populated.
+                if not bound_address:
+                    try:
+                        update_saved_pool_binding(
+                            self.gui.key_manager.address_db, token_id, venue,
+                            bound_account, derived_bound, chain_hint)
+                        self.gui.key_manager.save_encrypted_data(self.gui.current_password)
+                    except Exception:
+                        pass
+                continue
+
+            # Binding mismatch or missing: resolve the real owner account.
+            correct_account = self._lp_find_account_by_address(owner, chain_hint=chain_hint)
+            if not correct_account and chain_hint == "evm":
+                correct_account = self._lp_find_account_by_address(owner)
+            if not correct_account:
+                continue
+
+            derived_correct = self._lp_resolve_account_address(correct_account, prefer=chain_hint)
+            if not derived_correct and chain_hint == "evm":
+                derived_correct = self._lp_resolve_account_address(correct_account)
+            if not derived_correct:
+                continue
+
+            print(
+                f"[binding-heal] {venue} #{display_id}: "
+                f"binding poisoned as '{bound_account or '(unbound)'}' -> '{correct_account}' "
+                f"(owner {owner})"
+            )
+            try:
+                update_saved_pool_binding(
+                    self.gui.key_manager.address_db, token_id, venue,
+                    correct_account, derived_correct, chain_hint)
+                note = (
+                    f"binding auto-healed: {bound_account or '(unbound)'} -> {correct_account} "
+                    f"at {datetime.now(timezone.utc).isoformat()}"
+                )
+                entry["binding_history"] = entry.get("binding_history", []) + [note]
+                self.gui.key_manager.save_encrypted_data(self.gui.current_password)
+            except Exception as e:
+                print(f"[binding-heal] failed to persist: {e}")
+
     def _lp_venue_prefix(self, venue: str) -> str:
         """Map a saved venue name to its position_id prefix (v5.3.20)."""
         v = (venue or "").lower()
@@ -1567,6 +1844,66 @@ class LPTab:
         if v in ("cetus", "sui"):
             return "sui"
         return "bsc"
+
+    def _lp_chain_for_saved_venue(self, venue: str) -> str:
+        """Return the on-chain family for a saved-pool venue."""
+        prefix = self._lp_venue_prefix(venue)
+        return {
+            "hyperevm": "evm",
+            "base": "evm",
+            "bsc": "evm",
+            "solana": "solana",
+            "sui": "sui",
+        }.get(prefix, "evm")
+
+    def _lp_address_matches_chain(self, address: str, chain: str) -> bool:
+        """True if ``address`` looks like a valid address for ``chain``."""
+        if not address:
+            return False
+        if chain == "evm":
+            return bool(address) and address.startswith("0x") and len(address) == 42
+        if chain == "sui":
+            from venue_adapters.cetus_adapter import _is_sui_object_id
+            return _is_sui_object_id(address)
+        if chain == "solana":
+            from venue_adapters.orca_adapter import _is_solana_address
+            return _is_solana_address(address)
+        return False
+
+    def _lp_resolve_wallet_for_saved_pool(self, entry: Dict[str, Any]) -> tuple:
+        """Resolve the wallet address and chain for a saved pool.
+
+        v5.3.21: the address must match the pool's venue/chain. If the saved
+        record's stored wallet/account_address is the wrong chain (e.g. an EVM
+        address saved for a Cetus pool), derive the correct chain address from
+        the bound account instead.
+
+        Returns:
+            Tuple of (wallet_address, chain, account_name). Address may be "".
+        """
+        if not isinstance(entry, dict):
+            return ("", "evm", "")
+        venue = (entry.get("venue") or "").strip()
+        chain = self._lp_chain_for_saved_venue(venue)
+        account_name = (entry.get("account_name") or "").strip()
+
+        # 1. Bound account: derive the correct chain address from it.
+        if account_name and self.gui.key_manager:
+            prefer = {"evm": "evm", "solana": "solana", "sui": "sui"}.get(chain, "")
+            derived = self._lp_resolve_account_address(account_name, prefer=prefer)
+            if derived and self._lp_address_matches_chain(derived, chain):
+                return (derived, chain, account_name)
+
+        # 2. Stored account_address / wallet_address if it matches the chain.
+        for key in ("account_address", "wallet_address"):
+            addr = (entry.get(key) or "").strip()
+            if self._lp_address_matches_chain(addr, chain):
+                return (addr, chain, account_name)
+
+        # 3. Fallback to the stored account_address so a test/stub key manager
+        #    (no derivable addresses) still works; production derives first.
+        fallback = (entry.get("account_address") or entry.get("wallet_address") or "").strip()
+        return (fallback, chain, account_name)
 
     def _lp_render_fetching_state(self, all_saved, extra_positions):
         """Immediate neutral state while the saved-pool rescan runs (v5.3.20).
@@ -1790,7 +2127,7 @@ class LPTab:
             pos_entry.insert(0, raw_id)
         self._lp_do_fetch_single()
 
-    def _lp_on_loaded(self, positions, address, orca_skip_note: str = ""):
+    def _lp_on_loaded(self, positions, address, orca_skip_note: str = "", empty_message: str = ""):
         """Render fetched LP positions as cards. Keep unfetched saved pools as placeholders.
 
         Args:
@@ -1798,6 +2135,8 @@ class LPTab:
             address: The wallet address that was scanned.
             orca_skip_note: Optional suffix explaining an Orca skip (v5.3.4),
                 e.g. " · Orca skipped (no Solana address for account)".
+            empty_message: Optional override for the empty-scan message (v5.3.20),
+                e.g. "No Cetus positions found for 0x0488…1b314".
         """
         scroll = self._lp_widgets.get("scroll")
         status = self._lp_widgets.get("status_label")
@@ -1815,7 +2154,11 @@ class LPTab:
                 seen.add(key)
                 unique_positions.append(pos)
         if not unique_positions:
-            ctk.CTkLabel(scroll, text=f"No LP positions found for {address}",
+            if empty_message:
+                label = empty_message
+            else:
+                label = f"No LP positions found for {address}"
+            ctk.CTkLabel(scroll, text=label,
                          font=ctk.CTkFont(size=13), text_color=("#555555", "gray60")).pack(pady=20)
         else:
             for pos in unique_positions:
@@ -2003,10 +2346,10 @@ class LPTab:
             position.position_id.startswith("hyperevm:") or
             position.position_id.startswith("bsc:") or
             position.position_id.startswith("base:") or
-            position.position_id.startswith("solana:")
+            position.position_id.startswith("solana:") or
+            position.position_id.startswith("sui:")
         )
-        # v5.3.20: Cetus (Sui) is read-only — no Collect/Compound/Close, but the
-        # pool can still be saved/removed (token_id is the Sui object id string).
+        # v5.3.21: Cetus (Sui) supports Collect/Compound/Close via PTBs.
         can_save_lp = can_manage_lp or bool(
             position.position_id and position.position_id.startswith("sui:")
         )
@@ -3147,11 +3490,43 @@ class LPTab:
             if derived_bound and derived_bound.lower() == owner.lower():
                 # Binding is correct and matches live owner.
                 return bound_account
-            # Binding exists but does not match the live owner.
-            raise RuntimeError(
-                f"record is bound to account '{bound_account}' ({bound_address}), but "
-                f"ownerOf({token_id}) on {owner_pm} = {owner} — refetch this position"
+            # v5.3.20: binding is stale — self-heal to the live owner instead of
+            # erroring, so a top-bar selector that was set to the wrong account
+            # at save-time cannot permanently poison the card label.
+            try:
+                owner_account = writer._resolve_owner_signer(token_id, owner_pm)
+            except RuntimeError as e:
+                msg = str(e)
+                if "matches no account" in msg or "derivable" in msg:
+                    raise RuntimeError(
+                        f"position owner {owner} matches no vault account on this chain — refetch"
+                    )
+                raise
+            derived_owner = writer._get_account_address(owner_account)
+            print(
+                f"[verify_ownership] {position.venue or 'Aerodrome'} #{token_id}: "
+                f"binding poisoned as '{bound_account}' -> '{owner_account}' "
+                f"(owner {owner})"
             )
+            if saved_entry and self.gui.current_password:
+                try:
+                    update_saved_pool_binding(
+                        self.gui.key_manager.address_db,
+                        token_id,
+                        (position.venue or "Aerodrome"),
+                        owner_account,
+                        derived_owner,
+                        "base",
+                    )
+                    note = (
+                        f"binding auto-healed (pre-flight): {bound_account} -> {owner_account} "
+                        f"at {datetime.now(timezone.utc).isoformat()}"
+                    )
+                    saved_entry["binding_history"] = saved_entry.get("binding_history", []) + [note]
+                    self.gui.key_manager.save_encrypted_data(self.gui.current_password)
+                except Exception as e:
+                    print(f"[verify_ownership] failed to persist binding (non-fatal): {e}")
+            return owner_account
 
         # 2. Legacy self-heal path: no binding. Resolve owner-anchored account and persist it.
         try:
@@ -3246,8 +3621,15 @@ class LPTab:
                     break
 
         # 3. Then the address entry / last fetched address.
+        # v5.3.21: pass a chain hint so Sui/Account mode resolves the Sui address.
+        prefer = ""
+        pid = getattr(position, "position_id", "") or ""
+        if pid.startswith("sui:"):
+            prefer = "sui"
+        elif pid.startswith("solana:"):
+            prefer = "solana"
         if not wallet_address:
-            wallet_address = self._lp_get_current_wallet_address()
+            wallet_address = self._lp_get_current_wallet_address(prefer=prefer)
         if not wallet_address:
             wallet_address = getattr(self, "_lp_last_fetched_address", "")
 
@@ -3285,7 +3667,8 @@ class LPTab:
             return None
         chain_hint = ""
         if expected_address.startswith("0x"):
-            chain_hint = "EVM"
+            # Sui addresses are 0x + 64 hex; EVM addresses are 0x + 40 hex.
+            chain_hint = "Sui" if len(expected_address) == 66 else "EVM"
         elif len(expected_address) > 30 and not expected_address.startswith("0x"):
             chain_hint = "Solana"
         try:
@@ -3954,10 +4337,12 @@ class LPTab:
                             "Liquidity still on-chain — retry Close or Collect Fees", error=True))
                         return
                     # v5.3.16: ledger auto-record — Aerodrome wired; others stub.
+                    # v5.3.21: Cetus (Sui) close recorder integration via last_close_result.
                     vkey = (venue_key or "").lower()
                     is_aero = vkey in ("aerodrome", "aerodrome/base") or "aerodrome" in vkey
-                    if is_aero:
-                        note = self._lp_record_close_for_writer(writer, venue="aerodrome")
+                    is_cetus = vkey == "cetus"
+                    if is_aero or is_cetus:
+                        note = self._lp_record_close_for_writer(writer, venue=venue_key)
                         burn_note = ""
                         # v5.3.18: if the writer burned the NFT, include it in the success note.
                         if getattr(writer, "last_burn_sig", None):

@@ -231,6 +231,28 @@ def _ed25519_sign(privkey_hex: str, message: bytes) -> bytes:
 
 
 # ============================================================================
+# Sui (Ed25519 + BLAKE2b) address derivation and PTB signing
+# Reuses the same Ed25519 private key material as Solana.
+# ============================================================================
+
+def _sui_address_from_ed25519(privkey_hex: str) -> str:
+    """Derive a Sui 0x-prefixed address from an Ed25519 private key (hex string).
+
+    Sui address = first 32 bytes of BLAKE2b-256(Ed25519 public key).
+    """
+    pubkey_bytes = _ed25519_privkey_to_pubkey(privkey_hex)
+    h = hashlib.blake2b(pubkey_bytes, digest_size=32)
+    return "0x" + h.hexdigest()
+
+
+def _sui_sign_transaction(privkey_hex: str, tx_bytes: bytes) -> bytes:
+    """Sign Sui transaction bytes with the Sui intent prefix."""
+    # Sui intent: [IntentScope::TransactionData=0, Version::V0=0, AppId::Sui=0]
+    intent = bytes([0, 0, 0])
+    return _ed25519_sign(privkey_hex, intent + tx_bytes)
+
+
+# ============================================================================
 # Solana base58 + signed transaction construction
 # (base58 encoding imported from ed25519_utils)
 # ============================================================================
@@ -621,7 +643,8 @@ class KeyManagerAgent:
                 "account_count": len(accounts),
                 "address_count": sum(len(a.get("addresses", [])) for a in accounts.values()),
                 "supports": ["EVM secp256k1 (legacy + EIP-1559)",
-                             "Solana Ed25519 (transaction signing)"],
+                             "Solana Ed25519 (transaction signing)",
+                             "Sui Ed25519 PTB signing"],
             }
         }
 
@@ -728,10 +751,22 @@ class KeyManagerAgent:
         if len(matches) == 1:
             return matches[0]["key"]
 
+        # v5.3.21: Sui reuses the same Ed25519 key material as Solana, so a
+        # Solana-derived key can sign Sui PTBs.  When the requested chain is
+        # Sui and there is a Sui-specific entry, prefer it; otherwise fall back
+        # to the Solana key selection logic.
+        if chain.upper() == "SUI":
+            sui_specific = [m for m in matches if "SUI" in m.get("chain", "").upper()]
+            if sui_specific:
+                matches = sui_specific
+            else:
+                # Fall through to Solana disambiguation below.
+                pass
+
         # v5.2.5: When multiple Solana keys match, prefer those with a valid
         # SLIP-0010 derivation path (m/44'/501'/...'/') over legacy keys that
         # may have been derived with the wrong BIP44 path (5 levels, unhardened)
-        if chain.upper() == "SOLANA" and len(matches) > 1:
+        if chain.upper() in ("SOLANA", "SUI") and len(matches) > 1:
             slip10_matches = [m for m in matches if m.get("derivation_path", "").startswith("m/44'/501'/")]
             if slip10_matches:
                 matches = slip10_matches
@@ -1267,6 +1302,141 @@ class KeyManagerAgent:
         except Exception as e:
             return {"status": "error", "error": str(e)}
 
+    # ------------------------------------------------------------------
+    # Sui PTB operations
+    # ------------------------------------------------------------------
+
+    def _sui_rpc(self, rpc_url: str, method: str, params: list) -> Optional[Any]:
+        """Make a single Sui JSON-RPC call.  Returns the 'result' field or an error dict."""
+        import urllib.request
+        payload = json.dumps({
+            "jsonrpc": "2.0", "method": method, "params": params, "id": 1,
+        }).encode()
+        req = urllib.request.Request(
+            rpc_url, data=payload,
+            headers={"Content-Type": "application/json", "User-Agent": "key-manager-agent/1.0"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if isinstance(data, dict) and data.get("error"):
+                    return {"_rpc_error": data["error"]}
+                return data.get("result")
+        except Exception as e:
+            return {"_rpc_error": str(e)}
+
+    @staticmethod
+    def _format_sui_rpc_error(err: Any) -> str:
+        """Render a Sui JSON-RPC error, including simulation logs when present."""
+        if isinstance(err, dict):
+            parts = [f"code={err.get('code')}", f"message={err.get('message')}"]
+            data = err.get("data")
+            if isinstance(data, dict):
+                if data.get("err") is not None:
+                    parts.append(f"err={data['err']}")
+                logs = data.get("logs")
+                if isinstance(logs, list) and logs:
+                    parts.append("logs:")
+                    parts.extend(f"  {line}" for line in logs)
+            return "Sui RPC error: " + "; ".join(parts)
+        return f"Sui RPC error: {err}"
+
+    def get_sui_address(self, account: str) -> dict:
+        """Get the Sui address for an account.  Reuses the Solana Ed25519 key."""
+        self._check_session()
+        try:
+            privkey = self._get_private_key(account, chain="Solana", chain_id=None)
+            return {"status": "ok", "result": {"address": _sui_address_from_ed25519(privkey)}}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def sign_sui_ptb(self, account: str, tx_bytes_b64: str,
+                     broadcast: bool = False, rpc_url: Optional[str] = None,
+                     execute_options: Optional[Dict[str, Any]] = None) -> dict:
+        """Sign a Sui Programmable Transaction Block.
+
+        Args:
+            account: Vault account name.
+            tx_bytes_b64: Base64-encoded BCS TransactionData bytes.
+            broadcast: If True, also submit via sui_executeTransactionBlock.
+            rpc_url: Sui RPC endpoint (required when broadcast=True).
+            execute_options: Options passed to sui_executeTransactionBlock.
+
+        Returns:
+            {"status": "ok", "result": {"signature_b64", "sender", "tx_bytes_b64",
+             optionally "tx_hash" and "effects"}} or an error.
+        """
+        self._check_session()
+        try:
+            tx_bytes = base64.b64decode(tx_bytes_b64)
+            privkey = self._get_private_key(account, chain="Solana", chain_id=None)
+            sender = _sui_address_from_ed25519(privkey)
+            sig_bytes = _sui_sign_transaction(privkey, tx_bytes)
+            signature_b64 = base64.b64encode(sig_bytes).decode()
+            result: Dict[str, Any] = {
+                "signature_b64": signature_b64,
+                "sender": sender,
+                "tx_bytes_b64": tx_bytes_b64,
+            }
+            if broadcast:
+                if not rpc_url:
+                    return {"status": "error", "error": "rpc_url required for broadcast"}
+                opts = execute_options or {
+                    "showEffects": True,
+                    "showEvents": False,
+                    "showObjectChanges": False,
+                    "showBalanceChanges": False,
+                }
+                rpc_result = self._sui_rpc(
+                    rpc_url,
+                    "sui_executeTransactionBlock",
+                    [tx_bytes_b64, [signature_b64], opts],
+                )
+                if isinstance(rpc_result, dict) and "_rpc_error" in rpc_result:
+                    return {"status": "error",
+                            "error": self._format_sui_rpc_error(rpc_result["_rpc_error"])}
+                if isinstance(rpc_result, dict):
+                    digest = (rpc_result.get("transaction") or {}).get("digest")
+                    result["tx_hash"] = digest
+                    result["effects"] = rpc_result.get("effects")
+                    result["raw_result"] = rpc_result
+                else:
+                    return {"status": "error",
+                            "error": f"Unexpected executeTransactionBlock result: {rpc_result!r}"}
+            return {"status": "ok", "result": result}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
+    def broadcast_sui_ptb(self, tx_bytes_b64: str, signature_b64: str,
+                          rpc_url: Optional[str] = None,
+                          execute_options: Optional[Dict[str, Any]] = None) -> dict:
+        """Broadcast a pre-signed Sui PTB.  The agent does not re-sign."""
+        self._check_session()
+        try:
+            if not rpc_url:
+                rpc_url = "https://sui-rpc.publicnode.com"
+            opts = execute_options or {
+                "showEffects": True,
+                "showEvents": False,
+                "showObjectChanges": False,
+                "showBalanceChanges": False,
+            }
+            rpc_result = self._sui_rpc(
+                rpc_url,
+                "sui_executeTransactionBlock",
+                [tx_bytes_b64, [signature_b64], opts],
+            )
+            if isinstance(rpc_result, dict) and "_rpc_error" in rpc_result:
+                return {"status": "error",
+                        "error": self._format_sui_rpc_error(rpc_result["_rpc_error"])}
+            if isinstance(rpc_result, dict):
+                digest = (rpc_result.get("transaction") or {}).get("digest")
+                return {"status": "ok", "result": {"tx_hash": digest, "raw_result": rpc_result}}
+            return {"status": "error",
+                    "error": f"Unexpected executeTransactionBlock result: {rpc_result!r}"}
+        except Exception as e:
+            return {"status": "error", "error": str(e)}
+
     @staticmethod
     def _encode_eip712_type(type_name: str, types: Dict[str, List[Dict[str, str]]]) -> str:
         """Build the EIP-712 type string for a struct (e.g. 'SpotSend(...)' )."""
@@ -1481,6 +1651,23 @@ class KeyManagerAgent:
             return self.broadcast_raw_solana_tx(
                 cmd.get("signed_tx_b64", ""),
                 cmd.get("rpc_url"),
+            )
+        elif action == "get_sui_address":
+            return self.get_sui_address(cmd["account"])
+        elif action == "sign_sui_ptb":
+            return self.sign_sui_ptb(
+                account=cmd["account"],
+                tx_bytes_b64=cmd.get("tx_bytes_b64", ""),
+                broadcast=bool(cmd.get("broadcast", False)),
+                rpc_url=cmd.get("rpc_url"),
+                execute_options=cmd.get("execute_options"),
+            )
+        elif action == "broadcast_sui_ptb":
+            return self.broadcast_sui_ptb(
+                tx_bytes_b64=cmd.get("tx_bytes_b64", ""),
+                signature_b64=cmd.get("signature_b64", ""),
+                rpc_url=cmd.get("rpc_url"),
+                execute_options=cmd.get("execute_options"),
             )
         elif action == "sign_typed_data":
             return self.sign_typed_data(
