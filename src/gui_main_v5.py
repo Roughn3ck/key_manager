@@ -6,7 +6,7 @@ Version: v5.3.26 (September 2026) - Ledger-seeded Aerodrome + exe-local portfoli
 """
 
 # Single source of truth for version — update this when bumping versions
-VERSION = "5.3.26"
+VERSION = "5.3.27"
 import sys
 import os
 

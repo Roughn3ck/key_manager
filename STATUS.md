@@ -1,8 +1,42 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.26 (Sui/Cetus venue + staked-position discovery + ledger-seeded scans + close-loop hardening) — released 2026-09-29
+**Current Version:** v5.3.27 (Save in place — no rescan on save) — in progress 2026-09-29
 **Last Updated:** 2026-09-29
+
+---
+
+## v5.3.27 - Save in place: no full wallet rescan on Save (2026-09-29, in progress)
+
+### Summary
+Previously, clicking **Save** on a fetched position triggered a full wallet rescan (`self._lp_do_fetch()` in the Solana/Sui branch) that flashed the panel and reloaded every saved pool. Now Save persists the saved-pool record (with its v5.3.18 account binding) and re-renders only the affected card in place, swapping the **Save** button for **Remove**. Zero network calls; no "Fetching…" flash.
+
+### Changes
+
+#### 1. `_lp_save_pool` split from fetch-refresh path
+- `src/lp_tab.py`:
+  - Removed `self._lp_do_fetch()` from the Solana/Sui save branch.
+  - Refactored EVM and Solana/Sui branches to share a single `_persist()` helper that checks for duplicates, calls `save_pool()` with account binding, re-encrypts the vault, and returns success/failure without any adapter calls.
+  - After persistence, `_lp_update_card_saved_state(position)` destroys and re-renders only that card in place so the Save button becomes Remove.
+  - Added subtle confirmation: status label shows `Saved <pair> ✓` in green.
+
+#### 2. Existing fetch-refresh behavior preserved
+- Fetching a position still uses `_lp_refresh_after_single()` and `_lp_auto_fetch_all_saved()` to refresh saved-pool cards.
+- Explicit **Scan Wallet** and platform-specific scans keep the existing rescan machinery.
+
+### Tests + Files
+- New `test_save_pool_no_rescan.py`:
+  - Renders a card, clicks Save, and asserts:
+    - `_lp_do_fetch()`, `_lp_auto_fetch_all_saved()`, `_lp_refresh_position_fees()` are never called.
+    - saved-pools record is persisted with token_id/venue/pair/wallet_address and account binding.
+    - vault is re-encrypted.
+    - card is re-rendered in place (new widget, old widget destroyed).
+    - status label shows `Saved ... ✓`.
+  - Second test: saving an already-saved pool is a no-op (no render, no rescan).
+- Updated `src/gui_main_v5.py`: lock-screen `VERSION` updated to `"5.3.27"`.
+- Updated `src/lp_tab.py`.
+- Full test suite run: all `test_*.py` files PASS.
+- No EXE build, no release version bump, no git push.
 
 ---
 

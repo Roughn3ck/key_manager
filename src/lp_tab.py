@@ -2620,50 +2620,75 @@ class LPTab:
                          font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
 
     def _lp_save_pool(self, position):
-        """Save the current position's public identifiers to saved_pools."""
+        """Save the current position's public identifiers to saved_pools.
+
+        v5.3.27: Save is now a pure persistence + in-place card refresh. It does
+        NOT trigger a full wallet rescan — the data is already in memory on the
+        card. After saving, the same card is re-rendered so the Save button becomes
+        a Remove button.
+        """
         if not position.position_id:
             return
-        if position.position_id.startswith("solana:") or position.position_id.startswith("sui:"):
-            # Orca / Cetus positions: token_id is the base58 mint (Orca) or the
-            # Sui position object id (Cetus) — both stored as strings.
-            is_sui = position.position_id.startswith("sui:")
-            mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
-            venue = position.venue or ("Cetus" if is_sui else "Orca")
-            wallet_address = self._lp_get_current_wallet_address()
-            if not wallet_address:
-                wallet_address = getattr(self, "_lp_last_fetched_address", "")
-            if not wallet_address:
-                account_name = self._lp_get_current_account_name()
-                if account_name:
-                    wallet_address = self._lp_resolve_account_address(
-                        account_name, prefer=("sui" if is_sui else "solana"))
-            if not wallet_address:
-                self.gui.show_notification("Could not resolve wallet address", error=True)
-                return
-            if is_pool_saved(self.gui.key_manager.address_db, mint, venue):
-                self.gui.show_notification("Pool already saved")
-                return
-            pool_address = getattr(position, "pool_id", "") or ""
-            # v5.3.18: bind the owning vault account to the saved pool.
+
+        # Common helpers -----------------------------------------------------
+        def _persist(wallet_address, token_id, venue, pool_address, pair):
+            if is_pool_saved(self.gui.key_manager.address_db, token_id, venue):
+                return False, "Pool already saved"
             account_name, account_chain = self._lp_current_account_binding()
+            print(f"[saved_pools] saving token_id={token_id} venue={venue} to address_db id={id(self.gui.key_manager.address_db)}")
             ok = save_pool(
                 self.gui.key_manager.address_db,
                 wallet_address=wallet_address,
-                token_id=mint,         # base58 / Sui object id — saved_pools accepts int or str
+                token_id=token_id,
                 venue=venue,
                 pool_address=pool_address,
-                pair=position.pair or "",
+                pair=pair,
                 account_name=account_name,
                 account_chain=account_chain,
             )
             if ok and self.gui.current_password:
                 ok = self.gui.key_manager.save_encrypted_data(self.gui.current_password)
             if ok:
-                self.gui.show_notification(f"Saved {position.pair} ({venue})")
-                self._lp_do_fetch()
-            else:
-                self.gui.show_notification("Failed to save pool", error=True)
+                print(f"[saved_pools] vault saved, saved_pools count={len(self.gui.key_manager.address_db.get('saved_pools', []))}")
+                return True, None
+            return False, "Failed to save pool"
+
+        def _resolve_wallet_address(prefer_chain):
+            wallet_address = self._lp_get_current_wallet_address()
+            if not wallet_address:
+                wallet_address = getattr(self, "_lp_last_fetched_address", "")
+            if not wallet_address:
+                account_name = self._lp_get_current_account_name()
+                if account_name:
+                    wallet_address = self._lp_resolve_account_address(account_name, prefer=prefer_chain)
+            return wallet_address
+
+        def _update_card_after_save():
+            """Re-render the single card in place so Save becomes Remove."""
+            self._lp_update_card_saved_state(position)
+            status = self._lp_widgets.get("status_label")
+            if status:
+                status.configure(text=f"Saved {position.pair} ✓", text_color=("#2f9e44", "#51cf94"))
+
+        # Solana / Sui branch -------------------------------------------------
+        if position.position_id.startswith("solana:") or position.position_id.startswith("sui:"):
+            is_sui = position.position_id.startswith("sui:")
+            mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
+            venue = position.venue or ("Cetus" if is_sui else "Orca")
+            wallet_address = _resolve_wallet_address("sui" if is_sui else "solana")
+            if not wallet_address:
+                self.gui.show_notification("Could not resolve wallet address", error=True)
+                return
+            pool_address = getattr(position, "pool_id", "") or ""
+            ok, err = _persist(wallet_address, mint, venue, pool_address, position.pair or "")
+            if not ok:
+                self.gui.show_notification(err or "Failed to save pool", error=True)
+                return
+            self.gui.show_notification(f"Saved {position.pair} ({venue})")
+            self.gui.root.after(0, _update_card_after_save)
             return
+
+        # EVM branch (HyperEVM / BSC / BASE) ----------------------------------
         if not (
             position.position_id.startswith("hyperevm:") or
             position.position_id.startswith("bsc:") or
@@ -2671,20 +2696,15 @@ class LPTab:
         ):
             self.gui.show_notification("Only HyperEVM, BSC and BASE positions can be saved")
             return
-        # Extract token_id from "<prefix>:<token_id>"
         try:
             token_id = int(position.position_id.split(":", 1)[1])
         except (ValueError, IndexError):
             self.gui.show_notification("Could not parse token ID", error=True)
             return
-        # Resolve wallet address from the current selector mode, falling back
-        # to the address captured at fetch time if the widget state changed.
-        selector = self._lp_widgets.get("selector_menu")
-        mode = selector.get() if selector else "Address"
-        wallet_address = self._lp_get_current_wallet_address()
+        wallet_address = _resolve_wallet_address("evm")
         if not wallet_address:
-            wallet_address = getattr(self, "_lp_last_fetched_address", "")
-        if not wallet_address:
+            selector = self._lp_widgets.get("selector_menu")
+            mode = selector.get() if selector else "Address"
             if mode == "Account":
                 self.gui.show_notification("Select an account first", error=True)
             else:
@@ -2693,23 +2713,30 @@ class LPTab:
         pool_address = position.pool_id or ""
         pair = position.pair or ""
         venue = position.venue or "HyperEVM"
-        # v5.3.18: bind the owning vault account to the saved pool.
-        account_name, account_chain = self._lp_current_account_binding()
-        print(f"[saved_pools] saving token_id={token_id} to address_db id={id(self.gui.key_manager.address_db)}")
-        ok = save_pool(
-            self.gui.key_manager.address_db, wallet_address, token_id, venue,
-            pool_address, pair,
-            account_name=account_name,
-            account_chain=account_chain,
-        )
-        if ok:
-            # Re-encrypt the vault to persist the saved pool
-            ok = self.gui.key_manager.save_encrypted_data(self.gui.current_password)
-            print(f"[saved_pools] vault saved, saved_pools count={len(self.gui.key_manager.address_db.get('saved_pools', []))}")
-        if ok:
-            self.gui.show_notification(f"Pool saved: {pair} (#{token_id})")
-        else:
-            self.gui.show_notification("Failed to save pool", error=True)
+        ok, err = _persist(wallet_address, token_id, venue, pool_address, pair)
+        if not ok:
+            self.gui.show_notification(err or "Failed to save pool", error=True)
+            return
+        self.gui.show_notification(f"Pool saved: {pair} (#{token_id})")
+        self.gui.root.after(0, _update_card_after_save)
+
+    def _lp_update_card_saved_state(self, position):
+        """Re-render a single position card in place after Save/Remove.
+
+        Keeps all other cards untouched and makes no network calls.
+        """
+        cards = self._lp_widgets.get("position_cards", {})
+        key = f"{position.venue}:{position.position_id}"
+        card = cards.get(key)
+        if not card:
+            card = cards.get(position.position_id)
+        if not card:
+            return
+        card.destroy()
+        cards.pop(key, None)
+        cards.pop(position.position_id, None)
+        self._lp_render_card(position)
+        self._lp_update_saved_pools_count("")
 
     def _lp_render_saved_placeholders(self, address: str):
         """Render placeholder cards for saved pools immediately from cache.
