@@ -648,6 +648,24 @@ class KeyManagerAgent:
             }
         }
 
+    def reload_vault(self, password: str) -> dict:
+        """Re-read the vault file into the agent's in-memory session.
+
+        Called after the GUI adds/derives a new key so the agent's key index is
+        kept in sync with the on-disk vault without requiring a full lock/unlock.
+        """
+        if not self.vault_path.exists():
+            return {"status": "error", "error": f"Vault file not found: {self.vault_path}"}
+        try:
+            with open(self.vault_path, 'r', newline='') as f:
+                encrypted_json = f.read()
+            self.vault_data = self.crypto.decrypt_json(encrypted_json, password)
+            self.unlocked = True
+            self.last_activity = time.time()
+            return {"status": "ok", "result": "Vault reloaded"}
+        except Exception as e:
+            return {"status": "error", "error": f"Failed to reload vault: {str(e)}"}
+
     def list_accounts(self) -> dict:
         """List all accounts and their addresses (no private keys)."""
         self._check_session()
@@ -715,11 +733,43 @@ class KeyManagerAgent:
             return non_hype[0]
         return items[0] if items else None
 
+    @staticmethod
+    def _chain_matches(requested_chain: str, entry_chain: str) -> bool:
+        """True if ``entry_chain`` satisfies a request for ``requested_chain``.
+
+        Normalizes common labels so a key saved as "SOL (Solana)", "Solana",
+        or just "SOL" is found when the caller asks for "Solana".  Sui is
+        treated as a superset of Solana key material because Sui PTBs reuse
+        the same Ed25519 private key.
+        """
+        req = (requested_chain or "").strip().upper()
+        ent = (entry_chain or "").strip().upper()
+        if not req or not ent:
+            return req == ent  # both empty -> True, otherwise empty request matches nothing
+
+        # Direct substring match (legacy behaviour)
+        if req in ent or ent in req:
+            return True
+
+        # Normalize chain families
+        SOLANA_ALIASES = {"SOL", "SOLANA", "SOL (SOLANA)"}
+        SUI_ALIASES = {"SUI", "SUI (SUI)"}
+        EVM_ALIASES = {"EVM", "ETHEREUM", "ETH", "BASE", "ARBITRUM", "HYPE", "HYPEREVM", "HYPERLIQUID"}
+
+        if req in SOLANA_ALIASES and ent in SOLANA_ALIASES:
+            return True
+        if req in SUI_ALIASES:
+            if ent in SUI_ALIASES or ent in SOLANA_ALIASES:
+                return True
+        if req in EVM_ALIASES and ent in EVM_ALIASES:
+            return True
+        return False
+
     def _get_private_key(self, account: str, chain: str = "EVM", chain_id: int = None) -> str:
         """Get private key for an account/chain. Internal only — never returned to caller.
 
-        When multiple keys match the chain substring (e.g. both "EVM (Ethereum)"
-        and "Hyperliquid (HL1 & HyperEVM)" match chain="EVM"), prefer the most
+        When multiple keys match the chain (e.g. both "EVM (Ethereum)" and
+        "Hyperliquid (HL1 & HyperEVM)" match chain="EVM"), prefer the most
         specific match. chain_id is used to disambiguate EVM keys:
         - 999 (HyperEVM) prefers HyperEVM/Hyperliquid/HYPE keys
         - 8453 (Base) / 1 (Ethereum) prefer non-HyperEVM keys
@@ -732,11 +782,9 @@ class KeyManagerAgent:
         if isinstance(keys, str):
             return keys
         # List of {chain, key} dicts
-        chain_upper = chain.upper()
         matches = []
         for entry in keys:
-            entry_chain = entry.get("chain", "").upper()
-            if chain_upper in entry_chain or entry_chain in chain_upper:
+            if self._chain_matches(chain, entry.get("chain", "")):
                 matches.append(entry)
 
         if not matches:
@@ -751,21 +799,15 @@ class KeyManagerAgent:
         if len(matches) == 1:
             return matches[0]["key"]
 
-        # v5.3.21: Sui reuses the same Ed25519 key material as Solana, so a
-        # Solana-derived key can sign Sui PTBs.  When the requested chain is
-        # Sui and there is a Sui-specific entry, prefer it; otherwise fall back
-        # to the Solana key selection logic.
+        # v5.3.27c: When the requested chain is Sui, prefer a Sui-specific entry;
+        # otherwise fall through to Solana disambiguation below.
         if chain.upper() == "SUI":
-            sui_specific = [m for m in matches if "SUI" in m.get("chain", "").upper()]
+            sui_specific = [m for m in matches if self._chain_matches("Sui", m.get("chain", ""))]
             if sui_specific:
                 matches = sui_specific
-            else:
-                # Fall through to Solana disambiguation below.
-                pass
 
-        # v5.2.5: When multiple Solana keys match, prefer those with a valid
-        # SLIP-0010 derivation path (m/44'/501'/...'/') over legacy keys that
-        # may have been derived with the wrong BIP44 path (5 levels, unhardened)
+        # v5.2.5: When multiple Solana/Sui keys match, prefer those with a valid
+        # SLIP-0010 derivation path (m/44'/501'/...'/') over legacy keys.
         if chain.upper() in ("SOLANA", "SUI") and len(matches) > 1:
             slip10_matches = [m for m in matches if m.get("derivation_path", "").startswith("m/44'/501'/")]
             if slip10_matches:
@@ -1681,6 +1723,8 @@ class KeyManagerAgent:
             self.unlocked = False
             self.vault_data = {}
             return {"status": "ok", "result": "Vault locked"}
+        elif action == "reload_vault":
+            return self.reload_vault(cmd.get("password", ""))
         else:
             return {"status": "error", "error": f"Unknown command: {action}"}
 

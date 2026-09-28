@@ -62,8 +62,26 @@ Iterative hardening release: no new functionality, just fixes for panel-persiste
 
 #### 7. Address-card lambda regression test
 - New `test_address_card_lambda.py`:
-  - Builds a `ColdStackGUI` address card and generates synthetic `<Enter>`, `<Leave>`, and `<Button-1>` events to ensure every event handler accepts the event argument.
+  - Builds a `ColdStackGUI` address card and generates synthetic `\u003cEnter\u003e`, `\u003cLeave\u003e`, and `\u003cButton-1\u003e` events to ensure every event handler accepts the event argument.
   - Locks down the `missing 1 required positional argument: 'e'` crash class.
+
+#### 8. Derive Addresses refreshes the live key-manager session
+- `src/key_manager_agent.py`:
+  - Added `reload_vault(password)` and a `reload_vault` command so the running agent can re-read the vault file without lock/unlock.
+- `src/gui_main_v5.py`:
+  - Added `refresh_key_manager_session()`: reloads the GUI's `address_db` from disk and posts `reload_vault` to the agent (embedded or external).
+- `src/account_dialogs.py`:
+  - Calls `refresh_key_manager_session()` after every vault-changing operation: `do_save()` in `show_derivation_dialog`, `_save_derived_to_account()`, and manual private-key add in `show_add_private_key_dialog`.
+
+#### 9. Legacy Solana/Sui key recognition audit
+- `src/key_manager_agent.py`:
+  - New `_chain_matches()` normalizes chain labels so keys stored as `SOL`, `Solana`, `SOL (Solana)`, or empty chain are found when the caller asks for `Solana`.
+  - Sui requests also match Solana-derived keys (Sui PTBs reuse the same Ed25519 material).
+
+#### 10. Precise Orca/Cetus missing-key card errors
+- `src/lp_tab.py`:
+  - `_lp_fetch_all_saved_entries()` now translates raw agent/adapter errors like "No private keys found" into actionable card text: `account G3 has no derived Solana key — derive it in the vault first` / Sui equivalent.
+  - Empty-wallet cases also get a clear `No Solana/Sui wallet address for this pool...` message.
 
 ### Tests + Files
 - New `test_save_pool_no_rescan.py`:

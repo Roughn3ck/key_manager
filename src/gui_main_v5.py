@@ -89,6 +89,8 @@ from datetime import datetime, timedelta, timezone
 import threading
 import time
 import json
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 import atexit
@@ -2769,6 +2771,45 @@ class ColdStackGUI:
     def _save_derived_to_account(self, account_name, chain, data, status_label):
         """Delegate to account_dialogs."""
         return _save_derived_to_account(self, account_name, chain, data, status_label)
+
+    def refresh_key_manager_session(self):
+        """Refresh the live key-manager agent session after vault changes.
+
+        Derive Addresses / add private key update the vault file, but a running
+        key_manager_agent process (embedded or external) keeps its own decrypted
+        vault_data in memory.  Re-load the GUI's in-memory address_db from disk
+        and ask the agent to reload its vault so the LP tab can resolve wallets
+        without a lock/unlock cycle.
+        """
+        if not self.current_password:
+            return
+        # Re-sync the GUI's in-memory address_db from the on-disk vault.
+        try:
+            if self.key_manager:
+                self.key_manager.load_encrypted_data(self.current_password)
+        except Exception as e:
+            print(f"[refresh_key_manager_session] GUI reload warning: {e}")
+
+        # Ask the agent (embedded or external) to reload its vault.
+        agent_url = self._get_agent_url()
+        payload = {"cmd": "reload_vault", "password": self.current_password}
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            agent_url, data=data,
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read().decode("utf-8"))
+            if result.get("status") == "ok":
+                print("[refresh_key_manager_session] agent vault reloaded")
+            else:
+                print(f"[refresh_key_manager_session] agent reload: {result.get('error')}")
+        except urllib.error.URLError as e:
+            # Agent not running is a normal state for read-only / locked vaults.
+            print(f"[refresh_key_manager_session] no agent reachable at {agent_url}: {e}")
+        except Exception as e:
+            print(f"[refresh_key_manager_session] agent reload error: {e}")
 
     def show_init_vault_dialog(self):
         """Delegate to account_dialogs."""

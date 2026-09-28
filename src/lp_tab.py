@@ -743,6 +743,24 @@ class LPTab:
                     )
                 except Exception as e:
                     error = str(e)
+                    # v5.3.27c: translate a missing-Solana-key failure into a
+                    # precise card message.  The adapter may report "No private
+                    # keys found" or a Solana-RPC/auth error when the wallet
+                    # address is empty/missing.
+                    lower_err = error.lower()
+                    if ("no private keys found" in lower_err
+                            or "could not derive" in lower_err
+                            or "no solana" in lower_err):
+                        bound = bound_account or entry.get("account_name", "")
+                        error = (
+                            f"account {bound or '(unbound)'} has no derived Solana key — "
+                            "derive it in the vault first"
+                        )
+                    elif not wallet:
+                        error = (
+                            "No Solana wallet address for this Orca pool. "
+                            "Select the account or derive a Solana key."
+                        )
             elif venue in ("Cetus", "cetus"):
                 # Cetus (Sui): tid is the position object id (0x+64 hex)
                 try:
@@ -753,6 +771,21 @@ class LPTab:
                     )
                 except Exception as e:
                     error = str(e)
+                    # v5.3.27c: precise missing-Sui-key message.
+                    lower_err = error.lower()
+                    if ("no private keys found" in lower_err
+                            or "could not derive" in lower_err
+                            or "no sui" in lower_err):
+                        bound = bound_account or entry.get("account_name", "")
+                        error = (
+                            f"account {bound or '(unbound)'} has no derived Sui key — "
+                            "derive it in the vault first"
+                        )
+                    elif not wallet:
+                        error = (
+                            "No Sui wallet address for this Cetus pool. "
+                            "Select the account or derive a Sui key."
+                        )
 
             if error:
                 print(f"[rescan] {venue} #{tid}: ERROR {error}")

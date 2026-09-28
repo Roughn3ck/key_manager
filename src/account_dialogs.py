@@ -840,6 +840,9 @@ def show_add_private_key_dialog(gui):
                         account, private_key, gui.current_password, chain_label)
             if success:
                 gui.show_notification(f"Private key added to '{account}'")
+                # v5.3.27c: sync the live agent session after any vault write.
+                if hasattr(gui, "refresh_key_manager_session"):
+                    gui.refresh_key_manager_session()
                 dialog.destroy()
                 # If currently viewing this account, refresh the view
                 if gui.current_account == account:
@@ -1000,6 +1003,11 @@ def show_derivation_dialog(gui, account_name):
                 derived_address=r["address"])
             gui.show_notification(f"Derived address+key saved to '{account_name}'")
             status_label.configure(text="Saved!", text_color="green")
+            # v5.3.27c: keep the running key-manager agent session in sync with
+            # the newly-written vault so LP wallet resolution works without a
+            # lock/unlock cycle.
+            if hasattr(gui, "refresh_key_manager_session"):
+                gui.refresh_key_manager_session()
             gui.refresh_left_panel()
             if gui.current_account == account_name:
                 gui.select_account(gui.current_pool or "Unassigned", account_name)
@@ -1106,6 +1114,9 @@ def _save_derived_to_account(gui, account_name, chain, data, status_label):
             derived_address=data["address"])
         gui.show_notification(f"Saved {chain} to '{account_name}'")
         status_label.configure(text=f"Saved {chain}", text_color="green")
+        # v5.3.27c: sync the live agent session after any vault write.
+        if hasattr(gui, "refresh_key_manager_session"):
+            gui.refresh_key_manager_session()
         gui.refresh_left_panel()
         if gui.current_account == account_name:
             gui.select_account(gui.current_pool or "Unassigned", account_name)
