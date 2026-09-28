@@ -1,8 +1,173 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.21 (Cetus Sui writes + v5.3.21 completion fixes)
-**Last Updated:** 2026-09-26
+**Current Version:** v5.3.22 (Orca close 6005 self-heal + confirmed-state ledger write); v5.3.26 exe-local portfolio DB + lock-screen refresh in progress
+**Last Updated:** 2026-09-28
+
+---
+
+## v5.3.26 - Exe-local portfolio DB + lock-screen refresh (in progress, no VERSION bump)
+
+### Summary
+Changed every GUI-side read of `coldtrack.db` to resolve the DB from the application's runtime directory, exactly like `key_vault.encrypted`. The hardcoded multi-portfolio defaults in `sentinel_export` are left untouched because the sentinel EXPORT tool's merged view is intentionally multi-portfolio. Also refreshed the lock screen to show the current version (`5.3.26`) and the full LP platform list including Cetus (Sui).
+
+### Changes
+
+#### 1. Exe-local coldtrack.db resolution
+- `src/venue_adapters/aerodrome_adapter.py`:
+  - New `_get_app_base_dir()` mirrors the vault-open logic: frozen EXE → `sys.executable`'s parent; source run → project root.
+  - `_get_ledger_aerodrome_token_ids()` now seeds from `[app_dir/coldtrack.db]` only. Removed the `sentinel_export.DEFAULT_DB_PATHS` import and silent fallback.
+  - Loud logging: `[aerodrome-scan] ledger seed db=<path> tokens=<n>` on success; on failure the error names the path and is surfaced as a placeholder card.
+- `src/lp_tab.py`:
+  - `_lp_portfolio_db_path()` now returns the exe-local `coldtrack.db` and reports its path in "ledger write skipped" messages.
+- `src/coldtrack/tab.py`:
+  - `refresh_display()` and vault sync thread now open `ColdTrackDB(app_dir / "coldtrack.db")` instead of relying on the module default.
+
+#### 2. Lock-screen version + platforms
+- `src/gui_main_v5.py`:
+  - `VERSION = "5.3.26"`.
+  - Lock-screen subtitle now reads: *v5.3.26 - ColdStack | Orca + Aerodrome + BSC V3 + Hyperliquid + Cetus (Sui)*.
+
+#### 3. Wallet-verified stake attribution (carried forward from v5.3.25)
+- `src/venue_adapters/aerodrome_adapter.py`:
+  - Ledger-seeded tokens held by a gauge are confirmed via `gauge.stakedTokenIds(wallet)` with selector `0x4b937763`.
+  - A token staked by a different vault account is never attributed to the scanned wallet.
+
+### Tests + Files
+- Updated `test_aerodrome_ledger_seed.py`:
+  - Added exe-local path resolution assertion via a temp coldtrack.db.
+  - Added `test_wallet_scoped_stake_attribution` to ensure gauge-held tokens are only returned when `stakedTokenIds(wallet)` contains the token.
+  - Added missing-DB error surfacing test.
+- Updated `test_close_recorder_widget.py` to stub the new `_lp_app_base_dir()` helper.
+- Updated `src/gui_main_v5.py`, `src/venue_adapters/aerodrome_adapter.py`, `src/lp_tab.py`, `src/coldtrack/tab.py`.
+- Full test suite run: all `test_*.py` files PASS.
+- No EXE build, no VERSION bump in the release sense, no git push, no release. Live DBs read-only; no on-chain actions.
+
+### Live verification (2026-09-28)
+- Simulated frozen-EXE run from `B:\OpenClaw\.openclaw\workspace\kimi\portfolios\kitandpaul`:
+  - Console: `[aerodrome-scan] ledger seed db=...\kitandpaul\coldtrack.db tokens=1`
+  - Found `#75269474` staked on NFPM v1, gauge `0x41b2…20a`, pool `0x70ac…e1`.
+- Simulated frozen-EXE run from `B:\OpenClaw\.openclaw\workspace\kimi\portfolios\the-pack-portfolio`:
+  - Console: `[aerodrome-scan] ledger seed db=...\the-pack-portfolio\coldtrack.db tokens=2`
+  - Found `#76866113` (G1) staked on NFPM v1, gauge `0x017a…4b31`.
+  - `#7088644` correctly absent because it is staked by a different account; the wallet-scope verification prevents cross-attribution.
+
+---
+
+## v5.3.25 - Aerodrome ledger-seeded position discovery (carried into v5.3.26, no VERSION bump)
+
+### Summary
+Instead of brute-forcing the entire Base transfer history, the Aerodrome adapter seeds discovery from `coldtrack.db` TOKEN_IDs. The ledger is the index: each active Aerodrome row's TOKEN_ID is verified on-chain (`ownerOf` + `gauge.pool()` + `gauge.stakedTokenIds(wallet)`), so staked positions appear in seconds rather than minutes. The old transfer-history scan remains as a bounded 120 s fallback for positions the ledger lacks.
+
+### Changes
+
+#### 1. Ledger-seeded primary path
+- `src/venue_adapters/aerodrome_adapter.py`:
+  - `_get_ledger_aerodrome_token_ids()` reads active Aerodrome TOKEN_IDs from the portfolio coldtrack.db.
+  - `_resolve_ledger_token()` calls `ownerOf(tokenId)` on both NFPMs, confirms gauge status with `gauge.pool()`, and verifies the wallet actually staked the token via `gauge.stakedTokenIds(wallet)`.
+  - Staked ledger positions are annotated with `is_staked`, `gauge_address`, and `owner_display`.
+  - The ledger path runs first; `balanceOf()` only supplements positions not yet in the ledger.
+
+#### 2. Brute-force fallback: bounded + honest
+- `src/venue_adapters/aerodrome_staked.py`:
+  - Default `max_seconds` raised to 120 s.
+  - `MAX_WORKERS` reduced to 2 and exponential backoff added for HTTP 429 rate-limit responses (same-chunk retry).
+  - `discover_staked_positions(..., return_info=True)` reports `complete`, `scanned_from`, and `scanned_to`.
+  - `ownerOf`/`gauge.pool()` reverts treated as "no valid address".
+
+#### 3. Gauge selector fix
+- Corrected `SELECTOR_STAKED_TOKEN_IDS` to `0x4b937763` (verified live against deployed CL gauges).
+- `_get_gauge_address_for_position()` and `_gauge_for_owner()` use `gauge.pool()` (`0x16f0115b`).
+
+#### 4. Honest timing text
+- `src/lp_tab.py`: replaced the "up to 20 minutes / grab a coffee" Scan Wallet copy with proportional messaging:
+  - Aerodrome ledger-seeded (seconds).
+  - BSC/Project X scans <30 s.
+  - Aerodrome brute-force fallback 1–3 min under public-RPC rate limits.
+
+### Tests + Files
+- New `test_aerodrome_ledger_seed.py` — 4 tests: DB helper skips empty TOKEN_IDs, ledger seed resolves staked + unstaked positions, empty-TOKEN_ID rows fall through.
+- Updated `test_aerodrome_staked.py` — added rate-limit backoff retry test and hard-budget coverage-message test (17 tests total, ALL PASS).
+- Updated `src/venue_adapters/aerodrome_adapter.py`, `src/venue_adapters/aerodrome_staked.py`, `src/lp_tab.py`.
+- Full test suite run: all `test_*.py` files PASS.
+- No EXE build, no VERSION bump, no git push, no release.
+
+### Live verification (2026-09-28)
+- K&P wallet `0x8958…509`: ledger-seeded fetch found staked `#75269474` on NFPM v1, gauge `0x41b2…20a`, pool `0x70ac…e1` in ~4 s.
+- Pack wallet `0xAe8E…6ae`: ledger-seeded fetch found staked `#76866113` (G1) on NFPM v1, gauge `0x017a…4b31` in ~7 s. The G2 position `#7088644` is staked by a different vault account, so it correctly did not appear for this wallet.
+
+---
+
+## v5.3.24 - Aerodrome staked discovery: RPC-adaptive scan (in progress, no VERSION bump)
+
+### Summary
+Building on the v5.3.23 transfer-history foundation, this release makes the staked-position scan work against restrictive public Base RPCs (`mainnet.base.org` enforces a 2,000-block `eth_getLogs` range, `1rpc.io/base` enforces 50 blocks, publicnode requires a token). The scan now auto-detects each endpoint's limit, rotates endpoints, adapts chunk size, retries on rate-limit (HTTP 429), caches incremental progress, and surfaces scan failures with a manual fallback hint. Live verification shows Kris's K&P staked position `#75269474` is discovered; the architecture is the same for Pack G2 `#7088644` (public-RPC rate-limiting made the full scan inconclusive in the dev run).
+
+### Changes
+
+#### 1. RPC-adaptive transfer-history scan
+- `src/venue_adapters/aerodrome_staked.py` rewritten for v5.3.24:
+  - Multi-RPC rotation across `BASE_RPC_URLS`.
+  - Per-endpoint chunk-size probing; parses explicit block limits from error messages ("2,000 range", "50 blocks range").
+  - Binary-search first-activity block via `eth_getTransactionCount` and persists incremental scan cache in `~/.coldstack/aerodrome_staked_cache.json`.
+  - Parallel `eth_getLogs` fetching with `ThreadPoolExecutor`, plus per-chunk exponential backoff on HTTP 429 / over-rate-limit responses.
+  - Outgoing-transfer-only scan (`from=wallet`) for performance; `ownerOf(tokenId)` resolves the current holder.
+  - Raises `StakedScanError` instead of silently returning empty; `wallet_address_active()` helper exposed.
+  - `ownerOf` and `gauge.pool()` reverts are treated as "no valid address" rather than fatal scan errors.
+
+#### 2. Adapter integration
+- `src/venue_adapters/aerodrome_adapter.py`:
+  - Always runs `discover_staked_positions()` with a 3.8M-block lookback and 45s budget.
+  - Surfaces `StakedScanError` and shows a manual "enter the Deposit ID directly" hint when the scan cannot find positions.
+  - Annotates discovered positions with `is_staked`, `gauge_address`, and `owner_display`.
+
+#### 3. UI/UX
+- `src/lp_tab.py`:
+  - Orange **STAKED** badge for annotated positions.
+  - Owner line renders `<wallet> (staked via gauge)`.
+  - `_lp_guard_staked_action()` blocks Collect/Compound/Close with the Phase-2 message.
+
+### Tests + Files
+- `test_aerodrome_staked.py` — 15 tests covering gauge detection, transfer parsing, ownership reconstruction, staked discovery, EOA/gauge round-trips, annotation, adaptive chunking, all-RPC failure, incremental cache, `wallet_address_active`, and the lp_tab guard helper.
+- Updated `src/venue_adapters/aerodrome_staked.py`, `src/venue_adapters/aerodrome_adapter.py`, `src/lp_tab.py`.
+- `python -m py_compile` clean; `test_aerodrome_staked.py` ALL PASS. Full suite run pending.
+- No EXE build, no VERSION bump, no git push, no release. Live DBs read-only; no on-chain broadcasts in dev tests.
+
+### Live verification (2026-09-28)
+- K&P wallet `0x8958…509` scan against `mainnet.base.org` discovered staked token `#75269474` on NFPM v1 with gauge `0x41b2…20a` (pool `0x70ac…e1`) in ~40s.
+- Pack wallet `0xAe8E…6ae` direct `ownerOf(#7088644)` on NFPM v2 returned gauge `0x61e0…817`, confirming the staked position exists; the full transfer-history scan was inconclusive under the public-RPC 429 storm within the tested time budget.
+
+---
+
+## v5.3.22 - Orca close 6005 self-heal + confirmed-state CAPITAL_EVENTS write (2026-09-28)
+
+### Summary
+Kris's live K&P Orca close self-healed on-chain (first closePosition simulated 6005, retry withdrew + collected + burned successfully), but ColdStack reported the first error and wrote nothing. This release makes 6005 an official flow, reports the verified end state, and writes the full close package to coldtrack.db including a CAPITAL_EVENTS WITHDRAWAL row.
+
+### Changes
+
+#### 1. 6005 is a flow, not a final error
+- `src/venue_adapters/orca_writer.py`: refactored `close_position()` into `_close_position_attempt()`. If the closePosition step fails with `ClosePositionNotEmpty (6005)`, the writer catches it, refreshes the position data, and retries the full empty-then-close sequence once (decrease → collectFees → collect_reward → close/burn). 6005 is only raised as a final failure if the retry also fails.
+- Progress is surfaced in the log/terminal: *"closePosition returned 6005 — position not empty. Retrying full withdraw+collect+close sequence with fresh data..."*
+
+#### 2. Verified end state before reporting success
+- `src/lp_tab.py`: the existing post-close PDA-gone confirmation now also includes the verified transaction signatures in the success notification. A transient 6005 that the writer recovered from is never shown as the close result; the GUI only sees the final success or final failure.
+
+#### 3. Confirmed-state ledger write + CAPITAL_EVENTS
+- `src/coldtrack/close_recorder.py`:
+  - `CloseResult` gains an `owner` field (wallet address).
+  - Added `_insert_capital_event()` — one `CAPITAL_EVENTS.WITHDRAWAL` row per close, tied to the LP position, with total USD value of the returned liquidity, OWNER, and sigs in NOTES. VALUE_CAD is populated from `FX_RATES` when available.
+  - Added TX_HASH-level dedupe for `TRANSACTIONS` and `FEE_EVENTS`, and (POSITION_ID, DATE, TYPE) dedupe for `CAPITAL_EVENTS`, so a self-healed retry or manual re-record never double-writes.
+  - `LP_POSITIONS` now updates `FEES_CLAIMED_USD` and sets `FEES_UNCLAIMED_USD = 0` on close.
+- `src/venue_adapters/orca_writer.py`: `_capture_close_result()` now records the wallet owner.
+- `src/lp_tab.py`: success note now reports transaction, fee-event, and capital-event counts.
+
+### Tests + Files
+- New `test_orca_close_6005_flow.py` — 6005 retry success + final-failure paths.
+- Updated `test_close_recorder.py` — liquidity legs, CAPITAL_EVENTS row, dedupe, already-closed replay idempotency.
+- `src/gui_main_v5.py` — VERSION bumped to 5.3.22.
+- `python -m py_compile` clean; full suite green.
+- No EXE build, no git push, no release. Live DBs read-only; no on-chain broadcasts in tests.
 
 ---
 

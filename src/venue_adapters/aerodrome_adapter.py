@@ -13,13 +13,23 @@ Version: v5.2.2 (August 2026) - Aerodrome SlipStream on BASE
 """
 import json
 import math
+import os
+import sqlite3
+import sys
 import time
 import urllib.request
 import urllib.error
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from lp_engine import LPPosition, OfflineError, VenueAdapter, register_adapter
 from price_engine import PriceEngine
+from venue_adapters.aerodrome_staked import (
+    discover_staked_positions,
+    annotate_staked_position,
+    StakedScanError,
+    wallet_address_active,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -27,7 +37,8 @@ from price_engine import PriceEngine
 # ---------------------------------------------------------------------------
 
 BASE_RPC_URL = "https://base.publicnode.com"
-BASE_RPC_FALLBACK = "https://1rpc.io/base"
+BASE_RPC_FALLBACK = "https://mainnet.base.org"
+BASE_RPC_FALLBACK_2 = "https://1rpc.io/base"
 BASE_CHAIN_ID = 8453
 
 # ---------------------------------------------------------------------------
@@ -88,8 +99,9 @@ SELECTOR_INCREASE_LIQUIDITY = "0x7cf9b221"  # increaseLiquidity((uint256,uint128
 # Voter selector: pool -> CL gauge address
 SELECTOR_GAUGE_FOR_POOL = "0xb9a09fd5"  # gauges(address) -> address
 # CL Gauge selectors
-SELECTOR_STAKED_TOKEN_IDS = "0x9e713103"  # stakedTokenIds(address) -> uint256[]
+SELECTOR_STAKED_TOKEN_IDS = "0x4b937763"  # stakedTokenIds(address) -> uint256[]
 SELECTOR_POOL_OF_TOKEN = "0x83966021"  # poolOf(uint256 tokenId) -> address
+SELECTOR_POOL = "0x16f0115b"  # gauge.pool() -> address
 SELECTOR_EARNED_REWARDS = "0x3e491d47"  # earned(address,uint256 tokenId) -> uint256 (AERO, 18 decimals)
 # Gauge getReward selector — claims AERO emissions for a staked position
 SELECTOR_GET_REWARD = "0x1c4b774b"  # getReward(uint256 tokenId)
@@ -150,7 +162,7 @@ def _base_rpc_call(method: str, params: list, request_id: int = 1) -> Optional[A
         "User-Agent": "ColdStack/5.2.2",
     }
 
-    for url in (BASE_RPC_URL, BASE_RPC_FALLBACK):
+    for url in (BASE_RPC_URL, BASE_RPC_FALLBACK, BASE_RPC_FALLBACK_2):
         try:
             req = urllib.request.Request(url, data=payload, headers=headers)
             with urllib.request.urlopen(req, timeout=15) as response:
@@ -188,7 +200,8 @@ def _base_rpc_batch(
                 {"jsonrpc": "2.0", "id": request_id_base + chunk_start + idx, "method": method, "params": params}
             )
 
-        for url in (BASE_RPC_URL, BASE_RPC_FALLBACK):
+        ok = False
+        for url in (BASE_RPC_URL, BASE_RPC_FALLBACK, BASE_RPC_FALLBACK_2):
             try:
                 payload = json.dumps(payload_obj).encode("utf-8")
                 req = urllib.request.Request(url, data=payload, headers=headers)
@@ -201,11 +214,13 @@ def _base_rpc_batch(
                     by_id = {item.get("id"): item for item in data}
                     for idx in range(len(chunk)):
                         results.append(by_id.get(request_id_base + chunk_start + idx, {}).get("result"))
+                    ok = True
                     break
             except Exception:
-                if url == BASE_RPC_FALLBACK:
-                    for idx, (method, params) in enumerate(chunk):
-                        results.append(_base_rpc_call(method, params, request_id_base + chunk_start + idx))
+                continue
+        if not ok:
+            for idx, (method, params) in enumerate(chunk):
+                results.append(_base_rpc_call(method, params, request_id_base + chunk_start + idx))
     return results
 
 
@@ -340,19 +355,102 @@ def _get_gauge_address_for_position(
         return None
     if nft_owner.lower() == wallet_address.lower():
         return None  # Not staked — wallet owns the NFT
-    # The NFT owner is likely a gauge. Verify by calling poolOf(tokenId).
-    data = SELECTOR_POOL_OF_TOKEN + _pad_int_to_64(token_id)
+    # The NFT owner is likely a gauge. Verify by calling gauge.pool().
     pool_result = _base_rpc_call(
         "eth_call",
-        [{"to": nft_owner, "data": data}, "latest"],
+        [{"to": nft_owner, "data": SELECTOR_POOL}, "latest"],
     )
     if pool_result and isinstance(pool_result, str) and len(pool_result) >= 66:
         pool_addr = _decode_address(pool_result[2:66])
         if int(pool_addr, 16) != 0:
             return nft_owner.lower()  # Confirmed gauge
-    # Even if poolOf fails, return the owner if it's not the wallet
+    # Even if pool() fails, return the owner if it's not the wallet
     # (it might be a gauge with a different interface)
     return nft_owner.lower()
+
+
+def _owner_of(position_manager: str, token_id: int) -> Optional[str]:
+    """Return the current owner of an NFT, or None if the call fails."""
+    result = _base_rpc_call(
+        "eth_call",
+        [{"to": position_manager, "data": SELECTOR_OWNER_OF + _pad_int_to_64(token_id)}, "latest"],
+    )
+    if result and isinstance(result, str) and len(result) >= 66:
+        return _decode_address(result[2:66])
+    return None
+
+
+def _gauge_for_owner(owner: str, token_id: int = 0) -> Optional[str]:
+    """If owner responds to gauge.pool(), return it as a gauge address.
+
+    The token_id argument is kept for backwards compatibility; gauge.pool()
+    takes no arguments and is the canonical selector used by Aerodrome CL gauges.
+    """
+    result = _base_rpc_call("eth_call", [{"to": owner, "data": SELECTOR_POOL}, "latest"])
+    if result and isinstance(result, str) and len(result) >= 66:
+        pool = _decode_address(result[2:66])
+        if int(pool, 16) != 0:
+            return owner.lower()
+    return None
+
+
+def _get_app_base_dir() -> Path:
+    """Return the application's runtime directory, mirroring the vault logic.
+
+    Frozen (PyInstaller): directory containing the EXE.
+    Source run: project root (parent of src/).
+    """
+    if getattr(sys, "frozen", False):
+        return Path(os.path.dirname(sys.executable))
+    # src/venue_adapters/aerodrome_adapter.py -> project root
+    return Path(__file__).parent.parent.parent
+
+
+def _get_ledger_aerodrome_token_ids(db_paths: Optional[List[Any]] = None) -> List[int]:
+    """Read active Aerodrome TOKEN_IDs from the portfolio coldtrack.db.
+
+    GUI-side reads are exe-local only (the active portfolio's db lives next to
+    the app, exactly like key_vault.encrypted). The multi-DB sentinel export view
+    intentionally keeps its DEFAULT_DB_PATHS and is NOT used here.
+
+    Raises RuntimeError on missing DB or read failure so the adapter can surface
+    the path instead of silently falling back to the brute-force scan.
+    """
+    if db_paths is not None:
+        paths = [Path(p) for p in db_paths]
+    else:
+        paths = [_get_app_base_dir() / "coldtrack.db"]
+
+    token_ids: List[int] = []
+    seen: set = set()
+    sql = (
+        "SELECT TOKEN_ID FROM LP_POSITIONS "
+        "WHERE STATUS='active' AND PLATFORM='Aerodrome' "
+        "AND TOKEN_ID IS NOT NULL AND TOKEN_ID != ''"
+    )
+    for db_path in paths:
+        p = Path(db_path)
+        if not p.exists():
+            raise RuntimeError(f"Ledger seed DB not found: {p}")
+        try:
+            conn = sqlite3.connect(str(p))
+            cur = conn.cursor()
+            cur.execute(sql)
+            for row in cur.fetchall():
+                raw = row[0]
+                if not raw:
+                    continue
+                try:
+                    tid = int(raw)
+                except (ValueError, TypeError):
+                    continue
+                if tid > 0 and tid not in seen:
+                    seen.add(tid)
+                    token_ids.append(tid)
+            conn.close()
+        except Exception as exc:
+            raise RuntimeError(f"Ledger seed DB read failed ({p}): {exc}")
+    return token_ids
 
 
 # ---------------------------------------------------------------------------
@@ -876,6 +974,29 @@ def _decode_positions_response(
         if liquidity:
             print(f"[aerodrome-value] No pool state for token {token_id} — holdings unavailable")
 
+    raw_data = {
+        "token_id": token_id,
+        "nonce": nonce,
+        "operator": operator,
+        "token0": token0,
+        "token1": token1,
+        "tick_spacing": tick_spacing,
+        "tick_lower": tick_lower,
+        "tick_upper": tick_upper,
+        "liquidity": liquidity,
+        "fee_growth_inside0": fee_growth_inside0_last_x128,
+        "fee_growth_inside1": fee_growth_inside1_last_x128,
+        "pool_address": pool_address,
+        "current_tick": current_tick,
+        "decimals0": decimals0,
+        "decimals1": decimals1,
+    }
+
+    if is_staked and nft_owner:
+        raw_data["is_staked"] = True
+        raw_data["gauge_address"] = nft_owner.lower()
+        raw_data["owner_display"] = f"{wallet_address} (staked via gauge)"
+
     return LPPosition(
         position_id=f"base:{token_id}",
         pool_id=pool_address,
@@ -902,23 +1023,7 @@ def _decode_positions_response(
         pnl_pct=pnl_pct,
         apy=apy,
         days_active=days_active,
-        raw_data={
-            "token_id": token_id,
-            "nonce": nonce,
-            "operator": operator,
-            "token0": token0,
-            "token1": token1,
-            "tick_spacing": tick_spacing,
-            "tick_lower": tick_lower,
-            "tick_upper": tick_upper,
-            "liquidity": liquidity,
-            "fee_growth_inside0": fee_growth_inside0_last_x128,
-            "fee_growth_inside1": fee_growth_inside1_last_x128,
-            "pool_address": pool_address,
-            "current_tick": current_tick,
-            "decimals0": decimals0,
-            "decimals1": decimals1,
-        },
+        raw_data=raw_data,
     )
 
 
@@ -1250,6 +1355,43 @@ class AerodromeAdapter(VenueAdapter):
             error=f"Token ID {token_id} not found on any SlipStream Position Manager on BASE.",
         )
 
+    def _resolve_ledger_token(
+        self,
+        token_id: int,
+        wallet_address: str,
+        price_engine: Optional[PriceEngine] = None,
+    ) -> Optional[LPPosition]:
+        """Resolve one ledger TOKEN_ID to an LPPosition, detecting stake status.
+
+        Tries ownerOf on each Position Manager.  If the wallet owns it, the
+        position is returned as a normal unstaked position.  If a gauge owns it
+        (verified by pool()), the position is only annotated as staked when the
+        gauge confirms the wallet has staked this token ID.
+        """
+        wallet_lower = wallet_address.lower().strip()
+        for pm in V3_POSITION_MANAGERS:
+            owner = _owner_of(pm, token_id)
+            if not owner:
+                continue
+            owner_lower = owner.lower()
+            if owner_lower == wallet_lower:
+                pos = self._fetch_position_by_token_id(token_id, price_engine, wallet_address)
+                if pos and not pos.error:
+                    return pos
+                return None
+            # owner is a third party (gauge, EOA, contract).  The token ID only
+            # exists on one Position Manager, so this is the only PM we need to
+            # inspect for this ledger row.
+            gauge = _gauge_for_owner(owner, token_id)
+            if gauge:
+                if token_id in _get_staked_token_ids(gauge, wallet_address):
+                    pos = self._fetch_position_by_token_id(token_id, price_engine, wallet_address)
+                    if pos and not pos.error:
+                        annotate_staked_position(pos, gauge, wallet_address)
+                        return pos
+            return None
+        return None
+
     def _fetch_pool_state_as_position(
         self,
         pool_address: str,
@@ -1342,7 +1484,34 @@ class AerodromeAdapter(VenueAdapter):
 
         wallet_address = wallet_address.lower().strip()
         positions: List[LPPosition] = []
+        existing_ids: set = set()
+        ledger_count = 0
+        scan_error: Optional[str] = None
+        scan_message: Optional[str] = None
 
+        # v5.3.26 primary path: ledger-seeded discovery (seconds, not minutes).
+        # coldtrack.db already knows the TOKEN_IDs; we just verify on-chain ownership.
+        ledger_error: Optional[str] = None
+        try:
+            ledger_ids = _get_ledger_aerodrome_token_ids()
+            print(f"[aerodrome-scan] ledger seed db={_get_app_base_dir() / 'coldtrack.db'} tokens={len(ledger_ids)}")
+            for token_id in ledger_ids:
+                pos = self._resolve_ledger_token(token_id, wallet_address, price_engine)
+                if pos and not pos.error:
+                    has_liquidity = pos.raw_data and pos.raw_data.get("liquidity", 0) > 0
+                    has_fees = pos.fees_earned_usd and pos.fees_earned_usd > 0
+                    if (has_liquidity or has_fees) and pos.position_id not in existing_ids:
+                        positions.append(pos)
+                        existing_ids.add(pos.position_id)
+                        ledger_count += 1
+        except RuntimeError as exc:
+            ledger_error = str(exc)
+            print(f"[aerodrome-scan] ledger seed failed: {exc}")
+        except Exception as exc:
+            ledger_error = f"Ledger seed error: {exc}"
+            print(f"[aerodrome-scan] ledger seed failed: {exc}")
+
+        # Standard balanceOf scan for unstaked positions not yet in the ledger.
         for pm in V3_POSITION_MANAGERS:
             pm_name = "Aerodrome SlipStream" if pm == AERO_SLIPSTREAM_POSITION_MANAGER else "Aerodrome SlipStream (alt)"
 
@@ -1380,18 +1549,22 @@ class AerodromeAdapter(VenueAdapter):
             print(f"[aerodrome-scan] {pm_name} found {len(owned_ids)} token IDs: {owned_ids}")
 
             for token_id in owned_ids:
+                pos_id = f"base:{token_id}"
+                if pos_id in existing_ids:
+                    continue
                 pos = self._fetch_position_by_token_id(token_id, price_engine, wallet_address)
-                if pos:
+                if pos and not pos.error:
                     has_liquidity = pos.raw_data and pos.raw_data.get("liquidity", 0) > 0
                     has_fees = pos.fees_earned_usd and pos.fees_earned_usd > 0
                     if has_liquidity or has_fees:
                         positions.append(pos)
+                        existing_ids.add(pos_id)
 
         # If we found any unstaked Aerodrome positions, use their pool addresses
-        # to discover gauges and check for additional staked positions in those
-        # pools. This catches staked NFTs that balanceOf() cannot see.
-        existing_ids = {p.position_id for p in positions}
-        if positions:
+        # to discover gauges and check for additional staked positions in those pools.
+        # Skip when the ledger already seeded results — the ledger path is the
+        # primary source of truth and this scan duplicates expensive RPC work.
+        if positions and ledger_count == 0:
             discovered_pools = []
             for pos in positions:
                 if pos.pool_id and pos.venue == "Aerodrome":
@@ -1412,20 +1585,110 @@ class AerodromeAdapter(VenueAdapter):
                         positions.append(staked_pos)
                         existing_ids.add(staked_pos.position_id)
 
-        # v5.2.4: Skip the expensive transfer log scan when there are no unstaked
-        # positions and no saved pools. The user can enter their NFT ID directly.
-        # The transfer log scan is still useful when we have saved pool-derived
-        # gauges to check, but that's handled by _find_staked_positions_via_saved_pools.
-        if positions or existing_ids:
-            # We have some positions — also scan for staked ones
-            log_staked = self._find_staked_positions_via_transfer_logs(
-                wallet_address, price_engine, existing_ids, max_seconds=30
-            )
-            positions.extend(log_staked)
-        else:
-            # No unstaked positions and no saved pools — skip the expensive scan.
-            # The LP tab will show the "positions may be staked" helpful message.
-            print("[aerodrome-scan] No unstaked positions or saved pools — skipping transfer log scan")
+        # v5.3.25 fallback: deterministic transfer-history scan for positions the
+        # ledger does not know. Bounded to 120 s; reports coverage if it hits the limit.
+        # Only run when the ledger / balanceOf paths found nothing, so the GUI stays
+        # fast for the common case.
+        if not positions:
+            try:
+                staked_discoveries, scan_info = discover_staked_positions(
+                    wallet_address,
+                    max_blocks=3_800_000,
+                    max_seconds=120,
+                    return_info=True,
+                )
+                for token_id, pm, gauge_addr in staked_discoveries:
+                    pos_id = f"base:{token_id}"
+                    if pos_id in existing_ids:
+                        continue
+                    pos = self._fetch_position_by_token_id(
+                        token_id, price_engine, wallet_address
+                    )
+                    if pos and pos.raw_data:
+                        annotate_staked_position(pos, gauge_addr, wallet_address)
+                        has_liquidity = pos.raw_data.get("liquidity", 0) > 0
+                        has_fees = pos.fees_earned_usd and pos.fees_earned_usd > 0
+                        if has_liquidity or has_fees:
+                            positions.append(pos)
+                            existing_ids.add(pos_id)
+                if not scan_info.get("complete"):
+                    scan_message = (
+                        f"Transfer scan incomplete: scanned blocks {scan_info['scanned_from']}–"
+                        f"{scan_info['scanned_to']}; {ledger_count} position(s) verified from ledger. "
+                        "Enter a Deposit ID directly if something is missing."
+                    )
+            except StakedScanError as exc:
+                scan_error = str(exc)
+                print(f"[aerodrome-scan] staked discovery failed: {exc}")
+            except Exception as exc:
+                scan_error = f"Staked scan failed: {exc}"
+                print(f"[aerodrome-scan] staked discovery failed (non-fatal): {exc}")
+
+        # v5.2.4 legacy saved-pools scan remains as a fast fallback for wallets
+        # where transfer logs are trimmed or unavailable.  Skipped when the ledger
+        # already produced results to avoid redundant expensive RPC work.
+        if positions and ledger_count == 0:
+            discovered_pools = []
+            for pos in positions:
+                if pos.pool_id and pos.venue == "Aerodrome":
+                    discovered_pools.append({
+                        "venue": "Aerodrome",
+                        "pool_address": pos.pool_id,
+                    })
+            if discovered_pools:
+                staked = self._find_staked_positions_via_saved_pools(
+                    wallet_address, price_engine, discovered_pools
+                )
+                for staked_pos in staked:
+                    if staked_pos.position_id not in existing_ids:
+                        if staked_pos.raw_data:
+                            staked_pos.raw_data["gauge_address"] = _get_gauge_for_pool(
+                                staked_pos.pool_id
+                            ) if staked_pos.pool_id else None
+                            staked_pos.raw_data["is_staked"] = True
+                        positions.append(staked_pos)
+                        existing_ids.add(staked_pos.position_id)
+
+        # Surface an honest coverage note when the brute-force scan hit its budget.
+        if scan_message:
+            positions.append(LPPosition(
+                position_id=f"base:{wallet_address}:scan",
+                venue="Aerodrome",
+                chain="BASE",
+                error=scan_message,
+            ))
+
+        # v5.3.26: if ledger seeding itself failed, surface that loudly so the user
+        # knows the db path and can fix the missing/locked coldtrack.db.
+        if ledger_error and not positions:
+            positions.append(LPPosition(
+                position_id=f"base:{wallet_address}",
+                venue="Aerodrome",
+                chain="BASE",
+                error=ledger_error,
+            ))
+
+        # v5.3.24 UX: if the scan came up empty but the wallet is active, surface
+        # the manual deposit-ID fallback.  If the scan itself errored, surface that
+        # as a placeholder card instead of silently returning nothing.
+        if not positions:
+            if scan_error:
+                positions.append(LPPosition(
+                    position_id=f"base:{wallet_address}",
+                    venue="Aerodrome",
+                    chain="BASE",
+                    error=scan_error,
+                ))
+            elif wallet_address_active(wallet_address):
+                positions.append(LPPosition(
+                    position_id=f"base:{wallet_address}",
+                    venue="Aerodrome",
+                    chain="BASE",
+                    error=(
+                        "No positions found via scan. If you have a staked position, "
+                        "enter the Deposit ID (NFT number) directly — it works even when staked."
+                    ),
+                ))
 
         return positions
 

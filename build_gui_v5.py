@@ -22,6 +22,40 @@ import shutil
 from pathlib import Path
 
 
+def _patch_pyinstaller_win32_finalizers():
+    """Work around Windows AV/file-lock races in PyInstaller's PE header finalizers.
+
+    PyInstaller 6.x calls set_exe_build_timestamp() and update_exe_pe_checksum()
+    after writing the final EXE. On Windows these often fail with OSError 22 when
+    antivirus or search indexers briefly lock the new executable. Both operations
+    are cosmetic/security-metadata only; skipping them does not affect runtime.
+    """
+    if sys.platform != 'win32':
+        return
+    try:
+        from PyInstaller.utils.win32 import winutils
+
+        _orig_ts = getattr(winutils, 'set_exe_build_timestamp', None)
+        if _orig_ts:
+            def _safe_set_exe_build_timestamp(exe_path, timestamp):
+                try:
+                    return _orig_ts(exe_path, timestamp)
+                except OSError as exc:
+                    print(f"[build] ignoring PE timestamp error ({exc}) — EXE is still valid")
+            winutils.set_exe_build_timestamp = _safe_set_exe_build_timestamp
+
+        _orig_cs = getattr(winutils, 'update_exe_pe_checksum', None)
+        if _orig_cs:
+            def _safe_update_exe_pe_checksum(exe_path):
+                try:
+                    return _orig_cs(exe_path)
+                except OSError as exc:
+                    print(f"[build] ignoring PE checksum error ({exc}) — EXE is still valid")
+            winutils.update_exe_pe_checksum = _safe_update_exe_pe_checksum
+    except Exception as exc:
+        print(f"[build] could not install PE-header workaround: {exc}")
+
+
 def clean_build_dirs():
     """Clean build/ and dist/ directories before a fresh build."""
     dirs_to_clean = ['build', 'dist']
@@ -165,6 +199,8 @@ def build_gui_exe():
         args.extend(['--disable-windowed-traceback'])
 
     print(f"Running PyInstaller with args: {' '.join(args)}")
+
+    _patch_pyinstaller_win32_finalizers()
 
     try:
         PyInstaller.__main__.run(args)

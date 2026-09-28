@@ -73,6 +73,8 @@ class CloseResult:
     token_price_usd: Dict[str, float] = field(default_factory=dict)  # symbol -> USD
     # Final on-chain position amounts (for the closing snapshot).
     final_amounts: Dict[str, float] = field(default_factory=dict)    # asset -> amount
+    # Wallet address that owned/signed the position (for CAPITAL_EVENTS.OWNER).
+    owner: Optional[str] = None
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), indent=2)
@@ -157,6 +159,7 @@ class CloseRecorder:
             self._close_position_row(conn, result, pos_id)
             self._upsert_snapshot(conn, result, pos_id, match)
             n_fee = self._insert_fee_events(conn, result, pos_id, match)
+            n_capital = self._insert_capital_event(conn, result, pos_id, account_id, match)
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -168,6 +171,7 @@ class CloseRecorder:
             "account_id": account_id,
             "fee_events": n_fee,
             "transactions": len(result.legs),
+            "capital_events": n_capital,
         }
 
     # -- matching ---------------------------------------------------------
@@ -268,6 +272,29 @@ class CloseRecorder:
 
     # -- per-table writers (raw SQL inside the caller's transaction) --------
 
+    def _fx_rates(self, conn, date_iso: str) -> Dict[str, float]:
+        """Best-effort FX rates for the close date; falls back to latest."""
+        rates: Dict[str, float] = {}
+        if not date_iso:
+            return rates
+        date_key = date_iso[:10]
+        for pair in ("CADUSD", "EURUSD", "AUDUSD"):
+            cur = conn.cursor()
+            row = cur.execute(
+                "SELECT RATE FROM FX_RATES WHERE DATE = ? AND PAIR = ?",
+                (date_key, pair),
+            ).fetchone()
+            if row:
+                rates[pair] = row["RATE"]
+            else:
+                latest = cur.execute(
+                    "SELECT RATE FROM FX_RATES WHERE PAIR = ? ORDER BY DATE DESC LIMIT 1",
+                    (pair,),
+                ).fetchone()
+                if latest:
+                    rates[pair] = latest["RATE"]
+        return rates
+
     def _insert_transactions(self, conn, result: CloseResult, account_id: int,
                              match: Dict[str, Any]) -> None:
         date_iso = result.block_time_iso or _now_iso()
@@ -276,6 +303,16 @@ class CloseRecorder:
             type_ = "yield" if leg.kind == "fee" else "lp_withdraw"
             category = "yield" if leg.kind == "fee" else "lp"
             gas_amt = result.gas.get(leg.sig) if leg.sig else None
+            # v5.3.22: dedupe by TX_HASH so a self-healed retry (or manual re-record)
+            # never double-writes the same transaction leg.
+            if leg.sig:
+                cur = conn.cursor()
+                dup = cur.execute(
+                    "SELECT 1 FROM TRANSACTIONS WHERE TX_HASH = ? AND TYPE = ? AND ASSET = ?",
+                    (leg.sig, type_, leg.asset),
+                ).fetchone()
+                if dup:
+                    continue
             notes = (f"{pool} close — {leg.asset} {leg.kind} "
                      f"returned. token_id {result.position_mint}. "
                      f"{'collect tx.' if leg.kind == 'fee' else 'collect/decrease tx.'}")
@@ -301,10 +338,14 @@ class CloseRecorder:
 
     def _close_position_row(self, conn, result: CloseResult, pos_id: int) -> None:
         closed_date = result.block_time_iso or _now_iso()
+        # v5.3.22: capture total fees claimed on close (sum of fee-leg USD values)
+        fees_claimed = sum((l.value_usd or 0) for l in result.legs if l.kind == "fee") or 0.0
         conn.execute(
             """UPDATE LP_POSITIONS SET STATUS='closed', CLOSED_DATE=?,
+               FEES_CLAIMED_USD = COALESCE(FEES_CLAIMED_USD, 0) + ?,
+               FEES_UNCLAIMED_USD = 0,
                UPDATED_AT=datetime('now') WHERE ID=?""",
-            (closed_date, pos_id),
+            (closed_date, fees_claimed, pos_id),
         )
 
     def _upsert_snapshot(self, conn, result: CloseResult, pos_id: int,
@@ -349,6 +390,16 @@ class CloseRecorder:
         if not fee_legs:
             return 0
         date_iso = result.block_time_iso or _now_iso()
+        tx_hash = result.collect_sig or result.decrease_sig
+        # v5.3.22: dedupe by TX_HASH so a retry never double-records fee events.
+        if tx_hash:
+            cur = conn.cursor()
+            dup = cur.execute(
+                "SELECT 1 FROM FEE_EVENTS WHERE TX_HASH = ? AND POSITION_ID = ?",
+                (tx_hash, pos_id),
+            ).fetchone()
+            if dup:
+                return 0
         amt_a = sum((l.amount or 0) for l in fee_legs if l.asset == match.get("token_a")) or None
         amt_b = sum((l.amount or 0) for l in fee_legs if l.asset == match.get("token_b")) or None
         # Token order vs the position row: A first.
@@ -359,8 +410,65 @@ class CloseRecorder:
                 VALUE_CAD, VALUE_EUR, VALUE_AUD, TX_HASH, SOURCE, NOTES)
                VALUES (?,?,?,?,?,NULL,NULL,NULL,?,?,?)""",
             (pos_id, date_iso, amt_a, amt_b, value_usd,
-             result.collect_sig or result.decrease_sig, "HARVEST",
+             tx_hash, "HARVEST",
              "CLOSED via ColdStack"),
+        )
+        return 1
+
+    def _insert_capital_event(self, conn, result: CloseResult, pos_id: int,
+                              account_id: int, match: Dict[str, Any]) -> int:
+        """One CAPITAL_EVENTS WITHDRAWAL row for the principal returned on close.
+
+        A close is treated as a withdrawal tied to the position.  The row stores
+        the total USD value of the liquidity legs; the per-asset breakdown lives
+        in NOTES with the close signatures.
+        """
+        liquidity_legs = [l for l in result.legs if l.kind == "liquidity"]
+        if not liquidity_legs:
+            return 0
+        date_iso = result.block_time_iso or _now_iso()
+        date_key = date_iso[:10]
+        # v5.3.22: dedupe by position+date+type — a self-healed retry must not
+        # create two WITHDRAWAL rows for the same close.
+        cur = conn.cursor()
+        dup = cur.execute(
+            "SELECT 1 FROM CAPITAL_EVENTS WHERE POSITION_ID = ? AND DATE = ? AND TYPE = ?",
+            (pos_id, date_iso, "WITHDRAWAL"),
+        ).fetchone()
+        if dup:
+            return 0
+
+        value_usd = sum((l.value_usd or 0) for l in liquidity_legs) or None
+        # Best-effort CAD conversion via FX_RATES.
+        value_cad = None
+        if value_usd:
+            cadusd = conn.execute(
+                "SELECT RATE FROM FX_RATES WHERE DATE = ? AND PAIR = ?",
+                (date_key, "CADUSD"),
+            ).fetchone()
+            if not cadusd:
+                cadusd = conn.execute(
+                    "SELECT RATE FROM FX_RATES WHERE PAIR = ? ORDER BY DATE DESC LIMIT 1",
+                    ("CADUSD",),
+                ).fetchone()
+            if cadusd and cadusd["RATE"]:
+                # RATE is CAD per USD; value_cad = value_usd * rate
+                value_cad = round(value_usd * cadusd["RATE"], 6)
+
+        breakdown = ", ".join(
+            f"{l.asset} {l.amount:.8f}" for l in liquidity_legs
+        )
+        sigs = ", ".join(s for s in (result.decrease_sig, result.collect_sig,
+                                       result.close_sig) if s)
+        notes = f"Close withdrawal — {breakdown}. sigs: {sigs}".strip()
+
+        conn.execute(
+            """INSERT INTO CAPITAL_EVENTS
+               (ACCOUNT_ID, POSITION_ID, DATE, TYPE, ASSET, AMOUNT, VALUE_USD,
+                VALUE_CAD, VALUE_EUR, VALUE_AUD, OWNER, NOTES)
+               VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?,?)""",
+            (account_id, pos_id, date_iso, "WITHDRAWAL", None, None, value_usd,
+             value_cad, result.owner, notes),
         )
         return 1
 

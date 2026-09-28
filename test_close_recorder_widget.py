@@ -41,6 +41,7 @@ def main():
     tab = type("T", (), {})()
     tab.gui = _GUI()
     tab._lp_record_close_for_writer = lt.LPTab.__dict__["_lp_record_close_for_writer"].__get__(tab)
+    tab._lp_app_base_dir = lambda: Path(tempfile.mkdtemp(prefix="close_widget_"))
 
     # 1) writer produced no CloseResult (capture failed non-fatally) → plain note
     rec = lt.LPTab.__dict__["_lp_record_orca_close"]

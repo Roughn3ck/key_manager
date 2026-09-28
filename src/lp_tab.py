@@ -1,7 +1,9 @@
 """ColdStack LP Positions tab (extracted from gui_main_v5.py in v5.1.4)."""
+import sys
 import threading
 import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import customtkinter as ctk
@@ -859,9 +861,11 @@ class LPTab:
             confirm = messagebox.askyesno(
                 "Scan Wallet — Estimated Time",
                 "Scan Wallet will search your wallet address across all enabled platforms.\n"
-                "This could take up to 20 minutes.\n\n"
+                "Aerodrome positions are now ledger-seeded (seconds). "
+                "BSC/Project X scans typically finish in <30 s.\n"
+                "The old Aerodrome brute-force fallback can take 1–3 min under public-RPC rate limits.\n\n"
                 "To locate a pool quickly, select the Platform and use \"Fetch Position\".\n\n"
-                "Would you like to use Scan Wallet to search all platforms while you grab a coffee ☕?",
+                "Start the full wallet scan?",
             )
             if not confirm:
                 return
@@ -875,10 +879,10 @@ class LPTab:
             for widget in scroll.winfo_children():
                 widget.destroy()
 
-        # v5.1: Fast-path check — if saved pools exist, fetch them first.
+        # Fast-path — saved pools render first, then the full wallet scan follows.
         if saved:
             if status:
-                status.configure(text="Fetching saved positions... Full wallet scan will follow.")
+                status.configure(text="Fetching saved positions... Full wallet scan will follow (seconds to <30 s; Aerodrome fallback 1–3 min under rate limits).")
             # Render placeholders immediately, then fast-fetch saved pools,
             # then schedule the full scan in the background.
             self._lp_render_saved_placeholders(address)
@@ -886,7 +890,7 @@ class LPTab:
             self.gui.root.after(2000, lambda: self._lp_do_full_scan(address))
         else:
             if status:
-                status.configure(text="Scanning wallet for new positions — this may take up to 6 minutes.")
+                status.configure(text="Scanning wallet — Aerodrome ledger-seeded (seconds); full fallback scans may take 1–3 min under rate limits.")
             # No saved pools — do full scan immediately (existing behavior).
             self._lp_do_full_scan(address)
 
@@ -894,20 +898,24 @@ class LPTab:
     # Close → ledger recording (v5.3.16)
     # ------------------------------------------------------------------
 
+    def _lp_app_base_dir(self):
+        """Return the application's runtime directory, mirroring the vault logic.
+
+        Frozen EXE: directory containing the EXE.
+        Source run: project root (parent of src/)."""
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).parent
+        # src/lp_tab.py -> project root
+        return Path(__file__).parent.parent
+
     def _lp_portfolio_db_path(self):
-        """Resolve the coldtrack.db path for the active portfolio the position
-        belongs to. The portfolio DBs live in the kimi workspace layout; fall back
-        to the app-local coldtrack.db if none is resolvable. Returns a Path or None."""
-        try:
-            from pathlib import Path
-            # The export defaults carry the two live portfolio DBs (Pack + K&P).
-            from coldtrack.sentinel_export import DEFAULT_DB_PATHS
-            for p in DEFAULT_DB_PATHS:
-                if Path(p).exists():
-                    return Path(p)
-        except Exception:
-            pass
-        return None
+        """Resolve the coldtrack.db path for the active portfolio.
+
+        The portfolio DB is co-located with the application, exactly like
+        key_vault.encrypted. No hardcoded multi-portfolio defaults are used for
+        GUI-side writes."""
+        db_path = self._lp_app_base_dir() / "coldtrack.db"
+        return db_path if db_path.exists() else None
 
     def _lp_record_orca_close(self, writer, position, account_name: str) -> str:
         """Record a successful Orca close to coldtrack.db (atomic, pending-file
@@ -925,7 +933,7 @@ class LPTab:
             return "close confirmed on-chain"
         db_path = self._lp_portfolio_db_path()
         if db_path is None:
-            return "close confirmed on-chain · ledger write skipped (no portfolio db found)"
+            return f"close confirmed on-chain · ledger write skipped (no portfolio db at {self._lp_app_base_dir() / 'coldtrack.db'})"
         try:
             from coldtrack.close_recorder import record_close_and_export
             out = record_close_and_export(result, db_path, base_dir=db_path.parent)
@@ -935,7 +943,8 @@ class LPTab:
                     if ("not found" in out["error"] or "ambiguous" in out["error"]) \
                     else f"close confirmed on-chain · ledger pending — {out['error']}"
             return (f"close confirmed on-chain · ledger recorded "
-                    f"({out.get('transactions', 0)} tx legs, {out.get('fee_events', 0)} fee events)")
+                    f"({out.get('transactions', 0)} tx legs, {out.get('fee_events', 0)} fee events, "
+                    f"{out.get('capital_events', 0)} capital event)")
         except RuntimeError as e:
             msg = str(e)
             if "no LP_POSITIONS row" in msg or "ambiguous" in msg:
@@ -1111,6 +1120,27 @@ class LPTab:
                 positions = self.gui.lp_engine.fetch_all_positions(
                     address, include_closed=include_closed
                 )
+                # v5.3.26: auto-detect for a bare 0x address routes to Hyperliquid because
+                # HyperliquidAdapter.can_handle() accepts any EVM address. Explicitly scan
+                # Aerodrome too so ledger-seeded Base positions surface in the full wallet
+                # scan (no Platform selection required).
+                if address and address.lower().startswith("0x"):
+                    try:
+                        from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                        aero_scan = AerodromeAdapter().fetch_all_positions(
+                            address, online_mode=True, price_engine=self.gui.price_engine
+                        )
+                        merged = 0
+                        for pos in aero_scan:
+                            if pos and pos.position_id and not any(
+                                p.position_id == pos.position_id for p in positions
+                            ):
+                                positions.append(pos)
+                                merged += 1
+                        print(f"[lp_fetch] Aerodrome scan merged {merged} result(s) for {address[:10]}...")
+                    except Exception as e:
+                        print(f"[lp_fetch] Aerodrome scan error for {address[:8]}...: {e}")
+
                 # v5.1: Merge saved pools for this wallet (fast token-ID lookup)
                 saved = load_saved_pools(self.gui.key_manager.address_db, wallet_address=address)
                 print(f"[saved_pools] loaded {len(saved)} saved pools for {address}")
@@ -1268,8 +1298,18 @@ class LPTab:
                 # v5.2.2: If full scan found no Aerodrome positions, guide the
                 # user to manually enter their NFT token ID (staked positions
                 # are held by gauges and invisible to wallet scans).
+                # v5.3.26: only show this when there are no saved Aerodrome pools AND
+                # no Aerodrome card already rendered (saved-pool rescans may have
+                # already produced a card).
                 aero_positions = [p for p in positions if p.venue and p.venue.lower() == "aerodrome"]
-                if not aero_positions and not aero_saved:
+                rendered_aero = bool(
+                    self._lp_widgets.get("position_cards")
+                    and any(
+                        k.startswith("aerodrome:") or k.startswith("base:")
+                        for k in self._lp_widgets["position_cards"].keys()
+                    )
+                )
+                if not aero_positions and not aero_saved and not rendered_aero:
                     from tkinter import messagebox
                     self.gui.root.after(0, lambda: messagebox.showinfo(
                         "Aerodrome Positions",
@@ -2304,15 +2344,27 @@ class LPTab:
                 _entry = _find_pool_entry(self.gui.key_manager.address_db, _raw, position.venue or "")
         _acct = self._lp_pool_account_label(_entry)
         _acct_suffix = f"  ·  {_acct}" if _acct else ""
+        _staked = bool(getattr(position, "raw_data", {}).get("is_staked"))
         header_text = f"{position.health_emoji} {position.pair}  ·  {position.venue}  ·  ID: {position.position_id}{_acct_suffix}"
-        ctk.CTkLabel(info, text=header_text,
-                     font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
+        header_frame = ctk.CTkFrame(info, fg_color="transparent")
+        header_frame.pack(fill="x", anchor="w")
+        ctk.CTkLabel(header_frame, text=header_text,
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(side="left", anchor="w")
+        if _staked:
+            ctk.CTkLabel(header_frame, text=" STAKED ",
+                         font=ctk.CTkFont(size=9, weight="bold"),
+                         fg_color=("#fd7e14", "#dc6602"),
+                         text_color="white",
+                         corner_radius=4).pack(side="left", anchor="w", padx=(6, 0))
 
-        # Wallet address (if available from saved pool)
+        # Wallet address / staked owner (if available from saved pool)
         wallet_addr = getattr(position, "wallet_address", "")
         if wallet_addr and len(wallet_addr) >= 16:
             ctk.CTkLabel(info, text=f"Wallet: {wallet_addr[:10]}...{wallet_addr[-6:]}",
                          font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(1, 0))
+        elif _staked and getattr(position, "raw_data", {}).get("owner_display"):
+            ctk.CTkLabel(info, text=position.raw_data["owner_display"],
+                         font=ctk.CTkFont(size=10), text_color=("#dc6602", "#fd9e4a")).pack(anchor="w", pady=(1, 0))
 
         # Line 2: Range · Current · % In/Out Range (with colored % In Range)
         range_frame = ctk.CTkFrame(info, fg_color="transparent")
@@ -3676,9 +3728,23 @@ class LPTab:
         except Exception:
             return None
 
+    def _lp_guard_staked_action(self, position, action_name: str = "This action") -> bool:
+        """Block write actions on staked Aerodrome positions until unstaking is implemented."""
+        if getattr(position, "raw_data", {}).get("is_staked"):
+            self.gui.show_notification(
+                f"{action_name} unavailable: staked Aerodrome position. "
+                "Unstake the NFT from the gauge first (write op, Phase 2).",
+                error=True,
+            )
+            return True
+        return False
+
     def _lp_compound_fees_dialog(self, position):
         """Show confirmation dialog and compound fees for an LP position."""
         from tkinter import messagebox
+
+        if self._lp_guard_staked_action(position, "Compound"):
+            return
 
         # Solana (Orca) compound is not yet supported — check BEFORE calling the
         # EVM-only _lp_resolve_wallet_for_position so the user gets the right error
@@ -3796,6 +3862,9 @@ class LPTab:
     def _lp_collect_fees_dialog(self, position):
         """Show confirmation dialog and collect fees for an LP position."""
         from tkinter import messagebox
+
+        if self._lp_guard_staked_action(position, "Collect fees"):
+            return
 
         # Solana positions resolve via NFT ownership, not just "first account with a Solana key"
         if position.position_id.startswith("solana:"):
@@ -4073,6 +4142,9 @@ class LPTab:
         """
         from tkinter import messagebox
 
+        if self._lp_guard_staked_action(position, "Close position"):
+            return
+
         # Solana positions resolve via NFT ownership, not just "first account with a Solana key"
         if position.position_id.startswith("solana:"):
             account_name = self._lp_resolve_solana_account_for_position(position)
@@ -4184,9 +4256,16 @@ class LPTab:
                                 time.sleep(2)
                         if confirmed:
                             # v5.3.16: write the close to coldtrack.db + auto-export.
+                            # v5.3.22: surface the verified tx signatures in the success note.
                             note = self._lp_record_orca_close(writer, position, account_name)
-                            self.gui.root.after(0, lambda n=note: self._lp_forget_position(
-                                position, notify=f"Position closed ✓ {n}"))
+                            sigs_note = " · ".join(
+                                f"{s[:12]}..." for s in tx_hashes if s
+                            )
+                            notify = f"Position closed ✓ {note}"
+                            if sigs_note:
+                                notify += f"  ·  TXs: {sigs_note}"
+                            self.gui.root.after(0, lambda n=notify: self._lp_forget_position(
+                                position, notify=n))
                         elif verifiable:
                             self.gui.root.after(0, lambda: self.gui.show_notification(
                                 f"Close TXs submitted but position still on-chain — verify. "

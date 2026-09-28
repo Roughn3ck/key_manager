@@ -3,6 +3,7 @@
 Displays portfolio overview and account list synced from the vault.
 User-initiated sync button bridges vault data to ColdTrack DB.
 """
+import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,16 @@ class ColdTrackTab:
         self._widgets: Dict[str, Any] = {}
         self._last_sync: Optional[str] = None
         self._last_export: Optional[str] = None
+
+    def _ct_app_base_dir(self) -> Path:
+        """Return the application's runtime directory, mirroring the vault logic.
+
+        Frozen EXE: directory containing the EXE.
+        Source run: project root (parent of src/)."""
+        if getattr(sys, "frozen", False):
+            return Path(sys.executable).parent
+        # src/coldtrack/tab.py -> project root
+        return Path(__file__).parent.parent.parent
 
     def create_tab(self, parent: ctk.CTkFrame) -> None:
         """Build the tab UI inside parent_tab (the CTkFrame returned by tabview.add("ColdTrack")).
@@ -174,7 +185,7 @@ class ColdTrackTab:
         def _sync_thread():
             db = None
             try:
-                db = ColdTrackDB()
+                db = ColdTrackDB(self._ct_app_base_dir() / "coldtrack.db")
                 db.init_schema()
                 importer = ColdTrackImporter(db, address_db)
                 result = importer.full_sync()
@@ -254,10 +265,10 @@ class ColdTrackTab:
         self.gui.show_notification(f"Sentinel export failed: {error_msg}", error=True)
 
     def refresh_display(self) -> None:
-        """Reload portfolios and accounts from ColdTrack DB and update the UI."""
+        """Reload portfolios and accounts from the exe-local ColdTrack DB."""
         db = None
         try:
-            db = ColdTrackDB()
+            db = ColdTrackDB(self._ct_app_base_dir() / "coldtrack.db")
             db.init_schema()
             portfolios = db.get_portfolios()
             accounts = db.get_accounts()

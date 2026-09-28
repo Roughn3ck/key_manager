@@ -2,11 +2,11 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.3.20 (September 2026) - Sui token auto-detection + Cetus venue (read-only)
+Version: v5.3.26 (September 2026) - Ledger-seeded Aerodrome + exe-local portfolio db
 """
 
 # Single source of truth for version — update this when bumping versions
-VERSION = "5.3.20"
+VERSION = "5.3.26"
 import sys
 import os
 
@@ -420,9 +420,9 @@ class ColdStackGUI:
 
         version_label = ctk.CTkLabel(
             main_frame,
-            text=f"v{VERSION} - ColdStack | Orca Whirlpool + Railgun Sidecar + Aerodrome + BSC V3",
-            font=ctk.CTkFont(size=11),
-            text_color="gray60"
+            text=f"v{VERSION} - ColdStack | Orca + Aerodrome + BSC V3 + Hyperliquid + Cetus (Sui)",
+            font=ctk.CTkFont(size=14),
+            text_color=("gray50", "gray70"),
         )
         version_label.pack(pady=(0, 30))
 

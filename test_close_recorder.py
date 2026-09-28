@@ -51,8 +51,11 @@ def _reset_fixture(db_path: Path) -> None:
     conn.execute("UPDATE LP_POSITIONS SET STATUS='closed' WHERE UPPER(PLATFORM)='ORCA' AND ID<>?", (pid,))
     conn.execute("DELETE FROM LP_SNAPSHOTS WHERE LP_POSITION_ID=?", (pid,))
     conn.execute("DELETE FROM FEE_EVENTS WHERE POSITION_ID=?", (pid,))
+    conn.execute("DELETE FROM CAPITAL_EVENTS WHERE POSITION_ID=?", (pid,))
     for sig in CLOSE_SIGS:
         conn.execute("DELETE FROM TRANSACTIONS WHERE TX_HASH=?", (sig,))
+    # v5.3.22: also clean the new decrease sig used for capital-event testing.
+    conn.execute("DELETE FROM TRANSACTIONS WHERE TX_HASH=?", ("DECREASE_SIG_20260922",))
     conn.commit()
     conn.close()
 
@@ -63,6 +66,10 @@ def _close_result() -> CloseResult:
         position_mint="FbNHxe9VV797JWG7XH2msjwp5Rvb6dGzndwwkEXXXBKX",
         platform="Orca", chain="Solana",
         legs=[
+            CloseLeg(asset="cbBTC", amount=0.10000000, value_usd=9_600.0,
+                     kind="liquidity", sig="DECREASE_SIG_20260922"),
+            CloseLeg(asset="SOL", amount=10.00000000, value_usd=2_100.0,
+                     kind="liquidity", sig="DECREASE_SIG_20260922"),
             CloseLeg(asset="cbBTC", amount=0.01011925, value_usd=167.84,
                      kind="fee", sig="COLLECT_SIG_20260922"),
             CloseLeg(asset="SOL", amount=9.20164718, value_usd=1_900.0,
@@ -70,12 +77,14 @@ def _close_result() -> CloseResult:
         ],
         close_sig="CLOSE_BURN_SIG_20260922",
         collect_sig="COLLECT_SIG_20260922",
-        decrease_sig=None,  # liquidity was already 0 — no decrease tx on this close
+        decrease_sig="DECREASE_SIG_20260922",
         block_time_iso="2026-09-22T01:24:00+00:00",
-        gas={"COLLECT_SIG_20260922": 0.000005, "CLOSE_BURN_SIG_20260922": 0.000005},
+        gas={"DECREASE_SIG_20260922": 0.000005, "COLLECT_SIG_20260922": 0.000005,
+             "CLOSE_BURN_SIG_20260922": 0.000005},
         gas_asset="SOL",
         token_price_usd={"cbBTC": 96_000.0, "SOL": 210.0},
-        final_amounts={},
+        final_amounts={"cbBTC": 0.10000000, "SOL": 10.00000000},
+        owner="HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk",
     )
 
 
@@ -127,6 +136,14 @@ def main():
             assert t["FEE_ASSET"] == "SOL" and t["FEE_AMOUNT"] == 0.000005
         assets = {t["ASSET"]: t for t in txs}
         assert set(assets) == {"cbBTC", "SOL"}
+        # Liquidity legs carry the decrease sig and lp_withdraw category.
+        liq_txs = _rows(conn,
+                        "SELECT * FROM TRANSACTIONS WHERE TX_HASH=? ORDER BY ID",
+                        ("DECREASE_SIG_20260922",))
+        assert len(liq_txs) == 2, liq_txs
+        for t in liq_txs:
+            assert t["TYPE"] == "lp_withdraw" and t["CATEGORY"] == "lp"
+            assert t["TX_HASH"] == "DECREASE_SIG_20260922"
         # Burn sig must NOT appear as a tx row.
         burn = _rows(conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS WHERE TX_HASH=?",
                      ("CLOSE_BURN_SIG_20260922",))[0]["n"]
@@ -141,6 +158,17 @@ def main():
         assert abs((fe[0]["VALUE_USD"] or 0) -
                    round(0.01011925 * 96000.0 + 9.20164718 * 210.0, 6)) < 1e-6 or fe[0]["VALUE_USD"] is not None
 
+        # CAPITAL_EVENTS — v5.3.22: one WITHDRAWAL row tied to the position,
+        # total USD value of liquidity legs, OWNER set.
+        ce = _rows(conn, "SELECT * FROM CAPITAL_EVENTS WHERE POSITION_ID=?", (pos_id,))
+        assert len(ce) == 1, ce
+        assert ce[0]["TYPE"] == "WITHDRAWAL"
+        assert ce[0]["ACCOUNT_ID"] == row["ACCOUNT_ID"]
+        assert ce[0]["OWNER"] == "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
+        expected_value = round(0.10000000 * 96000.0 + 10.00000000 * 210.0, 6)
+        assert abs((ce[0]["VALUE_USD"] or 0) - expected_value) < 1e-6, ce[0]
+        assert "CLOSE_BURN_SIG_20260922" in (ce[0]["NOTES"] or "")
+
         # LP_SNAPSHOTS — one close row, sigs in NOTES, 'CLOSED via ColdStack'.
         sn = _rows(conn, "SELECT * FROM LP_SNAPSHOTS WHERE LP_POSITION_ID=?", (pos_id,))
         assert len(sn) == 1, sn
@@ -149,9 +177,8 @@ def main():
         assert sn[0]["IN_RANGE"] == 0
         db.close()
 
-        # Idempotency — re-record same CloseResult: the close snapshot upserts
-        # (UNIQUE(position,date)) so it stays single-row; FEE_EVENTS/TRANSACTIONS are
-        # event logs the caller only writes once per close (re-record is a retry path).
+        # Idempotency — re-record same CloseResult: every table must dedupe so a
+        # self-healed retry (or manual re-record) never double-writes.
         db2 = ColdTrackDB(db_path); db2.init_schema()
         out2 = CloseRecorder(db2).record(res)
         assert out2["ok"]
@@ -160,8 +187,34 @@ def main():
         assert n_snaps == 1, "snapshot upsert must stay single-row per (position,date)"
         n_fe = _rows(db2._conn, "SELECT COUNT(*) AS n FROM FEE_EVENTS WHERE POSITION_ID=?",
                      (pos_id,))[0]["n"]
-        assert n_fe >= 1
+        assert n_fe == 1, "FEE_EVENTS must dedupe by TX_HASH"
+        n_ce = _rows(db2._conn, "SELECT COUNT(*) AS n FROM CAPITAL_EVENTS WHERE POSITION_ID=?",
+                     (pos_id,))[0]["n"]
+        assert n_ce == 1, "CAPITAL_EVENTS must dedupe by (position,date,type)"
+        n_tx = _rows(db2._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS WHERE TX_HASH IN (?,?)",
+                     ("DECREASE_SIG_20260922", "COLLECT_SIG_20260922"))[0]["n"]
+        assert n_tx == 4, "TRANSACTIONS must dedupe by (TX_HASH, TYPE, ASSET)"
         db2.close()
+
+        # Already-closed row: NOTES-only append, no duplicate transactions/fee/capital rows.
+        db5 = ColdTrackDB(db_path); db5.init_schema()
+        before_tx = _rows(db5._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS WHERE TX_HASH IN (?,?)",
+                          ("DECREASE_SIG_20260922", "COLLECT_SIG_20260922"))[0]["n"]
+        before_ce = _rows(db5._conn, "SELECT COUNT(*) AS n FROM CAPITAL_EVENTS WHERE POSITION_ID=?",
+                          (pos_id,))[0]["n"]
+        out_closed = CloseRecorder(db5).record(res)
+        assert out_closed["ok"]
+        assert out_closed.get("note", "").startswith("already closed")
+        after_tx = _rows(db5._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS WHERE TX_HASH IN (?,?)",
+                         ("DECREASE_SIG_20260922", "COLLECT_SIG_20260922"))[0]["n"]
+        after_ce = _rows(db5._conn, "SELECT COUNT(*) AS n FROM CAPITAL_EVENTS WHERE POSITION_ID=?",
+                         (pos_id,))[0]["n"]
+        assert after_tx == before_tx, "already-closed replay must not duplicate TRANSACTIONS"
+        assert after_ce == before_ce, "already-closed replay must not duplicate CAPITAL_EVENTS"
+        # NOTES should contain the new replay sigs.
+        notes = _rows(db5._conn, "SELECT NOTES FROM LP_POSITIONS WHERE ID=?", (pos_id,))[0]["NOTES"] or ""
+        assert "ColdStack close replay sigs" in notes, notes
+        db5.close()
 
         # Pending path: unknown mint → goes to pending, NO NEW DB rows written.
         bad = _close_result()

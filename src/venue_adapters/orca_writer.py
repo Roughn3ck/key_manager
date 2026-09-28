@@ -1013,6 +1013,11 @@ class OrcaWriter(VenueWriter):
         """Close an Orca Whirlpool position: decrease (100%) → collectFees →
         collect_reward → closePosition. Returns tx signatures, in order.
 
+        v5.3.22: if the first closePosition attempt fails with
+        ClosePositionNotEmpty (6005), the flow is treated as "position still has
+        something" and the full empty-then-close sequence is retried once with
+        fresh on-chain data. 6005 is only a final failure if the retry also fails.
+
         On a successful close the writer also builds a `CloseResult` (stored on
         `self.last_close_result`) capturing every token movement, per-tx gas and
         blockTime, so the GUI completion path can write the ledger deterministically
@@ -1020,7 +1025,6 @@ class OrcaWriter(VenueWriter):
         """
         position_mint = position_id.split(":", 1)[1] if ":" in position_id else position_id
         wallet = self._get_solana_address(account)
-        wallet_b = _b58decode(wallet)
 
         pos = self._get_position_data(position_mint)
         if not pos:
@@ -1030,7 +1034,6 @@ class OrcaWriter(VenueWriter):
             raise RuntimeError(f"Could not read pool {pos['whirlpool']}")
 
         # Track the role of each tx sig for per-tx signature attribution.
-        tx_hashes: List[str] = []
         self._close_capture = {
             "position_mint": position_mint,
             "decrease_sig": None, "collect_sig": None, "reward_sigs": [], "close_sig": None,
@@ -1039,6 +1042,51 @@ class OrcaWriter(VenueWriter):
             "dec_b": _get_sol_token_decimals(pool["token_mint_b"]),
         }
         self.last_close_result = None
+
+        try:
+            tx_hashes = self._close_position_attempt(account, wallet, position_mint, pos, pool)
+        except RuntimeError as e:
+            if not self._is_6005_error(str(e)):
+                raise
+            print("[orca-writer] closePosition returned 6005 — position not empty. "
+                  "Retrying full withdraw+collect+close sequence with fresh data...")
+            pos = self._get_position_data(position_mint)
+            if not pos:
+                raise RuntimeError(f"Could not re-read position {position_mint} for 6005 retry")
+            pool = self._get_pool_data(pos["whirlpool"]) or pool
+            # Reset capture for the retry; the retry's TXs are the authoritative ones.
+            self._close_capture = {
+                "position_mint": position_mint,
+                "decrease_sig": None, "collect_sig": None, "reward_sigs": [], "close_sig": None,
+                "mint_a": pool["token_mint_a"], "mint_b": pool["token_mint_b"],
+                "dec_a": _get_sol_token_decimals(pool["token_mint_a"]),
+                "dec_b": _get_sol_token_decimals(pool["token_mint_b"]),
+            }
+            tx_hashes = self._close_position_attempt(account, wallet, position_mint, pos, pool)
+
+        # Build the CloseResult for the ledger recorder (GUI completion path).
+        # Read-only post-close capture; must never break the reported close.
+        try:
+            self.last_close_result = self._capture_close_result(wallet)
+        except Exception as e:
+            print(f"[orca-writer] close capture failed (non-fatal): {e}")
+            self.last_close_result = None
+
+        return tx_hashes
+
+    @staticmethod
+    def _is_6005_error(msg: str) -> bool:
+        """True if ``msg`` carries Orca's ClosePositionNotEmpty (6005) error."""
+        if not msg:
+            return False
+        low = msg.lower()
+        return "6005" in low or "closepositionnotempty" in low or "close position not empty" in low
+
+    def _close_position_attempt(self, account: str, wallet: str, position_mint: str,
+                                pos: Dict[str, Any], pool: Dict[str, Any]) -> List[str]:
+        """One full empty-then-close pass. Raises RuntimeError on failure."""
+        wallet_b = _b58decode(wallet)
+        tx_hashes: List[str] = []
 
         # Ensure ATAs exist before any token transfer — detect per-mint for pool tokens
         token_prog_a = self._get_token_program(pool["token_mint_a"])
@@ -1120,14 +1168,6 @@ class OrcaWriter(VenueWriter):
         self._close_capture["close_sig"] = tx3
         self._wait_for_confirmation(tx3, timeout=45)
         print(f"[orca-writer] closePosition ok: {tx3}")
-
-        # Build the CloseResult for the ledger recorder (GUI completion path).
-        # Read-only post-close capture; must never break the reported close.
-        try:
-            self.last_close_result = self._capture_close_result(wallet)
-        except Exception as e:
-            print(f"[orca-writer] close capture failed (non-fatal): {e}")
-            self.last_close_result = None
 
         return tx_hashes
 
@@ -1250,6 +1290,7 @@ class OrcaWriter(VenueWriter):
             gas_asset="SOL",
             token_price_usd=prices,
             final_amounts=final_amounts,
+            owner=wallet,
         )
 
     def rebalance(self, params: RebalanceParams) -> List[str]:
