@@ -1,7 +1,7 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.22 (Orca close 6005 self-heal + confirmed-state ledger write); v5.3.26 exe-local portfolio DB + lock-screen refresh in progress
+**Current Version:** v5.3.26 (startup crash fix + ledger-seeded Aerodrome surfacing + exe-local DB) — committed locally, no build/push/release
 **Last Updated:** 2026-09-28
 
 ---
