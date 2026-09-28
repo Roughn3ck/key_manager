@@ -35,6 +35,36 @@ Iterative hardening release: no new functionality, just fixes for panel-persiste
 - `_lp_auto_fetch_all_saved()` remains unchanged for explicit full-resync paths (tab open, Scan Wallet, etc.).
 - Fetching a position still refreshes saved pools; it just does so in place now.
 
+### Changes (continued)
+
+#### 3. Cetus/Orca/Sui refresh-fees crash fix
+- `src/lp_tab.py`:
+  - `_lp_refresh_position_fees()` now routes Sui and Solana saved-pool IDs through their own adapters (`CetusAdapter.fetch_position` / `OrcaAdapter._fetch_by_position_mint`) instead of casting to `int()`.
+  - Only EVM-style token IDs are converted with `int()`; the venue prefix decides the adapter.
+
+#### 4. Collect/compound no longer clears the saved-pool panel
+- `src/lp_tab.py`:
+  - `_lp_update_card_fees()` and `_lp_update_card_fees_zero()` now call `_lp_refresh_saved_pools_in_place()` instead of `_lp_auto_fetch_all_saved()`.
+  - This removes the last remaining card-panel vanish site after a successful collect or compound operation.
+
+#### 5. Precise wallet-resolution errors
+- `src/lp_tab.py`:
+  - `_lp_resolve_wallet_for_saved_pool()` returns a 4-tuple including an `error_message` when the bound account has no address for the pool's chain.
+  - `_lp_fetch_all_saved_entries()` surfaces the precise message (e.g. `Account 'G3' has no Solana address saved; add it to the vault.`) instead of attempting an empty-wallet fetch.
+  - Legacy/test records with a stored address still fall through to that address when derivation is unavailable.
+
+#### 6. "Decryption failed" diagnostics
+- `src/crypto_engine.py`:
+  - Distinguishes malformed-vault JSON from authentication-tag mismatch; the latter names the failure mode (`wrong password or corrupted file`).
+- `src/main.py`:
+  - `load_encrypted_data()` prints the failing vault path and the underlying cause on decryption/auth errors.
+  - `save_encrypted_data()` names the target file on write failures.
+
+#### 7. Address-card lambda regression test
+- New `test_address_card_lambda.py`:
+  - Builds a `ColdStackGUI` address card and generates synthetic `<Enter>`, `<Leave>`, and `<Button-1>` events to ensure every event handler accepts the event argument.
+  - Locks down the `missing 1 required positional argument: 'e'` crash class.
+
 ### Tests + Files
 - New `test_save_pool_no_rescan.py`:
   - Asserts Save makes zero adapter/RPC calls, persists the record, re-encrypts the vault, re-renders the card in place, and shows `Saved ... ✓`.
@@ -44,9 +74,10 @@ Iterative hardening release: no new functionality, just fixes for panel-persiste
   - Asserts saved cards are never cleared, the new result is appended, and the rescan uses each pool's own bound wallet (G1/N1), not the G2 selector wallet.
   - Asserts a genuinely failing pool marks only its own card with the real error.
   - Asserts a rescan that cannot reach a pool keeps the card content and shows `"refresh pending"`, not `"Fetch failed"`.
-- Updated `test_lp_panel_refresh.py` to match the new in-place refresh semantics (no wholesale "Fetching…" flash; failure path stub updated to `_lp_refresh_saved_pools_in_place`).
+- New `test_address_card_lambda.py`.
+- Updated `test_lp_panel_refresh.py` to match the new in-place refresh semantics and the new 4-tuple resolver return.
+- Updated `src/crypto_engine.py`, `src/main.py`, `src/lp_tab.py`.
 - Updated `src/gui_main_v5.py`: lock-screen `VERSION` updated to `"5.3.27"` and header comment updated.
-- Updated `src/lp_tab.py`.
 - Full test suite run: all `test_*.py` files PASS.
 - No EXE build, no release version bump beyond the lock-screen constant, no git push.
 

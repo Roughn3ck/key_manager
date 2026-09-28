@@ -71,21 +71,30 @@ class KeyManager:
         """Load encrypted data from file, replacing current address_db."""
         if not self.data_file.exists():
             return False
-        
+
         try:
             with open(self.data_file, 'r') as f:
                 encrypted_json = f.read()
-            
+
             decrypted_data = crypto.decrypt_json(encrypted_json, password)
-            
+
             # Replace entire address_db with loaded data
             self.address_db = decrypted_data
             return True
-            
-        except Exception as e:
-            console.print(f"[red]Error loading data: {e}[/red]")
+
+        except ValueError as e:
+            # Distinguish decryption/auth failures from generic I/O errors.
+            msg = str(e)
+            if "Decryption failed" in msg:
+                console.print(f"[red]Vault unlock failed: wrong password or corrupted vault file ({self.data_file})[/red]")
+                console.print(f"[dim]Underlying cause: {msg}[/dim]")
+            else:
+                console.print(f"[red]Error loading data: {e}[/red]")
             return False
-    
+        except Exception as e:
+            console.print(f"[red]Error loading data from {self.data_file}: {e}[/red]")
+            return False
+
     def save_encrypted_data(self, password: str) -> bool:
         """Save encrypted data to file."""
         try:
@@ -96,7 +105,7 @@ class KeyManager:
                 os.fsync(f.fileno())
             return True
         except Exception as e:
-            console.print(f"[red]Error saving data: {e}[/red]")
+            console.print(f"[red]Error saving data to {self.data_file}: {e}[/red]")
             return False
     
     def create_session(self, password: str) -> None:

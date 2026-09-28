@@ -4,7 +4,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import customtkinter as ctk
 
@@ -687,19 +687,26 @@ class LPTab:
             venue = entry.get("venue", "HyperEVM")
             # v5.3.21: resolve the wallet address from the pool's own chain,
             # not from a stale top-bar or mismatched saved address.
-            wallet, chain, bound_account = self._lp_resolve_wallet_for_saved_pool(entry)
+            resolved = self._lp_resolve_wallet_for_saved_pool(entry)
+            wallet, chain, bound_account, wallet_error = resolved
             if not tid:
                 print(f"[rescan] {venue}: skip — no token_id")
                 continue
+
+            prefix = self._lp_venue_prefix(venue)
+            pos_key = f"{venue}:{prefix}:{tid}"
+
+            if wallet_error:
+                print(f"[rescan] {venue} #{tid}: WALLET ERROR {wallet_error}")
+                errors[pos_key] = wallet_error
+                continue
+
             # Convert token_id to int for EVM chains (stored as string in JSON)
             if venue not in ("Orca", "orca", "Cetus", "cetus") and isinstance(tid, str):
                 try:
                     tid = int(tid)
                 except ValueError:
                     pass
-
-            prefix = self._lp_venue_prefix(venue)
-            pos_key = f"{venue}:{prefix}:{tid}"
             short_wallet = f"{wallet[:10]}...{wallet[-6:]}" if len(wallet) > 16 else wallet
             print(f"[rescan] {venue} #{tid}: chain={chain} wallet={short_wallet} bound={bound_account or '(unbound)'}")
 
@@ -2053,7 +2060,9 @@ class LPTab:
             return _is_solana_address(address)
         return False
 
-    def _lp_resolve_wallet_for_saved_pool(self, entry: Dict[str, Any]) -> tuple:
+    def _lp_resolve_wallet_for_saved_pool(
+        self, entry: Dict[str, Any]
+    ) -> Union[tuple, Tuple[str, str, Optional[str], Optional[str]]]:
         """Resolve the wallet address and chain for a saved pool.
 
         v5.3.21: the address must match the pool's venue/chain. If the saved
@@ -2062,31 +2071,47 @@ class LPTab:
         the bound account instead.
 
         Returns:
-            Tuple of (wallet_address, chain, account_name). Address may be "".
+            Tuple of (wallet_address, chain, account_name, error_message).
+            error_message is None on success; otherwise it explains why the
+            bound account or stored address cannot be used for this venue.
         """
         if not isinstance(entry, dict):
-            return ("", "evm", "")
+            return ("", "evm", "", "Invalid saved pool record")
         venue = (entry.get("venue") or "").strip()
         chain = self._lp_chain_for_saved_venue(venue)
         account_name = (entry.get("account_name") or "").strip()
+        chain_label = {"evm": "EVM", "solana": "Solana", "sui": "Sui"}.get(chain, chain.upper())
 
         # 1. Bound account: derive the correct chain address from it.
         if account_name and self.gui.key_manager:
             prefer = {"evm": "evm", "solana": "solana", "sui": "sui"}.get(chain, "")
             derived = self._lp_resolve_account_address(account_name, prefer=prefer)
             if derived and self._lp_address_matches_chain(derived, chain):
-                return (derived, chain, account_name)
+                return (derived, chain, account_name, None)
+            # Bound account either has no keys for this chain, or derivation
+            # failed. If a stored address matches the chain, use it as a
+            # fallback so legacy/test records keep working; otherwise surface a
+            # precise error.
+            for key in ("account_address", "wallet_address"):
+                addr = (entry.get(key) or "").strip()
+                if self._lp_address_matches_chain(addr, chain):
+                    return (addr, chain, account_name, None)
+            return ("", chain, account_name,
+                    f"Account '{account_name}' has no {chain_label} address saved; add it to the vault.")
 
         # 2. Stored account_address / wallet_address if it matches the chain.
         for key in ("account_address", "wallet_address"):
             addr = (entry.get(key) or "").strip()
             if self._lp_address_matches_chain(addr, chain):
-                return (addr, chain, account_name)
+                return (addr, chain, account_name, None)
 
         # 3. Fallback to the stored account_address so a test/stub key manager
         #    (no derivable addresses) still works; production derives first.
         fallback = (entry.get("account_address") or entry.get("wallet_address") or "").strip()
-        return (fallback, chain, account_name)
+        if fallback:
+            return (fallback, chain, account_name, None)
+        return ("", chain, account_name,
+                f"No {chain_label} address for this {venue or 'saved'} pool. Select the correct account or address.")
 
     def _lp_render_fetching_state(self, all_saved, extra_positions):
         """Immediate neutral state while the saved-pool rescan runs (v5.3.20).
@@ -3370,7 +3395,7 @@ class LPTab:
         without triggering a full wallet rescan.
 
         Args:
-            position_id: The position ID (e.g., 'hyperevm:512359' or 'bsc:2242261')
+            position_id: The position ID (e.g., 'hyperevm:512359' or 'sui:0x...')
             wallet_address: The wallet address for fee reading
         """
         if not self.gui.lp_engine or not self.gui.online_mode:
@@ -3381,13 +3406,36 @@ class LPTab:
                 raw_id = position_id
                 if ":" in raw_id:
                     raw_id = raw_id.split(":", 1)[1]
-                numeric_tid = int(raw_id)
 
-                if position_id.startswith("bsc:"):
+                if position_id.startswith("sui:"):
+                    from venue_adapters.cetus_adapter import CetusAdapter
+                    adapter = CetusAdapter()
+                    venue = "Cetus"
+                    tracking = get_position_tracking(
+                        self.gui.key_manager.address_db, raw_id, "Cetus"
+                    ) if self.gui.key_manager else None
+                    fresh_pos = adapter.fetch_position(
+                        raw_id, online_mode=True, price_engine=self.gui.price_engine,
+                        wallet_address=wallet_address,
+                    )
+                elif position_id.startswith("solana:"):
+                    from venue_adapters.orca_adapter import OrcaAdapter
+                    adapter = OrcaAdapter()
+                    venue = "Orca"
+                    tracking = get_position_tracking(
+                        self.gui.key_manager.address_db, raw_id, "Orca"
+                    ) if self.gui.key_manager else None
+                    fresh_pos = adapter._fetch_by_position_mint(
+                        raw_id, self.gui.price_engine, wallet_address=wallet_address
+                    )
+                elif position_id.startswith("bsc:"):
                     from venue_adapters.bsc_adapter import BSCAdapter
                     adapter = BSCAdapter()
                     venue = "BSC"
-                    tracking = get_position_tracking(self.gui.key_manager.address_db, numeric_tid, "BSC")
+                    numeric_tid = int(raw_id)
+                    tracking = get_position_tracking(
+                        self.gui.key_manager.address_db, numeric_tid, "BSC"
+                    ) if self.gui.key_manager else None
                     fresh_pos = adapter._fetch_position_by_token_id(
                         numeric_tid, self.gui.price_engine, wallet_address=wallet_address
                     )
@@ -3395,7 +3443,10 @@ class LPTab:
                     from venue_adapters.aerodrome_adapter import AerodromeAdapter
                     adapter = AerodromeAdapter()
                     venue = "Aerodrome"
-                    tracking = get_position_tracking(self.gui.key_manager.address_db, numeric_tid, "Aerodrome")
+                    numeric_tid = int(raw_id)
+                    tracking = get_position_tracking(
+                        self.gui.key_manager.address_db, numeric_tid, "Aerodrome"
+                    ) if self.gui.key_manager else None
                     fresh_pos = adapter._fetch_position_by_token_id(
                         numeric_tid, self.gui.price_engine, wallet_address=wallet_address
                     )
@@ -3403,7 +3454,10 @@ class LPTab:
                     from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
                     adapter = HyperliquidAdapter()
                     venue = "HyperEVM"
-                    tracking = get_position_tracking(self.gui.key_manager.address_db, numeric_tid, "HyperEVM")
+                    numeric_tid = int(raw_id)
+                    tracking = get_position_tracking(
+                        self.gui.key_manager.address_db, numeric_tid, "HyperEVM"
+                    ) if self.gui.key_manager else None
                     fresh_pos = adapter.fetch_evm_position_by_token_id(
                         numeric_tid, self.gui.price_engine, wallet_address=wallet_address
                     )
@@ -3453,7 +3507,7 @@ class LPTab:
         """Update a single position card with fresh fee data (in-place).
 
         Args:
-            position_id: The position ID (e.g., 'hyperevm:512359' or 'bsc:2242261')
+            position_id: The position ID (e.g., 'hyperevm:512359' or 'sui:0x...')
             fresh_pos: The fresh LPPosition with updated fees
             venue: The venue name used as the card key prefix
         """
@@ -3463,8 +3517,8 @@ class LPTab:
         if not card:
             card = cards.get(position_id)
         if not card:
-            print(f"[update_card_fees] card not found for {key}, doing auto-fetch")
-            self._lp_auto_fetch_all_saved()
+            print(f"[update_card_fees] card not found for {key}, in-place refresh")
+            self._lp_refresh_saved_pools_in_place(extra_positions=[fresh_pos])
             return
 
         # Destroy the old card and re-render with fresh data in the same position
@@ -3478,12 +3532,13 @@ class LPTab:
             status.configure(text=f"Fees updated for {fresh_pos.pair}")
 
     def _lp_update_card_fees_zero(self, position_id: str, venue: str = ""):
-        """Fallback: refresh all saved pools after a collect operation.
+        """Fallback: refresh all saved pools in place after a collect operation.
 
-        Does NOT write to the position entry or trigger a single-position fetch
-        (which would clear the screen). Instead re-fetches all saved pools.
+        v5.3.27: never falls back to `_lp_auto_fetch_all_saved`, which clears and
+        rebuilds the entire panel and destroys transient UI state. Use the quiet
+        in-place refresh path instead.
         """
-        self._lp_auto_fetch_all_saved()
+        self._lp_refresh_saved_pools_in_place()
 
     def _lp_open_add_liquidity(self, position):
         """Open the Add Liquidity dialog from the new module."""
@@ -3812,9 +3867,16 @@ class LPTab:
         account_name = ""
         token_id = None
         venue = (position.venue or "").strip()
+        raw_id = ""
         try:
             raw_id = position.position_id.split(":", 1)[1]
-            token_id = int(raw_id)
+            # Cetus/Orca token IDs are Sui object IDs / base58 mints, not ints.
+            if raw_id.startswith("0x") and len(raw_id) >= 64:
+                token_id = raw_id
+            elif len(raw_id) > 30 and not raw_id.startswith("0x"):
+                token_id = raw_id
+            else:
+                token_id = int(raw_id)
         except (ValueError, IndexError, AttributeError):
             token_id = None
 

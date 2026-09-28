@@ -174,8 +174,10 @@ class CryptoEngine:
             # Parse back to dictionary
             return json.loads(plaintext.decode('utf-8'))
             
-        except (KeyError, json.JSONDecodeError, InvalidTag) as e:
-            raise ValueError(f"Decryption failed: {str(e)}")
+        except (KeyError, json.JSONDecodeError) as e:
+            raise ValueError(f"Decryption failed: malformed vault JSON or missing field: {e}")
+        except InvalidTag as e:
+            raise ValueError(f"Decryption failed: authentication tag mismatch (wrong password or corrupted file)")
     
     def verify_password(self, encrypted_json: str, password: str) -> bool:
         """

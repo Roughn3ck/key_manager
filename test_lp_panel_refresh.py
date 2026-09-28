@@ -62,6 +62,11 @@ def _new_tab(saved, accounts):
     tab = lt.LPTab.__new__(lt.LPTab)
     tab.gui = _FakeGUI()
     tab._lp_widgets = {}
+    # Allow stored addresses to be used when bound account has no chain keys.
+    tab._lp_resolve_account_address = lambda account_name, prefer="": (
+        accounts.get(account_name, {}).get("addresses", [{}])[0].get("address")
+        if accounts.get(account_name, {}).get("addresses") else ""
+    )
     return tab
 
 
@@ -73,11 +78,11 @@ def test_fetch_single_refreshes_all_saved():
 
     saved = [
         {"token_id": 545983, "venue": "HyperEVM", "pair": "WHYPE/UBTC",
-         "account_name": "G1", "account_address": "0xAAA", "account_chain": "hyperevm"},
+         "account_name": "G1", "account_address": "0x" + "a" * 40, "account_chain": "hyperevm"},
         {"token_id": 75269474, "venue": "Aerodrome", "pair": "WETH/cbBTC",
-         "account_name": "G2", "account_address": "0xBBB", "account_chain": "base"},
+         "account_name": "G2", "account_address": "0x" + "b" * 40, "account_chain": "base"},
         {"token_id": SOL_MINT, "venue": "Orca", "pair": "cbBTC/SOL",
-         "account_name": "G3", "account_address": "Sol111", "account_chain": "solana"},
+         "account_name": "G3", "account_address": SOL_MINT, "account_chain": "solana"},
     ]
     accounts = {"G1": {}, "G2": {}, "G3": {}}
     tab = _new_tab(saved, accounts)
@@ -131,9 +136,9 @@ def test_fetch_single_refreshes_all_saved():
         OrcaAdapter._fetch_by_position_mint = real["orca"]
 
     # Each saved pool dispatched to its OWN venue adapter with its OWN bound account.
-    assert ("hype", 545983, "0xAAA") in calls, calls
-    assert ("aero", 75269474, "0xBBB") in calls, calls
-    assert ("orca", SOL_MINT, "Sol111") in calls, calls
+    assert ("hype", 545983, "0x" + "a" * 40) in calls, calls
+    assert ("aero", 75269474, "0x" + "b" * 40) in calls, calls
+    assert ("orca", SOL_MINT, SOL_MINT) in calls, calls
 
     # Live cards: the extra single position + the two successfully refetched pools.
     live_ids = {p.position_id for p in rendered}
@@ -305,15 +310,17 @@ def test_rescan_resolves_address_per_chain():
     }
     tab = _new_tab(saved, accounts)
 
-    assert tab._lp_resolve_wallet_for_saved_pool(saved[0]) == (evm_addr, "evm", "G1")
-    assert tab._lp_resolve_wallet_for_saved_pool(saved[1]) == ("0x" + "b" * 40, "evm", "G2")
-    assert tab._lp_resolve_wallet_for_saved_pool(saved[2]) == (sol_addr, "solana", "G3")
-    assert tab._lp_resolve_wallet_for_saved_pool(saved[3]) == (sui_addr, "sui", "N1")
+    assert tab._lp_resolve_wallet_for_saved_pool(saved[0])[:3] == (evm_addr, "evm", "G1")
+    assert tab._lp_resolve_wallet_for_saved_pool(saved[1])[:3] == ("0x" + "b" * 40, "evm", "G2")
+    assert tab._lp_resolve_wallet_for_saved_pool(saved[2])[:3] == (sol_addr, "solana", "G3")
+    assert tab._lp_resolve_wallet_for_saved_pool(saved[3])[:3] == (sui_addr, "sui", "N1")
+    for s in saved:
+        assert tab._lp_resolve_wallet_for_saved_pool(s)[3] is None
 
     # Wrong-chain stored address is corrected by deriving from the bound account.
     wrong = {"token_id": 1, "venue": "HyperEVM", "pair": "WHYPE/UBTC",
              "account_name": "G1", "account_address": sui_addr}
-    assert tab._lp_resolve_wallet_for_saved_pool(wrong) == (evm_addr, "evm", "G1")
+    assert tab._lp_resolve_wallet_for_saved_pool(wrong)[:3] == (evm_addr, "evm", "G1")
 
     print("✅ rescan resolves wallet address per venue/chain")
 
