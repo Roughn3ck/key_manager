@@ -2,7 +2,7 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.3.26 (September 2026) - Ledger-seeded Aerodrome + exe-local portfolio db
+Version: v5.3.27 (September 2026) - Minor bug fixes & hardening
 """
 
 # Single source of truth for version — update this when bumping versions

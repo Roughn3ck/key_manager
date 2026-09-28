@@ -86,9 +86,9 @@ def test_fetch_single_refreshes_all_saved():
     tab._lp_render_saved_placeholder = lambda scroll, entry, prefix, tid, venue, pair, state="auto", error=None: (
         order.append(("ph", state, error)), placeholders.append(entry))
     tab._lp_update_button_states = lambda: None
-    # v5.3.20: the neutral "Fetching…" state must be rendered BEFORE any result.
-    real_fs = tab._lp_render_fetching_state
-    tab._lp_render_fetching_state = lambda a, e: (order.append("fetching"), real_fs(a, e))
+    tab._lp_append_refresh_pending_note = lambda key: order.append("pending")
+    # v5.3.27: saved-pool cards must persist during a single-position search; no
+    # panel-wide "Fetching…" flash and no wholesale card clear.
 
     real_thread = lt.threading.Thread
     real = {
@@ -121,7 +121,7 @@ def test_fetch_single_refreshes_all_saved():
         AerodromeAdapter._find_staked_positions_via_saved_pools = aero_staked
         OrcaAdapter._fetch_by_position_mint = orca
 
-        # This is the fetch-single hook: refresh every saved card.
+        # This is the fetch-single hook: refresh every saved card in place.
         tab._lp_refresh_after_single([extra])
     finally:
         lt.threading.Thread = real_thread
@@ -150,8 +150,9 @@ def test_fetch_single_refreshes_all_saved():
     assert len(auto_ph) == 1, order
     assert "simulated Aerodrome RPC failure" in (auto_ph[0][2] or ""), auto_ph[0]
 
-    # v5.3.20: the neutral "Fetching…" state is rendered before any result card.
-    assert order and order[0] == "fetching", order
+    # v5.3.27: in-place refresh means no wholesale "Fetching…" flash and no
+    # panel-wide clear. The old assertion expected order[0] == "fetching".
+    assert "fetching" not in order, order
 
     print("✅ fetch-single refreshes all saved pools (own venue+account, no cross-marking)")
 
@@ -207,20 +208,22 @@ def test_refresh_failure_does_not_wipe_saved_cards():
     saved = [{"token_id": 545983, "venue": "HyperEVM", "pair": "WHYPE/UBTC",
               "account_name": "G1", "account_address": "0xAAA"}]
     tab = _new_tab(saved, {"G1": {}})
-    called = {"auto": 0, "error": 0}
-    tab._lp_auto_fetch_all_saved = lambda extra_positions=None: called.__setitem__("auto", called["auto"] + 1)
+    called = {"in_place": 0, "error": 0}
+    tab._lp_refresh_saved_pools_in_place = lambda extra_positions=None: called.__setitem__("in_place", called["in_place"] + 1)
     tab._lp_on_error = lambda msg: called.__setitem__("error", called["error"] + 1)
 
+    # With saved pools, even an error routes to the in-place refresh so cards
+    # are never wiped; the error is surfaced only when there are no saved pools.
     tab._lp_refresh_after_single(error="boom")
-    assert called["auto"] == 1 and called["error"] == 0, called
+    assert called["in_place"] == 1 and called["error"] == 0, called
 
     # No saved pools -> surface the error instead.
     tab2 = _new_tab([], {})
-    called2 = {"auto": 0, "error": 0}
-    tab2._lp_auto_fetch_all_saved = lambda extra_positions=None: called2.__setitem__("auto", called2["auto"] + 1)
+    called2 = {"in_place": 0, "error": 0}
+    tab2._lp_refresh_saved_pools_in_place = lambda extra_positions=None: called2.__setitem__("in_place", called2["in_place"] + 1)
     tab2._lp_on_error = lambda msg: called2.__setitem__("error", called2["error"] + 1)
     tab2._lp_refresh_after_single(error="boom")
-    assert called2["error"] == 1 and called2["auto"] == 0, called2
+    assert called2["error"] == 1 and called2["in_place"] == 0, called2
 
     print("✅ refresh keeps saved cards on failure; surfaces error only when none saved")
 

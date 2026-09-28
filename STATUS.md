@@ -1,42 +1,54 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.27 (Save in place — no rescan on save) — in progress 2026-09-29
+**Current Version:** v5.3.27 (Minor bug fixes & hardening) — in progress 2026-09-29
 **Last Updated:** 2026-09-29
 
 ---
 
-## v5.3.27 - Save in place: no full wallet rescan on Save (2026-09-29, in progress)
+## v5.3.27 — Minor bug fixes & hardening (2026-09-29, in progress)
 
 ### Summary
-Previously, clicking **Save** on a fetched position triggered a full wallet rescan (`self._lp_do_fetch()` in the Solana/Sui branch) that flashed the panel and reloaded every saved pool. Now Save persists the saved-pool record (with its v5.3.18 account binding) and re-renders only the affected card in place, swapping the **Save** button for **Remove**. Zero network calls; no "Fetching…" flash.
+Iterative hardening release: no new functionality, just fixes for panel-persistence and honest failure semantics around saved-pool fetches.
 
 ### Changes
 
-#### 1. `_lp_save_pool` split from fetch-refresh path
+#### 1. Save in place (no rescan on Save)
 - `src/lp_tab.py`:
   - Removed `self._lp_do_fetch()` from the Solana/Sui save branch.
   - Refactored EVM and Solana/Sui branches to share a single `_persist()` helper that checks for duplicates, calls `save_pool()` with account binding, re-encrypts the vault, and returns success/failure without any adapter calls.
   - After persistence, `_lp_update_card_saved_state(position)` destroys and re-renders only that card in place so the Save button becomes Remove.
   - Added subtle confirmation: status label shows `Saved <pair> ✓` in green.
 
-#### 2. Existing fetch-refresh behavior preserved
-- Fetching a position still uses `_lp_refresh_after_single()` and `_lp_auto_fetch_all_saved()` to refresh saved-pool cards.
-- Explicit **Scan Wallet** and platform-specific scans keep the existing rescan machinery.
+#### 2. Saved pools persist during a single-position search
+- `src/lp_tab.py`:
+  - Removed the scroll clear in `_lp_do_fetch_single()` (lines 2093-2095) so existing saved-pool cards are not destroyed while a new position is being fetched.
+  - `_lp_refresh_after_single()` now routes to a new `_lp_refresh_saved_pools_in_place()` method instead of `_lp_auto_fetch_all_saved()`.
+  - `_lp_refresh_saved_pools_in_place()` appends the new search result and refresches each saved pool via its own bound account + venue, updating only the affected card. Existing cards keep their content; no "Fetching…" flash.
+  - Extracted the shared per-pool fetch loop into `_lp_fetch_all_saved_entries()` so both the full-resync and in-place refresh use identical binding-respecting resolution.
+  - Added `_lp_update_saved_cards_in_place()`:
+    - Genuine per-pool adapter/RPC failures are shown on that card only with the real error.
+    - Pools the rescan could not reach (timeout / transient RPC) keep their existing content and get a quiet `"refresh pending"` note.
+  - Added `_lp_append_refresh_pending_note()`.
+
+#### 3. Existing rescan machinery preserved
+- `_lp_auto_fetch_all_saved()` remains unchanged for explicit full-resync paths (tab open, Scan Wallet, etc.).
+- Fetching a position still refreshes saved pools; it just does so in place now.
 
 ### Tests + Files
 - New `test_save_pool_no_rescan.py`:
-  - Renders a card, clicks Save, and asserts:
-    - `_lp_do_fetch()`, `_lp_auto_fetch_all_saved()`, `_lp_refresh_position_fees()` are never called.
-    - saved-pools record is persisted with token_id/venue/pair/wallet_address and account binding.
-    - vault is re-encrypted.
-    - card is re-rendered in place (new widget, old widget destroyed).
-    - status label shows `Saved ... ✓`.
-  - Second test: saving an already-saved pool is a no-op (no render, no rescan).
-- Updated `src/gui_main_v5.py`: lock-screen `VERSION` updated to `"5.3.27"`.
+  - Asserts Save makes zero adapter/RPC calls, persists the record, re-encrypts the vault, re-renders the card in place, and shows `Saved ... ✓`.
+  - Second test: saving an already-saved pool is a no-op.
+- New `test_search_persistence.py`:
+  - Reproduces Kris's G2 + Aerodrome scenario: stub saved pools bound to G1/N1, selector set to G2, fetch a new Aerodrome position.
+  - Asserts saved cards are never cleared, the new result is appended, and the rescan uses each pool's own bound wallet (G1/N1), not the G2 selector wallet.
+  - Asserts a genuinely failing pool marks only its own card with the real error.
+  - Asserts a rescan that cannot reach a pool keeps the card content and shows `"refresh pending"`, not `"Fetch failed"`.
+- Updated `test_lp_panel_refresh.py` to match the new in-place refresh semantics (no wholesale "Fetching…" flash; failure path stub updated to `_lp_refresh_saved_pools_in_place`).
+- Updated `src/gui_main_v5.py`: lock-screen `VERSION` updated to `"5.3.27"` and header comment updated.
 - Updated `src/lp_tab.py`.
 - Full test suite run: all `test_*.py` files PASS.
-- No EXE build, no release version bump, no git push.
+- No EXE build, no release version bump beyond the lock-screen constant, no git push.
 
 ---
 

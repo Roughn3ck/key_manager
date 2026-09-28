@@ -626,131 +626,274 @@ class LPTab:
         # (serial) rescan is in flight; warnings land only on real failures.
         self._lp_render_fetching_state(all_saved, extra_positions or [])
 
+        def _auto_fetch_thread():
+            # v5.3.21: heal stale bindings first so every pool resolves the right
+            # wallet/account.  This fixes labels like G6->G1 before any fetch.
+            self._lp_heal_saved_pool_bindings(all_saved)
+            positions, errors = self._lp_fetch_all_saved_entries(all_saved, extra_positions=extra_positions)
+            self.gui.root.after(0, lambda: self._lp_on_loaded_all_saved(positions, errors=errors))
+
+        threading.Thread(target=_auto_fetch_thread, daemon=True).start()
+
+    def _lp_refresh_saved_pools_in_place(self, extra_positions=None):
+        """Refresh saved-pool cards in place without clearing the panel (v5.3.27).
+
+        Used after a single-position fetch: the new result is appended and each
+        saved pool is refetched via its own bound account + venue, updating only
+        the affected card. Existing cards keep their content; no "Fetching…"
+        flash. Genuine per-pool failures are shown on that card only; transient
+        timeouts keep the card content with a quiet "refresh pending" note.
+        """
+        if not self.gui.lp_engine or not self.gui.online_mode:
+            return
+        if not self.gui.key_manager:
+            return
+        all_saved = load_saved_pools(self.gui.key_manager.address_db)
+        if not all_saved and not extra_positions:
+            return
+
+        # Append the just-fetched position(s) without touching existing cards.
+        for pos in extra_positions or []:
+            if not pos or not pos.position_id:
+                continue
+            key = f"{pos.venue}:{pos.position_id}"
+            if key not in self._lp_widgets.setdefault("position_cards", {}):
+                self._lp_render_card(pos)
+
+        def _refresh_thread():
+            positions, errors = self._lp_fetch_all_saved_entries(all_saved)
+            self.gui.root.after(0, lambda: self._lp_update_saved_cards_in_place(positions, errors))
+
+        threading.Thread(target=_refresh_thread, daemon=True).start()
+
+    def _lp_fetch_all_saved_entries(self, all_saved, extra_positions=None):
+        """Fetch every saved pool via its OWN bound account + venue.
+
+        Returns (positions, errors) where errors maps position key -> message.
+        This is the shared fetch loop used by both the full-resync and the
+        in-place refresh paths.
+        """
         from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
         from venue_adapters.bsc_adapter import BSCAdapter
 
         hype_adapter = HyperliquidAdapter()
         bsc_adapter = BSCAdapter()
 
-        def _auto_fetch_thread():
-            # v5.3.21: heal stale bindings first so every pool resolves the right
-            # wallet/account.  This fixes labels like G6->G1 before any fetch.
-            self._lp_heal_saved_pool_bindings(all_saved)
+        positions = list(extra_positions or [])
+        errors: Dict[str, str] = {}
 
-            positions = list(extra_positions or [])
-            # Per-pool error map: position key -> human-readable error.
-            errors: Dict[str, str] = {}
-
-            for entry in all_saved:
-                tid = entry.get("token_id")
-                venue = entry.get("venue", "HyperEVM")
-                # v5.3.21: resolve the wallet address from the pool's own chain,
-                # not from a stale top-bar or mismatched saved address.
-                wallet, chain, bound_account = self._lp_resolve_wallet_for_saved_pool(entry)
-                if not tid:
-                    print(f"[rescan] {venue}: skip — no token_id")
-                    continue
-                # Convert token_id to int for EVM chains (stored as string in JSON)
-                if venue not in ("Orca", "orca", "Cetus", "cetus") and isinstance(tid, str):
-                    try:
-                        tid = int(tid)
-                    except ValueError:
-                        pass
-
-                prefix = self._lp_venue_prefix(venue)
-                pos_key = f"{venue}:{prefix}:{tid}"
-                short_wallet = f"{wallet[:10]}...{wallet[-6:]}" if len(wallet) > 16 else wallet
-                print(f"[rescan] {venue} #{tid}: chain={chain} wallet={short_wallet} bound={bound_account or '(unbound)'}")
-
-                pos = None
-                error = None
-                if venue == "HyperEVM":
-                    try:
-                        pos = hype_adapter.fetch_evm_position_by_token_id(
-                            tid, self.gui.price_engine, wallet_address=wallet
-                        )
-                    except Exception as e:
-                        error = str(e)
-                elif venue in ("Aerodrome", "aerodrome"):
-                    try:
-                        from venue_adapters.aerodrome_adapter import AerodromeAdapter
-                        pos = AerodromeAdapter()._fetch_position_by_token_id(
-                            tid, self.gui.price_engine, wallet_address=wallet
-                        )
-                    except Exception as e:
-                        error = str(e)
-                elif venue in ("BSC", "bsc"):
-                    try:
-                        pos = bsc_adapter._fetch_position_by_token_id(
-                            tid, self.gui.price_engine, wallet_address=wallet
-                        )
-                    except Exception as e:
-                        error = str(e)
-                elif venue in ("Orca", "orca"):
-                    # Orca: tid is the base58 position mint string
-                    try:
-                        from venue_adapters.orca_adapter import OrcaAdapter
-                        pos = OrcaAdapter()._fetch_by_position_mint(
-                            tid, self.gui.price_engine, wallet_address=wallet
-                        )
-                    except Exception as e:
-                        error = str(e)
-                elif venue in ("Cetus", "cetus"):
-                    # Cetus (Sui): tid is the position object id (0x+64 hex)
-                    try:
-                        from venue_adapters.cetus_adapter import CetusAdapter
-                        pos = CetusAdapter().fetch_position(
-                            tid, online_mode=True, price_engine=self.gui.price_engine,
-                            wallet_address=wallet,
-                        )
-                    except Exception as e:
-                        error = str(e)
-
-                if error:
-                    print(f"[rescan] {venue} #{tid}: ERROR {error}")
-                    errors[pos_key] = error
-                    continue
-                if pos and pos.error:
-                    print(f"[rescan] {venue} #{tid}: ERROR {pos.error}")
-                    errors[pos_key] = pos.error
-                    continue
-                if pos:
-                    if wallet:
-                        pos.wallet_address = wallet
-                    positions.append(pos)
-                    print(f"[rescan] {venue} #{tid}: OK pair={pos.pair}")
-
-            # v5.2.2: Also check gauges for saved Aerodrome pools. The direct
-            # token-id fetch above catches unstaked NFTs; this catches staked
-            # positions where the gauge owns the NFT.
-            aero_saved = [
-                e for e in all_saved
-                if e.get("venue", "").lower() == "aerodrome"
-            ]
-            if aero_saved:
+        for entry in all_saved:
+            tid = entry.get("token_id")
+            venue = entry.get("venue", "HyperEVM")
+            # v5.3.21: resolve the wallet address from the pool's own chain,
+            # not from a stale top-bar or mismatched saved address.
+            wallet, chain, bound_account = self._lp_resolve_wallet_for_saved_pool(entry)
+            if not tid:
+                print(f"[rescan] {venue}: skip — no token_id")
+                continue
+            # Convert token_id to int for EVM chains (stored as string in JSON)
+            if venue not in ("Orca", "orca", "Cetus", "cetus") and isinstance(tid, str):
                 try:
-                    from venue_adapters.aerodrome_adapter import AerodromeAdapter
-                    aero_adapter = AerodromeAdapter()
-                    for entry in aero_saved:
-                        wallet = (entry.get("account_address") or entry.get("wallet_address") or "")
-                        if not wallet:
-                            continue
-                        staked = aero_adapter._find_staked_positions_via_saved_pools(
-                            wallet, self.gui.price_engine, [entry]
-                        )
-                        for staked_pos in staked:
-                            if not any(p.position_id == staked_pos.position_id for p in positions):
-                                # Attach wallet address for display
-                                if wallet:
-                                    staked_pos.wallet_address = wallet
-                                positions.append(staked_pos)
-                except Exception:
+                    tid = int(tid)
+                except ValueError:
                     pass
 
-            self.gui.root.after(0, lambda: self._lp_on_loaded_all_saved(positions, errors=errors))
+            prefix = self._lp_venue_prefix(venue)
+            pos_key = f"{venue}:{prefix}:{tid}"
+            short_wallet = f"{wallet[:10]}...{wallet[-6:]}" if len(wallet) > 16 else wallet
+            print(f"[rescan] {venue} #{tid}: chain={chain} wallet={short_wallet} bound={bound_account or '(unbound)'}")
 
+            pos = None
+            error = None
+            if venue == "HyperEVM":
+                try:
+                    pos = hype_adapter.fetch_evm_position_by_token_id(
+                        tid, self.gui.price_engine, wallet_address=wallet
+                    )
+                except Exception as e:
+                    error = str(e)
+            elif venue in ("Aerodrome", "aerodrome"):
+                try:
+                    from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                    pos = AerodromeAdapter()._fetch_position_by_token_id(
+                        tid, self.gui.price_engine, wallet_address=wallet
+                    )
+                except Exception as e:
+                    error = str(e)
+            elif venue in ("BSC", "bsc"):
+                try:
+                    pos = bsc_adapter._fetch_position_by_token_id(
+                        tid, self.gui.price_engine, wallet_address=wallet
+                    )
+                except Exception as e:
+                    error = str(e)
+            elif venue in ("Orca", "orca"):
+                # Orca: tid is the base58 position mint string
+                try:
+                    from venue_adapters.orca_adapter import OrcaAdapter
+                    pos = OrcaAdapter()._fetch_by_position_mint(
+                        tid, self.gui.price_engine, wallet_address=wallet
+                    )
+                except Exception as e:
+                    error = str(e)
+            elif venue in ("Cetus", "cetus"):
+                # Cetus (Sui): tid is the position object id (0x+64 hex)
+                try:
+                    from venue_adapters.cetus_adapter import CetusAdapter
+                    pos = CetusAdapter().fetch_position(
+                        tid, online_mode=True, price_engine=self.gui.price_engine,
+                        wallet_address=wallet,
+                    )
+                except Exception as e:
+                    error = str(e)
 
-        threading.Thread(target=_auto_fetch_thread, daemon=True).start()
+            if error:
+                print(f"[rescan] {venue} #{tid}: ERROR {error}")
+                errors[pos_key] = error
+                continue
+            if pos and pos.error:
+                print(f"[rescan] {venue} #{tid}: ERROR {pos.error}")
+                errors[pos_key] = pos.error
+                continue
+            if pos:
+                if wallet:
+                    pos.wallet_address = wallet
+                positions.append(pos)
+                print(f"[rescan] {venue} #{tid}: OK pair={pos.pair}")
+
+        # v5.2.2: Also check gauges for saved Aerodrome pools. The direct
+        # token-id fetch above catches unstaked NFTs; this catches staked
+        # positions where the gauge owns the NFT.
+        aero_saved = [
+            e for e in all_saved
+            if e.get("venue", "").lower() == "aerodrome"
+        ]
+        if aero_saved:
+            try:
+                from venue_adapters.aerodrome_adapter import AerodromeAdapter
+                aero_adapter = AerodromeAdapter()
+                for entry in aero_saved:
+                    wallet = (entry.get("account_address") or entry.get("wallet_address") or "")
+                    if not wallet:
+                        continue
+                    staked = aero_adapter._find_staked_positions_via_saved_pools(
+                        wallet, self.gui.price_engine, [entry]
+                    )
+                    for staked_pos in staked:
+                        if not any(p.position_id == staked_pos.position_id for p in positions):
+                            # Attach wallet address for display
+                            if wallet:
+                                staked_pos.wallet_address = wallet
+                            positions.append(staked_pos)
+            except Exception:
+                pass
+
+        return positions, errors
+
+    def _lp_update_saved_cards_in_place(self, positions, errors: Dict[str, str]):
+        """Update only the saved-pool cards that changed, without clearing others.
+
+        Genuine per-pool failures are rendered as a placeholder on that card;
+        cards that were not reached (e.g. rescan timeout) keep their existing
+        content and get a quiet "refresh pending" note.
+        """
+        if not positions:
+            positions = []
+        errors = errors or {}
+
+        # Deduplicate fetched positions
+        seen = set()
+        unique = []
+        for pos in positions:
+            key = f"{pos.venue}:{pos.position_id}"
+            if key not in seen:
+                seen.add(key)
+                unique.append(pos)
+
+        # Update existing cards with fresh data, or add new cards.
+        for pos in unique:
+            key = f"{pos.venue}:{pos.position_id}"
+            cards = self._lp_widgets.setdefault("position_cards", {})
+            card = cards.get(key)
+            if card:
+                card.destroy()
+                cards.pop(key, None)
+            self._lp_render_card(pos)
+
+        # For each saved pool that has a genuine failure, replace its card with
+        # an honest placeholder showing the real error.
+        all_saved = load_saved_pools(self.gui.key_manager.address_db) if self.gui.key_manager else []
+        scroll = self._lp_widgets.get("scroll")
+        for entry in all_saved:
+            tid = entry.get("token_id")
+            venue = entry.get("venue", "HyperEVM")
+            if not tid:
+                continue
+            prefix = self._lp_venue_prefix(venue)
+            pos_key = f"{venue}:{prefix}:{tid}"
+            if pos_key in seen:
+                continue
+            error = errors.get(pos_key)
+            if not error:
+                # Rescan did not reach this pool (timeout / transient) — keep
+                # its existing card and add a quiet "refresh pending" note.
+                self._lp_append_refresh_pending_note(pos_key)
+                continue
+            # Genuine per-pool failure: replace card with an error placeholder.
+            cards = self._lp_widgets.setdefault("position_cards", {})
+            card = cards.pop(pos_key, None)
+            if card:
+                try:
+                    card.destroy()
+                except Exception:
+                    pass
+            pair = entry.get("pair", "Unknown Pair")
+            self._lp_render_saved_placeholder(
+                scroll, entry, prefix, tid, venue, pair, error=error)
+
+        status = self._lp_widgets.get("status_label")
+        if status:
+            fetched = len(unique)
+            total_saved = len(all_saved)
+            failed = len([e for e in errors if e not in seen])
+            pending = total_saved - fetched - failed
+            if failed and pending:
+                status.configure(text=f"Updated {fetched}/{total_saved} · {failed} failed · {pending} refresh pending")
+            elif failed:
+                status.configure(text=f"Updated {fetched}/{total_saved} · {failed} failed")
+            elif pending:
+                status.configure(text=f"Updated {fetched}/{total_saved} · {pending} refresh pending")
+            else:
+                status.configure(text=f"Last check: {fetched} saved position(s) updated")
+        self._lp_update_button_states()
+
+    def _lp_append_refresh_pending_note(self, pos_key: str):
+        """Add a subtle 'refresh pending' note to an existing saved-pool card.
+
+        Used when the in-place rescan could not reach a pool (timeout / RPC
+        backlog) so the user keeps the last-known content instead of a fake
+        'Fetch failed' message.
+        """
+        cards = self._lp_widgets.get("position_cards", {})
+        card = cards.get(pos_key)
+        if not card:
+            return
+        # Avoid stacking multiple pending notes.
+        for child in card.winfo_children():
+            for sub in child.winfo_children():
+                if isinstance(sub, ctk.CTkLabel):
+                    text = sub.cget("text") or ""
+                    if "refresh pending" in text:
+                        return
+        try:
+            note = ctk.CTkLabel(
+                card, text=" · refresh pending",
+                font=ctk.CTkFont(size=10),
+                text_color=("#666666", "gray50"),
+            )
+            note.pack(anchor="w", padx=(10, 0), pady=(2, 0))
+        except Exception:
+            pass
 
     def _lp_on_loaded_all_saved(self, positions, errors: Optional[Dict[str, str]] = None):
         """Render auto-fetched saved pools. Keep unfetched saved pools as placeholders.
@@ -1981,16 +2124,17 @@ class LPTab:
         self._lp_update_button_states()
 
     def _lp_refresh_after_single(self, extra_positions=None, error=None):
-        """Refresh every saved-pool card after a fetch-single (v5.3.19).
+        """Refresh saved-pool cards in place after a fetch-single (v5.3.27).
 
         A single fetch previously re-rendered all other saved pools as
-        "Fetch failed" placeholders. Instead, refetch each saved pool via its
-        own bound account + venue adapter (success OR failure). Only when there
-        are no saved pools do we surface the single result/error.
+        "Fetch failed" placeholders and cleared the panel. Now we append the
+        new result and refresh each saved pool via its own bound account + venue
+        adapter, updating only the affected card. Existing cards are never
+        destroyed or flashed with a "Fetching…" state.
         """
         all_saved = load_saved_pools(self.gui.key_manager.address_db) if self.gui.key_manager else []
         if all_saved:
-            self._lp_auto_fetch_all_saved(extra_positions=extra_positions or [])
+            self._lp_refresh_saved_pools_in_place(extra_positions=extra_positions or [])
         elif error is not None:
             self._lp_on_error(error)
         else:
@@ -2083,16 +2227,16 @@ class LPTab:
         status = self._lp_widgets.get("status_label")
         refresh_btn = self._lp_widgets.get("refresh_btn")
         fetch_pos_btn = self._lp_widgets.get("fetch_pos_btn")
-        scroll = self._lp_widgets.get("scroll")
         if status:
             status.configure(text="Fetching position...")
         if refresh_btn:
             refresh_btn.configure(state="disabled")
         if fetch_pos_btn:
             fetch_pos_btn.configure(state="disabled")
-        if scroll:
-            for widget in scroll.winfo_children():
-                widget.destroy()
+        # v5.3.27: do NOT clear the existing saved-pool cards while a single
+        # position fetch is in flight. The cards persist with their last-known
+        # content; only the new search result is appended/refreshed when it
+        # arrives. The scroll clear lived at lines 2093-2095.
 
         # Preserve the wallet address through the fetch so Save Pool can use
         # it even if the selector state changes while the thread runs.
