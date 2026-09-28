@@ -1,12 +1,12 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.26 (startup crash fix + ledger-seeded Aerodrome surfacing + exe-local DB) — committed locally, no build/push/release
-**Last Updated:** 2026-09-28
+**Current Version:** v5.3.26 (Sui/Cetus venue + staked-position discovery + ledger-seeded scans + close-loop hardening) — released 2026-09-29
+**Last Updated:** 2026-09-29
 
 ---
 
-## v5.3.26 - Exe-local portfolio DB + lock-screen refresh (in progress, no VERSION bump)
+## v5.3.26 - Exe-local portfolio DB + lock-screen refresh (2026-09-29, released)
 
 ### Summary
 Changed every GUI-side read of `coldtrack.db` to resolve the DB from the application's runtime directory, exactly like `key_vault.encrypted`. The hardcoded multi-portfolio defaults in `sentinel_export` are left untouched because the sentinel EXPORT tool's merged view is intentionally multi-portfolio. Also refreshed the lock screen to show the current version (`5.3.26`) and the full LP platform list including Cetus (Sui).

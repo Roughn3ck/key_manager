@@ -4,7 +4,7 @@
 
 [![GitHub release (latest by date)](https://img.shields.io/github/v/release/Roughn3ck/key_manager)](https://github.com/Roughn3ck/key_manager/releases) [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE) [![Platform](https://img.shields.io/badge/platform-Windows-blue)]() [![Status](https://img.shields.io/badge/status-Production-success)]()
 
-**Latest release: [v5.3.18 — Saved-pool account binding + Aerodrome close loop](https://github.com/Roughn3ck/key_manager/releases/tag/v5.3.18)**
+**Latest release: [v5.3.26 — Sui/Cetus venue, staked-position discovery, ledger-seeded scans](https://github.com/Roughn3ck/key_manager/releases/tag/v5.3.26)**
 
 ---
 
@@ -207,7 +207,8 @@ Three on-chain transactions, each confirmed independently. Gas is paid in WHYPE 
 
 ### v5.3+ — More Venues
 - Krystal API / full multi-chain reads
-- Orca, Raydium, Cetus (Solana DEXs)
+- Raydium (Solana DEX) — remaining venue
+- Shipped since v5.3.20: Orca (incl. Token-2022 close flow), Aerodrome Slipstream (incl. staked-position discovery via ledger-seeded scan), Cetus (Sui — read + write ops)
 - Cross-chain LP position aggregation
 
 ### ColdTax — Tax Module
