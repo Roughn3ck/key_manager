@@ -408,6 +408,10 @@ def _resolve_staker_from_transfer(
     Queries `eth_getLogs` for Transfer events of this token id where the
     recipient is the gauge. The `from` of that transfer is the staker.
     Public RPCs may limit range; if the query fails, returns None.
+
+    NOTE: as of v5.3.28-patch3 this is no longer used for signer resolution
+    (the gauge's own withdraw simulation is the oracle). It is kept for the
+    discovery/scan path only.
     """
     from venue_adapters.aerodrome_staked import TRANSFER_TOPIC
 

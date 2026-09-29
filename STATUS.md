@@ -89,6 +89,24 @@ First-phase write support for staked Aerodrome SlipStream V3 positions. Position
   - Added `test_staked_signer_resolution_no_vault_match` (error names the staker).
 - Full `test_*.py` suite — ALL PASS.
 
+#### 7. Patch 3: staker validation by gauge simulation, not logs (2026-09-29)
+- `src/lp_tab.py`:
+  - Replaced the brittle `eth_getLogs` staker lookup with **gauge simulation**: for each candidate account, simulate `gauge.withdraw(tokenId)` with `from` = the candidate's derived address.
+  - No revert → candidate IS the staker.
+  - Revert `'NA'`/`'NW'` (not authorized) → try next candidate.
+  - Any other revert → candidate passed authorization and hit a different precondition; treat as validated and let the guided flow handle the precondition.
+  - Candidate order: saved-pool binding → account context → all vault accounts with a Base EVM address.
+  - Failure message: `staked position #<id>: no vault account is authorized to act on this position — refetch`.
+- `src/venue_adapters/aerodrome_adapter.py`:
+  - `_resolve_staker_from_transfer()` is no longer used for signer resolution; kept for discovery/scan path only.
+- `src/venue_adapters/aerodrome_gauge_writer.py`:
+  - `_preflight_eth_call()` replaced by `_simulate()`, shared across claim/unstake pre-flight and signer validation.
+- `test_aerodrome_staked.py`:
+  - Rewrote staked-signer tests to use simulation stubs; added:
+    - `test_staked_signer_resolution_auth_revert_then_next_candidate`
+    - `test_staked_signer_resolution_non_auth_revert_validates`
+- Full `test_*.py` suite — ALL PASS.
+
 ---
 
 ## v5.3.27 — Minor bug fixes & hardening (2026-09-29, released)

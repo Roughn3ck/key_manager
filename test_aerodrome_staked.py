@@ -517,8 +517,36 @@ def test_guard_helper_allows_staked_aerodrome():
     gui.show_notification.assert_not_called()
 
 
+def _make_simulation_rpc(gauge: str, authorized: set, non_auth_reason="NA", preconditions=None):
+    """Return a fake _base_rpc_call that supports gauge simulation."""
+    preconditions = preconditions or {}
+
+    def _fake_base_rpc(method, params):
+        if method == "eth_call":
+            data = params[0]["data"]
+            to = params[0].get("to", "").lower()
+            from_addr = params[0].get("from", "").lower()
+            if data.startswith("0x6352211e"):
+                return "0x" + "0" * 24 + gauge[2:]
+            if data == "0x16f0115b":
+                return "0x" + "0" * 24 + "42d4a22cad0f5a49681a5715ce994af73a43b76b"
+            if data.startswith("0x28c55f69") and to == gauge.lower():
+                if from_addr in {a.lower() for a in authorized}:
+                    # Non-auth precondition overrides success if configured.
+                    reason = preconditions.get(from_addr)
+                    if reason:
+                        raise RuntimeError(f"execution reverted: {reason}")
+                    return "0x"
+                raise RuntimeError(f"execution reverted: {non_auth_reason}")
+        if method == "eth_getLogs":
+            return []
+        return None
+
+    return _fake_base_rpc
+
+
 def test_staked_signer_resolution_unsaved():
-    """Unsaved staked position resolves signer from stake transfer via account context."""
+    """Unsaved staked position resolves signer by simulating gauge.withdraw."""
     from lp_tab import LPTab
     from lp_engine import LPPosition
     from unittest.mock import MagicMock, patch
@@ -529,7 +557,6 @@ def test_staked_signer_resolution_unsaved():
 
     staker_address = "0x40c33B69e7aB4B22Eb8ec7D164e155F769F8c948"
     gauge = "0x61E0B10423a0009C3f83ab4313813d29437d0817"
-    position_manager = "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53"
 
     pos = LPPosition(
         position_id="base:7088644",
@@ -542,40 +569,18 @@ def test_staked_signer_resolution_unsaved():
     writer.is_available.return_value = True
     writer._get_account_address.return_value = staker_address
     gui.lp_engine.get_writer.return_value = writer
-    # Vault contains the staker account under the name passed as context.
     gui.key_manager.address_db.get.return_value = {
         "G2": {"addresses": [{"address": staker_address}]}
     }
 
-    def _fake_base_rpc(method, params):
-        if method == "eth_call":
-            data = params[0]["data"]
-            to = params[0]["to"]
-            if data.startswith("0x6352211e"):
-                return "0x" + "0" * 24 + gauge[2:]
-            if data == "0x16f0115b":
-                return "0x" + "0" * 24 + "42d4a22cad0f5a49681a5715ce994af73a43b76b"
-        if method == "eth_getLogs":
-            return [{
-                "address": position_manager,
-                "blockNumber": "0x5",
-                "logIndex": "0x1",
-                "topics": [
-                    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-                    "0x" + "0" * 24 + staker_address[2:].lower(),
-                    "0x" + "0" * 24 + gauge[2:].lower(),
-                    "0x" + format(7088644, "064x"),
-                ],
-            }]
-        return None
-
-    with patch("venue_adapters.aerodrome_adapter._base_rpc_call", _fake_base_rpc):
+    fake_rpc = _make_simulation_rpc(gauge, {staker_address})
+    with patch("venue_adapters.aerodrome_adapter._base_rpc_call", fake_rpc):
         acct = tab._lp_verify_evm_position_ownership(pos, "G2", "aerodrome")
     assert acct == "G2", acct
 
 
 def test_staked_signer_resolution_no_vault_match():
-    """If stake transfer staker is not in vault, error names the staker (not the gauge)."""
+    """If no vault account simulates clean, error says no account is authorized."""
     from lp_tab import LPTab
     from lp_engine import LPPosition
     from unittest.mock import MagicMock, patch
@@ -584,9 +589,85 @@ def test_staked_signer_resolution_no_vault_match():
     tab = LPTab.__new__(LPTab)
     tab.gui = gui
 
-    staker_address = "0x0000000000000000000000000000000000000001"
     gauge = "0x61E0B10423a0009C3f83ab4313813d29437d0817"
-    position_manager = "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53"
+
+    pos = LPPosition(
+        position_id="base:7088644",
+        venue="Aerodrome",
+        chain="BASE",
+        raw_data={"is_staked": True},
+    )
+
+    writer = MagicMock()
+    writer.is_available.return_value = True
+    writer._get_account_address.return_value = "0x0000000000000000000000000000000000000001"
+    gui.lp_engine.get_writer.return_value = writer
+    gui.key_manager = None
+
+    fake_rpc = _make_simulation_rpc(gauge, set())
+    try:
+        with patch("venue_adapters.aerodrome_adapter._base_rpc_call", fake_rpc):
+            tab._lp_verify_evm_position_ownership(pos, "NOBODY", "aerodrome")
+    except RuntimeError as e:
+        msg = str(e)
+        assert "staked position #7088644" in msg, msg
+        assert "no vault account is authorized" in msg, msg
+        return
+    raise AssertionError("expected RuntimeError")
+
+
+def test_staked_signer_resolution_auth_revert_then_next_candidate():
+    """A candidate that reverts with 'NA' is skipped; the next clean candidate wins."""
+    from lp_tab import LPTab
+    from lp_engine import LPPosition
+    from unittest.mock import MagicMock, patch
+
+    gui = MagicMock()
+    tab = LPTab.__new__(LPTab)
+    tab.gui = gui
+
+    wrong_addr = "0x0000000000000000000000000000000000000001"
+    right_addr = "0x40c33B69e7aB4B22Eb8ec7D164e155F769F8c948"
+    gauge = "0x61E0B10423a0009C3f83ab4313813d29437d0817"
+
+    pos = LPPosition(
+        position_id="base:7088644",
+        venue="Aerodrome",
+        chain="BASE",
+        raw_data={"is_staked": True},
+    )
+
+    writer = MagicMock()
+    writer.is_available.return_value = True
+
+    def _derive(account):
+        return {"G1": wrong_addr, "G2": right_addr}.get(account, "")
+
+    writer._get_account_address.side_effect = _derive
+    gui.lp_engine.get_writer.return_value = writer
+    gui.key_manager.address_db.get.return_value = {
+        "G1": {"addresses": [{"address": wrong_addr}]},
+        "G2": {"addresses": [{"address": right_addr}]},
+    }
+
+    fake_rpc = _make_simulation_rpc(gauge, {right_addr})
+    with patch("venue_adapters.aerodrome_adapter._base_rpc_call", fake_rpc):
+        acct = tab._lp_verify_evm_position_ownership(pos, "G1", "aerodrome")
+    assert acct == "G2", acct
+
+
+def test_staked_signer_resolution_non_auth_revert_validates():
+    """A candidate that reverts for a non-auth reason is treated as the staker."""
+    from lp_tab import LPTab
+    from lp_engine import LPPosition
+    from unittest.mock import MagicMock, patch
+
+    gui = MagicMock()
+    tab = LPTab.__new__(LPTab)
+    tab.gui = gui
+
+    staker_address = "0x40c33B69e7aB4B22Eb8ec7D164e155F769F8c948"
+    gauge = "0x61E0B10423a0009C3f83ab4313813d29437d0817"
 
     pos = LPPosition(
         position_id="base:7088644",
@@ -599,38 +680,17 @@ def test_staked_signer_resolution_no_vault_match():
     writer.is_available.return_value = True
     writer._get_account_address.return_value = staker_address
     gui.lp_engine.get_writer.return_value = writer
-    gui.key_manager = None  # no saved binding; vault has no matching account
+    gui.key_manager.address_db.get.return_value = {
+        "G2": {"addresses": [{"address": staker_address}]}
+    }
 
-    def _fake_base_rpc(method, params):
-        if method == "eth_call":
-            data = params[0]["data"]
-            if data.startswith("0x6352211e"):
-                return "0x" + "0" * 24 + gauge[2:]
-            if data == "0x16f0115b":
-                return "0x" + "0" * 24 + "42d4a22cad0f5a49681a5715ce994af73a43b76b"
-        if method == "eth_getLogs":
-            return [{
-                "address": position_manager,
-                "blockNumber": "0x5",
-                "logIndex": "0x1",
-                "topics": [
-                    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
-                    "0x" + "0" * 24 + staker_address[2:].lower(),
-                    "0x" + "0" * 24 + gauge[2:].lower(),
-                    "0x" + format(7088644, "064x"),
-                ],
-            }]
-        return None
-
-    try:
-        with patch("venue_adapters.aerodrome_adapter._base_rpc_call", _fake_base_rpc):
-            tab._lp_verify_evm_position_ownership(pos, "NOBODY", "aerodrome")
-    except RuntimeError as e:
-        msg = str(e)
-        assert "staked position #7088644" in msg, msg
-        assert "0x0000000000000000000000000000000000000001" in msg, msg
-        return
-    raise AssertionError("expected RuntimeError")
+    fake_rpc = _make_simulation_rpc(
+        gauge, {staker_address},
+        preconditions={staker_address.lower(): "ZA"},
+    )
+    with patch("venue_adapters.aerodrome_adapter._base_rpc_call", fake_rpc):
+        acct = tab._lp_verify_evm_position_ownership(pos, "G2", "aerodrome")
+    assert acct == "G2", acct
 
 
 def test_guard_helper_allows_unstaked_position():
@@ -671,6 +731,8 @@ if __name__ == "__main__":
         test_guard_helper_allows_staked_aerodrome,
         test_staked_signer_resolution_unsaved,
         test_staked_signer_resolution_no_vault_match,
+        test_staked_signer_resolution_auth_revert_then_next_candidate,
+        test_staked_signer_resolution_non_auth_revert_validates,
         test_guard_helper_allows_unstaked_position,
     ]
     failed = 0

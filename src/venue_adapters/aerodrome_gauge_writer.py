@@ -113,6 +113,32 @@ class AerodromeGaugeWriter:
     def _rpc_call(self, method: str, params: list) -> Optional[Any]:
         return _base_rpc_call(method, params)
 
+    def _simulate(self, account: str, to: str, data: str) -> Optional[str]:
+        """Simulate the exact calldata from the signer. Returns None on success,
+        or the decoded revert reason string on failure."""
+        from_address = self.base_writer._get_account_address(account)
+        if not from_address:
+            return "Could not resolve signer address"
+        try:
+            result = self._rpc_call(
+                "eth_call",
+                [{"from": from_address, "to": to, "data": data}, "latest"],
+            )
+            if result is None:
+                return "eth_call returned no data (reverted)"
+            return None
+        except Exception as e:
+            msg = str(e)
+            if "execution reverted" in msg:
+                parts = msg.split("execution reverted")
+                if len(parts) > 1:
+                    reason = parts[-1].strip(" :")
+                    if reason:
+                        return reason
+            if "revert" in msg.lower():
+                return msg
+            return f"Simulation failed: {msg}"
+
     def _owner_of(self, token_id: int, position_manager: str) -> Optional[str]:
         data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
         result = self._rpc_call("eth_call", [{"to": position_manager, "data": data}, "latest"])
@@ -133,33 +159,7 @@ class AerodromeGaugeWriter:
                     return pm
         return V3_POSITION_MANAGERS[0]
 
-    def _preflight_eth_call(self, account: str, to: str, data: str) -> Optional[str]:
-        """Simulate the exact calldata from the signer. Returns None on success,
-        or the decoded revert reason string on failure."""
-        from_address = self.base_writer._get_account_address(account)
-        if not from_address:
-            return "Could not resolve signer address"
-        try:
-            result = self._rpc_call(
-                "eth_call",
-                [{"from": from_address, "to": to, "data": data}, "latest"],
-            )
-            # A successful eth_call returns hex data; any revert raises in the RPC layer.
-            if result is None:
-                return "eth_call returned no data (reverted)"
-            return None
-        except Exception as e:
-            msg = str(e)
-            # Extract a revert reason if present.
-            if "execution reverted" in msg:
-                parts = msg.split("execution reverted")
-                if len(parts) > 1:
-                    reason = parts[-1].strip(" :")
-                    if reason:
-                        return reason
-            if "revert" in msg.lower():
-                return msg
-            return f"Pre-flight failed: {msg}"
+
 
     def _broadcast(self, account: str, to: str, data: str, gas_check_address: str = "") -> str:
         return self.base_writer._broadcast(account, to, data, gas_check_address=gas_check_address)
@@ -201,7 +201,7 @@ class AerodromeGaugeWriter:
             recipient = wallet_address
 
         data = self._claim_emissions_calldata(account, recipient, token_id)
-        reason = self._preflight_eth_call(account, gauge_address, data)
+        reason = self._simulate(account, gauge_address, data)
         if reason:
             return GaugeStepResult(step="claim", error=f"Pre-flight revert: {reason}")
 
@@ -243,7 +243,7 @@ class AerodromeGaugeWriter:
             return GaugeStepResult(step="unstake", error="Could not locate gauge for position")
 
         data = self._withdraw_calldata(token_id)
-        reason = self._preflight_eth_call(account, gauge_address, data)
+        reason = self._simulate(account, gauge_address, data)
         if reason:
             return GaugeStepResult(step="unstake", error=f"Pre-flight revert: {reason}")
 

@@ -3619,36 +3619,27 @@ class LPTab:
                 f"all Base position managers. The position id in this record is not a live NFT."
             )
 
-        # v5.3.28-patch2: staked Aerodrome positions are held by a CL gauge.
-        # The signer is the STAKER, not the gauge address. Resolve the staker by:
-        #   1. saved-pool binding (if present and derivable)
-        #   2. account context passed to this call (derive address; confirm via stake transfer)
-        #   3. on-chain stake-transfer lookup (eth_getLogs Transfer -> gauge; the 'from' is the staker)
-        # Validation: the chosen account's derived address must match the on-chain staker.
+        # v5.3.28-patch3: staked Aerodrome positions are held by a CL gauge.
+        # The signer is the STAKER, not the gauge address. Validate candidates by
+        # SIMULATING the gauge operation: a successful eth_call of
+        # gauge.withdraw(tokenId) from the candidate proves the candidate is the
+        # staker. The simulation IS the authorization the chain enforces.
         if venue_key == "aerodrome" and owner_pm:
             from venue_adapters.aerodrome_adapter import _gauge_for_owner
             if _gauge_for_owner(owner):
-                staker = self._lp_resolve_staked_aerodrome_staker(
-                    token_id, owner_pm, owner, account_name, writer
+                staker = self._lp_resolve_staked_aerodrome_staker_by_simulation(
+                    token_id, owner, account_name, writer
                 )
                 if staker:
                     print(
                         f"[verify_ownership] {position.venue or 'Aerodrome'} #{token_id}: "
                         f"staked in gauge {owner}; acting as '{staker['account']}' "
-                        f"(staker {staker['staker_address']})"
+                        f"(validated by simulation)"
                     )
                     return staker["account"]
-                # Nothing validated: report the on-chain staker address, not the gauge.
-                # Resolve staker address explicitly for the error message.
-                staker_addr = "unknown"
-                try:
-                    from venue_adapters.aerodrome_adapter import _resolve_staker_from_transfer
-                    staker_addr = _resolve_staker_from_transfer(token_id, owner_pm, owner) or "unknown"
-                except Exception:
-                    pass
                 raise RuntimeError(
-                    f"staked position #{token_id}: staker {staker_addr} "
-                    f"matches no vault account on this chain — refetch"
+                    f"staked position #{token_id}: no vault account is authorized to "
+                    f"act on this position — refetch"
                 )
 
         # 1. If the saved-pool record has a binding, verify it against the live owner.
@@ -3843,32 +3834,69 @@ class LPTab:
 
         return wallet_address, account_name
 
-    def _lp_resolve_staked_aerodrome_staker(
+    def _lp_simulate_gauge_withdraw(
+        self,
+        gauge_address: str,
+        token_id: int,
+        from_address: str,
+    ) -> Optional[str]:
+        """Simulate gauge.withdraw(tokenId) from from_address. Returns None on success,
+        or the revert reason string."""
+        from venue_adapters.aerodrome_writer import SELECTOR_GAUGE_WITHDRAW, _pad_int_to_64
+        from venue_adapters.aerodrome_writer import _base_rpc_call
+
+        data = SELECTOR_GAUGE_WITHDRAW + _pad_int_to_64(token_id)
+        try:
+            _base_rpc_call(
+                "eth_call",
+                [{"from": from_address, "to": gauge_address, "data": data}, "latest"],
+            )
+            return None
+        except Exception as e:
+            msg = str(e)
+            # Extract revert reason if present.
+            if "execution reverted" in msg:
+                parts = msg.split("execution reverted")
+                if len(parts) > 1:
+                    reason = parts[-1].strip(" :")
+                    return reason or "reverted"
+            if "revert" in msg.lower():
+                return msg
+            return f"simulation failed: {msg}"
+
+    def _lp_resolve_staked_aerodrome_staker_by_simulation(
         self,
         token_id: int,
-        position_manager: str,
         gauge_address: str,
         account_name_hint: str,
         writer,
     ) -> Optional[Dict[str, str]]:
         """Resolve and validate the staker account for a staked Aerodrome position.
 
-        Validation order:
-          1. saved-pool binding (account_name + account_address)
-          2. account context (account_name_hint) — derive address and confirm it
-             matches the on-chain staker
-          3. on-chain stake-transfer lookup (Transfer -> gauge; the 'from' is the staker)
-             matched against vault accounts
+        Validates candidates by simulating gauge.withdraw(tokenId) from each
+        candidate's derived address. The gauge's own authorization is the oracle:
+          - no revert -> candidate IS the staker
+          - revert 'NA'/'NW' -> not authorized, try next candidate
+          - any other revert -> candidate passed authorization, hit another
+            precondition; treat as validated (the true staker) and let the guided
+            flow handle the precondition.
 
-        Returns {"account": str, "staker_address": str} or None if nothing validates.
+        Candidates:
+          1. saved-pool binding account (if present and derivable)
+          2. account context passed to the verify call
+          3. all vault accounts that derive a Base EVM address
+
+        Returns {"account": str, "derived_address": str} or None.
         """
         from saved_pools import _find_pool_entry
-        from venue_adapters.aerodrome_adapter import _resolve_staker_from_transfer
 
-        staker_address = _resolve_staker_from_transfer(token_id, position_manager, gauge_address)
+        # Auth-only revert strings from CLGauge/Gauge.sol:
+        #   'NA' = not authorized (caller is not staker / not approved)
+        #   'NW' = not approved for withdrawFrom
+        AUTH_REVERTS = {"NA", "NW"}
 
-        def _vault_accounts() -> Dict[str, str]:
-            """Return account_name -> EVM address for all vault accounts."""
+        def _all_vault_evm_accounts() -> Dict[str, str]:
+            """Return account_name -> Base EVM address for all vault accounts."""
             if not self.gui.key_manager:
                 return {}
             out = {}
@@ -3880,14 +3908,20 @@ class LPTab:
                         out[name] = a
             return out
 
-        def _account_for_staker(staker: str) -> Optional[str]:
-            staker_l = (staker or "").lower()
-            if not staker_l:
+        def _try_candidate(name: str, address: str) -> Optional[Dict[str, str]]:
+            reason = self._lp_simulate_gauge_withdraw(gauge_address, token_id, address)
+            if reason is None:
+                return {"account": name, "derived_address": address}
+            if reason in AUTH_REVERTS:
                 return None
-            for name, addr in _vault_accounts().items():
-                if addr == staker_l:
-                    return name
-            return None
+            # Non-auth revert: candidate passed authorization, hit a precondition.
+            print(
+                f"[staked-staker] #{token_id}: candidate '{name}' simulation reverted "
+                f"with non-auth reason '{reason}'; treating as validated staker"
+            )
+            return {"account": name, "derived_address": address}
+
+        candidates: List[Tuple[str, str]] = []
 
         # 1. Saved-pool binding.
         saved_entry = None
@@ -3903,34 +3937,29 @@ class LPTab:
             except Exception:
                 derived = ""
             if derived and derived.lower() == bound_address.lower():
-                # Validate against on-chain staker when known.
-                if staker_address and derived.lower() != staker_address.lower():
-                    print(
-                        f"[staked-staker] #{token_id}: saved binding '{bound_account}' "
-                        f"address {derived} != on-chain staker {staker_address}"
-                    )
-                else:
-                    return {"account": bound_account, "staker_address": bound_address}
+                candidates.append((bound_account, derived))
 
         # 2. Account context passed to the verify call.
-        # We only trust the account context if it matches the on-chain staker
-        # (validated) AND the account name is present in the vault. This prevents
-        # accepting an arbitrary account name whose derived address happens to
-        # match a staker address read from chain.
-        if account_name_hint and staker_address:
+        if account_name_hint:
             try:
                 derived_hint = writer._get_account_address(account_name_hint)
             except Exception:
                 derived_hint = ""
-            if derived_hint and derived_hint.lower() == staker_address.lower():
-                if _account_for_staker(staker_address) == account_name_hint:
-                    return {"account": account_name_hint, "staker_address": staker_address}
+            if derived_hint:
+                candidates.append((account_name_hint, derived_hint))
 
-        # 3. Stake-transfer lookup -> vault account match.
-        if staker_address:
-            acct = _account_for_staker(staker_address)
-            if acct:
-                return {"account": acct, "staker_address": staker_address}
+        # 3. All vault accounts that derive a Base EVM address.
+        vault_accounts = _all_vault_evm_accounts()
+        for name, address in vault_accounts.items():
+            # Don't re-add the hint or binding if already tried.
+            if name in {c[0] for c in candidates}:
+                continue
+            candidates.append((name, address))
+
+        for name, address in candidates:
+            result = _try_candidate(name, address)
+            if result:
+                return result
 
         return None
 
