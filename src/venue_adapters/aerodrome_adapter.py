@@ -103,8 +103,10 @@ SELECTOR_STAKED_TOKEN_IDS = "0x4b937763"  # stakedTokenIds(address) -> uint256[]
 SELECTOR_POOL_OF_TOKEN = "0x83966021"  # poolOf(uint256 tokenId) -> address
 SELECTOR_POOL = "0x16f0115b"  # gauge.pool() -> address
 SELECTOR_EARNED_REWARDS = "0x3e491d47"  # earned(address,uint256 tokenId) -> uint256 (AERO, 18 decimals)
-# Gauge getReward selector — claims AERO emissions for a staked position
-SELECTOR_GET_REWARD = "0x1c4b774b"  # getReward(uint256 tokenId)
+# v5.3.28: pinned from SlipStream CLGauge.sol source — claimEmissions(address,address,uint256[])
+SELECTOR_CLAIM_EMISSIONS = "0xc04dbe2d"
+# v5.3.28: withdraw(uint256 tokenId) from Gauge.sol — unstakes a CL position
+SELECTOR_GAUGE_WITHDRAW = "0x28c55f69"
 
 # Common BASE token addresses
 WETH_BASE = "0x4200000000000000000000000000000000000006"

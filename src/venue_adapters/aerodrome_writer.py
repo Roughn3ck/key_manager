@@ -25,7 +25,8 @@ from venue_adapters.aerodrome_adapter import (
     V3_POSITION_MANAGERS,
     SELECTOR_COLLECT, SELECTOR_POSITIONS, SELECTOR_BALANCE_OF,
     SELECTOR_DECREASE_LIQUIDITY, SELECTOR_OWNER_OF,
-    SELECTOR_GET_REWARD,
+    SELECTOR_CLAIM_EMISSIONS,
+    SELECTOR_GAUGE_WITHDRAW,
     SELECTOR_INCREASE_LIQUIDITY,
     SELECTOR_TOKEN0, SELECTOR_TOKEN1, SELECTOR_SLOT0,
     SELECTOR_DECIMALS, SELECTOR_SYMBOL,
@@ -347,9 +348,16 @@ class AerodromeWriter(VenueWriter):
         )
 
         if gauge_address:
-            # STAKED: Call getReward(uint256 tokenId) on the gauge
-            # This claims AERO emissions to the caller (wallet)
-            data = SELECTOR_GET_REWARD + _pad_int_to_64(token_id)
+            # v5.3.28: STAKED — call claimEmissions(account, recipient, [tokenId]) on gauge.
+            # Selector pinned from SlipStream CLGauge.sol source.
+            data = (
+                SELECTOR_CLAIM_EMISSIONS
+                + _pad_address(params.account)
+                + _pad_address(recipient)
+                + _pad_int_to_64(0x60)  # offset to array data
+                + _pad_int_to_64(1)     # array length
+                + _pad_int_to_64(token_id)
+            )
             tx_hash = self._broadcast(params.account, gauge_address, data,
                                       gas_check_address=recipient)
             print(f"[aerodrome-writer] collect_fees (staked): token_id={token_id}, "
@@ -683,9 +691,16 @@ class AerodromeWriter(VenueWriter):
 
         # Step 1: Collect fees / claim rewards
         if gauge_address:
-            # STAKED: Call getReward(tokenId) on gauge
-            print(f"[aerodrome-compound] Step 1: getReward on gauge {gauge_address}")
-            collect_data = SELECTOR_GET_REWARD + _pad_int_to_64(token_id)
+            # v5.3.28: STAKED — claimEmissions(account, recipient, [tokenId]).
+            print(f"[aerodrome-compound] Step 1: claimEmissions on gauge {gauge_address}")
+            collect_data = (
+                SELECTOR_CLAIM_EMISSIONS
+                + _pad_address(params.account)
+                + _pad_address(account_address)
+                + _pad_int_to_64(0x60)
+                + _pad_int_to_64(1)
+                + _pad_int_to_64(token_id)
+            )
             collect_tx = self._broadcast(params.account, gauge_address, collect_data,
                                        gas_check_address=account_address)
             tx_hashes.append(collect_tx)

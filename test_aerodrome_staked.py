@@ -489,9 +489,9 @@ def test_guard_helper_blocks_staked_position():
     tab.gui = gui
 
     pos = LPPosition(
-        position_id="base:7088644",
-        venue="Aerodrome",
-        chain="BASE",
+        position_id="hyperevm:7088644",
+        venue="Project X",
+        chain="Hyperliquid",
         raw_data={"is_staked": True},
     )
     assert tab._lp_guard_staked_action(pos, "Close") is True

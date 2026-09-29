@@ -2468,6 +2468,8 @@ class LPTab:
         button_frame.pack(side="right", padx=(4, 0))
 
         status_label = self._lp_widgets.get("status_label")
+        _staked = bool(getattr(position, "raw_data", {}).get("is_staked"))
+        _is_aerodrome_staked = _staked and position.position_id and position.position_id.startswith("base:")
         can_manage_lp = position.position_id and (
             position.position_id.startswith("hyperevm:") or
             position.position_id.startswith("bsc:") or
@@ -2480,7 +2482,34 @@ class LPTab:
             position.position_id and position.position_id.startswith("sui:")
         )
 
-        if can_manage_lp:
+        if _is_aerodrome_staked:
+            # v5.3.28: staked Aerodrome gets gauge-specific write buttons.
+            claim_btn = ctk.CTkButton(button_frame, text="🌾 Claim", width=75, height=24,
+                              font=ctk.CTkFont(size=9, weight="bold"),
+                              fg_color=("#fd7e14", "#dc6602"),
+                              command=lambda pos=position: self._lp_staked_aerodrome_claim(pos))
+            claim_btn.pack(side="left", padx=(0, 2))
+            if status_label:
+                _lp_tooltip(claim_btn, status_label, "Claim AERO emissions from gauge")
+
+            unstake_btn = ctk.CTkButton(button_frame, text="🔓 Unstake", width=80, height=24,
+                              font=ctk.CTkFont(size=9, weight="bold"),
+                              fg_color=("#20c997", "#1aa179"),
+                              command=lambda pos=position: self._lp_staked_aerodrome_unstake(pos))
+            unstake_btn.pack(side="left", padx=(0, 2))
+            if status_label:
+                _lp_tooltip(unstake_btn, status_label, "Unstake NFT from gauge")
+
+            close_staked_btn = ctk.CTkButton(button_frame, text="✕ Close Staked", width=95, height=24,
+                              font=ctk.CTkFont(size=9, weight="bold"),
+                              fg_color=("#6f42c1", "#5a32a3"),
+                              hover_color=("#5a32a3", "#42288a"),
+                              command=lambda pos=position: self._lp_staked_aerodrome_close_dialog(pos))
+            close_staked_btn.pack(side="left", padx=(0, 2))
+            if status_label:
+                _lp_tooltip(close_staked_btn, status_label, "Claim → Unstake → Close")
+
+        elif can_manage_lp:
             collect_btn = ctk.CTkButton(button_frame, text="💰 Collect", width=75, height=24,
                               font=ctk.CTkFont(size=9, weight="bold"),
                               fg_color=("#fd7e14", "#dc6602"),
@@ -3796,11 +3825,19 @@ class LPTab:
             return None
 
     def _lp_guard_staked_action(self, position, action_name: str = "This action") -> bool:
-        """Block write actions on staked Aerodrome positions until unstaking is implemented."""
+        """v5.3.28: staked Aerodrome positions now have dedicated gauge buttons.
+
+        The legacy guard only blocks the normal Collect/Compound/Close buttons
+        when the staked Aerodrome card is somehow rendered without the staked
+        button set (defensive).
+        """
         if getattr(position, "raw_data", {}).get("is_staked"):
+            if position.position_id and position.position_id.startswith("base:"):
+                # Staked Aerodrome has its own Claim/Unstake/Close buttons.
+                return False
             self.gui.show_notification(
-                f"{action_name} unavailable: staked Aerodrome position. "
-                "Unstake the NFT from the gauge first (write op, Phase 2).",
+                f"{action_name} unavailable: staked position. "
+                "Unstake the NFT from the gauge first.",
                 error=True,
             )
             return True
@@ -4200,6 +4237,210 @@ class LPTab:
                 print(f"[record_fees] error: {e}")
 
         threading.Thread(target=_record_thread, daemon=True).start()
+
+    def _lp_staked_aerodrome_close_dialog(self, position):
+        """Guided close for a staked Aerodrome position: claim → unstake → close."""
+        from tkinter import messagebox
+
+        wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
+        if not wallet_address:
+            self.gui.show_notification("Could not resolve wallet address for this position", error=True)
+            return
+        if not account_name:
+            self.gui.show_notification("Could not resolve vault account for this address", error=True)
+            return
+
+        try:
+            chain_name, gas_token, venue_key = self._lp_resolve_venue_for_position(position)
+        except RuntimeError as e:
+            self.gui.show_notification(str(e), error=True)
+            return
+
+        if venue_key != "aerodrome":
+            self.gui.show_notification("Close Staked is only for Aerodrome positions", error=True)
+            return
+
+        # Ownership check.
+        try:
+            account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
+        except RuntimeError as e:
+            self.gui.show_notification(str(e), error=True)
+            return
+
+        confirm = messagebox.askyesno(
+            "Confirm: Close Staked Position",
+            "You are about to CLOSE this staked Aerodrome position:\n"
+            f"  {position.pair} ({position.position_id})\n\n"
+            "This will submit three steps:\n"
+            "  1. Claim AERO emissions from the gauge\n"
+            "  2. Unstake the NFT from the gauge\n"
+            "  3. Close the position (decrease + collect + burn)\n\n"
+            f"This will spend gas on {chain_name}.\n"
+            f"Ensure your wallet has {gas_token} for gas.\n"
+            "The key_manager_agent must be running and unlocked.\n\n"
+            "Continue?",
+        )
+        if not confirm:
+            return
+        self.gui.show_notification("Closing staked position... (claim → unstake → close)")
+
+        def _progress(msg):
+            self.gui.root.after(0, lambda: self.gui.show_notification(msg))
+
+        def _do_close_staked():
+            try:
+                from venue_adapters.aerodrome_gauge_writer import AerodromeGaugeWriter
+                writer = AerodromeGaugeWriter(
+                    agent_url=self.gui._get_agent_url(),
+                    price_engine=self.gui.price_engine,
+                )
+                db_path = self._lp_portfolio_db_path()
+                result = writer.close_staked_position(
+                    position.position_id, account_name,
+                    db_path=db_path,
+                    base_dir=self._lp_app_base_dir(),
+                    progress_callback=_progress,
+                )
+                if result.error:
+                    self.gui.root.after(0, lambda: self.gui.show_notification(
+                        f"Close staked error: {result.error}", error=True))
+                    return
+
+                # Record the final close via AerodromeWriter's CloseResult.
+                note = self._lp_record_close_for_writer(writer.base_writer, venue=venue_key)
+                sigs = [s for s in (result.steps[0].tx_hash, result.steps[1].tx_hash) if s]
+                sigs += result.close_tx_hashes
+                sigs_note = " · ".join(f"{s[:12]}..." for s in sigs if s)
+                notify = f"Staked position closed ✓ {note}"
+                if sigs_note:
+                    notify += f"  ·  TXs: {sigs_note}"
+                self.gui.root.after(0, lambda n=notify: self._lp_forget_position(position, notify=n))
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[close_staked] error: {error_msg}")
+                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
+                    error_msg = (
+                        f"Wallet has no {gas_token} for gas. Send {gas_token} to your wallet address "
+                        f"to pay for transactions. (Details: {error_msg})"
+                    )
+                self.gui.root.after(0, lambda: self.gui.show_notification(
+                    f"Close staked error: {error_msg}", error=True))
+
+        threading.Thread(target=_do_close_staked, daemon=True).start()
+
+    def _lp_staked_aerodrome_claim(self, position):
+        """Claim AERO emissions for a staked Aerodrome position."""
+        wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
+        if not wallet_address:
+            self.gui.show_notification("Could not resolve wallet address for this position", error=True)
+            return
+        if not account_name:
+            self.gui.show_notification("Could not resolve vault account for this address", error=True)
+            return
+
+        try:
+            chain_name, gas_token, venue_key = self._lp_resolve_venue_for_position(position)
+        except RuntimeError as e:
+            self.gui.show_notification(str(e), error=True)
+            return
+        if venue_key != "aerodrome":
+            self.gui.show_notification("Claim is only for Aerodrome positions", error=True)
+            return
+
+        try:
+            account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
+        except RuntimeError as e:
+            self.gui.show_notification(str(e), error=True)
+            return
+
+        self.gui.show_notification("Claiming AERO emissions from gauge...")
+
+        def _do_claim():
+            try:
+                from venue_adapters.aerodrome_gauge_writer import AerodromeGaugeWriter
+                writer = AerodromeGaugeWriter(
+                    agent_url=self.gui._get_agent_url(),
+                    price_engine=self.gui.price_engine,
+                )
+                result = writer.claim_emissions(
+                    int(position.position_id.split(":")[-1]), account_name)
+                if result.error:
+                    self.gui.root.after(0, lambda: self.gui.show_notification(
+                        f"Claim error: {result.error}", error=True))
+                    return
+                tx_note = f"TX: {result.tx_hash[:20]}..." if result.tx_hash else "nothing to claim"
+                self.gui.root.after(0, lambda: self.gui.show_notification(
+                    f"AERO emissions claimed ✓ {tx_note}"))
+                self.gui.root.after(5000, lambda: self._lp_refresh_position_fees(
+                    position.position_id, wallet_address))
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[staked_claim] error: {error_msg}")
+                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
+                    error_msg = (
+                        f"Wallet has no {gas_token} for gas. (Details: {error_msg})"
+                    )
+                self.gui.root.after(0, lambda: self.gui.show_notification(
+                    f"Claim error: {error_msg}", error=True))
+
+        threading.Thread(target=_do_claim, daemon=True).start()
+
+    def _lp_staked_aerodrome_unstake(self, position):
+        """Unstake a staked Aerodrome position from its gauge."""
+        wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
+        if not wallet_address:
+            self.gui.show_notification("Could not resolve wallet address for this position", error=True)
+            return
+        if not account_name:
+            self.gui.show_notification("Could not resolve vault account for this address", error=True)
+            return
+
+        try:
+            chain_name, gas_token, venue_key = self._lp_resolve_venue_for_position(position)
+        except RuntimeError as e:
+            self.gui.show_notification(str(e), error=True)
+            return
+        if venue_key != "aerodrome":
+            self.gui.show_notification("Unstake is only for Aerodrome positions", error=True)
+            return
+
+        try:
+            account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
+        except RuntimeError as e:
+            self.gui.show_notification(str(e), error=True)
+            return
+
+        self.gui.show_notification("Unstaking NFT from gauge...")
+
+        def _do_unstake():
+            try:
+                from venue_adapters.aerodrome_gauge_writer import AerodromeGaugeWriter
+                writer = AerodromeGaugeWriter(
+                    agent_url=self.gui._get_agent_url(),
+                    price_engine=self.gui.price_engine,
+                )
+                result = writer.unstake(
+                    int(position.position_id.split(":")[-1]), account_name)
+                if result.error and not result.skipped:
+                    self.gui.root.after(0, lambda: self.gui.show_notification(
+                        f"Unstake error: {result.error}", error=True))
+                    return
+                tx_note = f"TX: {result.tx_hash[:20]}..." if result.tx_hash else "already unstaked"
+                self.gui.root.after(0, lambda: self.gui.show_notification(
+                    f"Unstaked ✓ {tx_note}"))
+                self.gui.root.after(5000, lambda: self._lp_refresh_position_fees(
+                    position.position_id, wallet_address))
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[staked_unstake] error: {error_msg}")
+                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
+                    error_msg = (
+                        f"Wallet has no {gas_token} for gas. (Details: {error_msg})"
+                    )
+                self.gui.root.after(0, lambda: self.gui.show_notification(
+                    f"Unstake error: {error_msg}", error=True))
+
+        threading.Thread(target=_do_unstake, daemon=True).start()
 
     def _lp_close_position_dialog(self, position):
         """Show confirmation dialog and close an LP position completely.

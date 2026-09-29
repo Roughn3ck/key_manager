@@ -1,12 +1,69 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.27 (Minor bug fixes & hardening) — in progress 2026-09-29
+**Current Version:** v5.3.28 (Staked Aerodrome SlipStream gauge write operations) — in progress 2026-09-29
 **Last Updated:** 2026-09-29
 
 ---
 
-## v5.3.27 — Minor bug fixes & hardening (2026-09-29, in progress)
+## v5.3.28 — Staked Aerodrome SlipStream gauge write operations (2026-09-29, in progress)
+
+### Summary
+First-phase write support for staked Aerodrome SlipStream V3 positions. Positions that are staked into a CL gauge now expose **Claim AERO**, **Unstake**, and **Close Staked** actions. All signing is still delegated to the key_manager_agent; no private key handling is added. The close recorder is wired so AERO emission claims land in `FEE_EVENTS` with `SOURCE='HARVEST'` and the existing close recorder still handles the final close.
+
+### Changes
+
+#### 1. Pinned SlipStream CLGauge selectors
+- `src/venue_adapters/aerodrome_adapter.py`:
+  - Added `SELECTOR_CLAIM_EMISSIONS = "0xc04dbe2d"` (`claimEmissions(address,address,uint256[])`).
+  - Added `SELECTOR_GAUGE_WITHDRAW = "0x28c55f69"` (`withdraw(uint256)`).
+  - Replaced the old `SELECTOR_GET_REWARD = "0x1c4b774b"` (no longer used for gauge emissions).
+- `src/venue_adapters/aerodrome_writer.py`:
+  - `collect_fees` / `compound_fees` for staked positions now build dynamic-array calldata with `claimEmissions(account, recipient, [token_id])`.
+
+#### 2. New `AerodromeGaugeWriter` module
+- `src/venue_adapters/aerodrome_gauge_writer.py`:
+  - `claim_emissions(token_id, account)` — builds calldata, pre-flights via `eth_call`, broadcasts through the agent, waits for receipt.
+  - `unstake(token_id, account)` — `gauge.withdraw(token_id)`; idempotent (checks `ownerOf(tokenId)` and skips if already unstaked); confirms NFT returns to wallet.
+  - `close_staked_position(position_id, account, db_path, base_dir, progress_callback)` — guided sequence: claim → unstake → run the normal `AerodromeWriter.close_position()`.
+  - `claim_and_record(token_id, account, position_db_id, db_path, ...)` — claims and writes a `FEE_EVENTS` row with `SOURCE='HARVEST'`, USD value from `PriceEngine`, CAD value via `FX_RATES`.
+  - Pre-flight `eth_call` simulates the exact calldata from the resolved signer address before any broadcast; revert reasons are surfaced.
+
+#### 3. UI buttons for staked Aerodrome cards
+- `src/lp_tab.py`:
+  - Staked Aerodrome cards now render **Claim**, **Unstake**, and **Close Staked** instead of the normal Collect/Compound/Close.
+  - Legacy `_lp_guard_staked_action()` now allows the new dedicated staked flow and only blocks mis-rendered staked cards defensively.
+  - `_lp_staked_aerodrome_claim()` — resolves wallet/account, runs ownership check, shows progress, refreshes fees after claim.
+  - `_lp_staked_aerodrome_unstake()` — same pattern for gauge withdrawal.
+  - `_lp_staked_aerodrome_close_dialog()` — guided three-step confirmation (claim → unstake → close), records the final close via `_lp_record_close_for_writer`, and removes the card on success.
+
+#### 4. Tests
+- New `test_aerodrome_gauge_writer.py`:
+  - Calldata length + selector checks for claim and withdraw.
+  - Happy-path unstake including post-tx owner verification.
+  - Idempotent unstake when already unstaked.
+  - Pre-flight revert aborts before broadcast.
+  - Guided close state machine claim→unstake→close.
+  - Claim writes `FEE_EVENTS` row with `SOURCE='HARVEST'`, non-null USD amount, gauge note.
+
+### Files Changed
+- `src/gui_main_v5.py` — `VERSION = "5.3.28"`.
+- `src/venue_adapters/aerodrome_adapter.py` — new gauge selectors; removed stale `SELECTOR_GET_REWARD`.
+- `src/venue_adapters/aerodrome_writer.py` — `claimEmissions` dynamic-array calldata for collect/compound on staked positions.
+- `src/venue_adapters/aerodrome_gauge_writer.py` — NEW.
+- `src/lp_tab.py` — staked card buttons + three staked dialog methods.
+- `test_aerodrome_gauge_writer.py` — NEW.
+- `STATUS.md` — this section.
+
+### Verification
+- `python -m py_compile` on all touched files — PASS.
+- `test_aerodrome_gauge_writer.py` — ALL PASS.
+- Full suite run pending.
+- No EXE build, no git push, no release.
+
+---
+
+## v5.3.27 — Minor bug fixes & hardening (2026-09-29, released)
 
 ### Summary
 Iterative hardening release: no new functionality, just fixes for panel-persistence and honest failure semantics around saved-pool fetches.
