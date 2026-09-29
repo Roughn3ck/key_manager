@@ -126,6 +126,30 @@ First-phase write support for staked Aerodrome SlipStream V3 positions. Position
   - Close sequence skips burn when position still holds liquidity/fees.
 - Full `test_*.py` suite — ALL PASS.
 
+#### 9. Patch 5: deployed-gauge interface + BSC close crash (2026-09-30)
+- G2 deployed-gauge interface fix:
+  - Empirically verified on-chain that G2's CL gauge clone (`0x61e0b104…`, implementation `0x434bccab…`) uses:
+    - `getReward(uint256)` → `0x1c4b774b` for claiming emissions.
+    - `withdraw(uint256)` → `0x2e1a7d4d` for unstaking.
+    - `deposit(uint256)` → `0xb6b55f25`, `earned(address,uint256)` → `0x3e491d47`, `pool()` → `0x16f0115b`.
+  - The old `claimEmissions(address,address,uint256[])` (`0xc04dbe2d`) and `withdraw(uint256)` (`0x28c55f69`) selectors were miscalculated / from a different generation and are not present in this deployment.
+  - `src/venue_adapters/aerodrome_adapter.py`:
+    - Added correct selectors and helper `_gauge_interface(gauge_address)` that resolves the claim/unstake ABI per gauge by probing the implementation bytecode (EIP-1167 clone).
+    - `_get_staked_token_ids()` now tries `stakedValues(address)` first, then legacy `stakedTokenIds(address)`.
+  - `src/venue_adapters/aerodrome_gauge_writer.py`:
+    - `_claim_emissions_calldata()` and `_withdraw_calldata()` are now interface-resolved per gauge.
+    - `_simulate()` classifies a missing selector as `gauge interface mismatch` instead of the opaque `eth_call returned no data (reverted)`.
+  - `src/venue_adapters/aerodrome_writer.py`:
+    - `collect_fees()` and `compound_fees()` use `_gauge_interface()` for staked positions.
+- G4 BSC close crash fix:
+  - `src/lp_tab.py`:
+    - `_lp_verify_bsc_position_ownership()` now resolves the live position manager via `positions(tokenId)` before `ownerOf`, so a stale record pointing to the wrong manager still resolves.
+    - All close/collect/compound/staked-close ownership-check sites now catch `Exception` (not just `RuntimeError`) and surface the exact error in the dialog, eliminating silent no-ops.
+  - `test_bsc_writer.py`: added `test_dual_manager_resolves_live_manager_not_record`.
+  - `test_aerodrome_gauge_writer.py`: updated calldata tests for deployed-generation selectors and added alternate-generation probe test.
+  - `test_aerodrome_staked.py`: updated simulation RPC stub to use the real `SELECTOR_GAUGE_WITHDRAW`.
+- Full `test_*.py` suite — ALL PASS.
+
 ---
 
 ## v5.3.27 — Minor bug fixes & hardening (2026-09-29, released)

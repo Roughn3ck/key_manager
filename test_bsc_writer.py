@@ -13,6 +13,7 @@ from venue_adapters.bsc_adapter import (
     SELECTOR_COLLECT,
     SELECTOR_DECREASE_LIQUIDITY,
     PANCAKE_V3_POSITION_MANAGER,
+    UNISWAP_V3_POSITION_MANAGER,
 )
 
 
@@ -280,6 +281,43 @@ def test_close_position_skips_burn_when_position_not_empty():
     print("PASS test_close_position_skips_burn_when_position_not_empty")
 
 
+def test_dual_manager_resolves_live_manager_not_record():
+    """Token exists only on PancakeSwap V3; a stale saved record that points to
+    Uniswap V3 must still resolve to the manager that actually owns the NFT."""
+    import venue_adapters.bsc_adapter as bsc_mod
+
+    class _ManagerRpc:
+        def __init__(self):
+            self.calls = []
+
+        def __call__(self, method, params):
+            self.calls.append((method, params))
+            if method != "eth_call":
+                return None
+            data = params[0].get("data", "")
+            to = params[0].get("to", "").lower()
+            # PancakeSwap V3 holds the position: positions() returns nonce>0
+            if to == PANCAKE_V3_POSITION_MANAGER.lower() and data.startswith("0x99fbab88"):
+                return "0x" + "1" + "0" * 831
+            # Uniswap V3 does not hold it: positions() reverts/empty
+            if to == UNISWAP_V3_POSITION_MANAGER.lower() and data.startswith("0x99fbab88"):
+                return "0x" + "0" * 832
+            return "0x"
+
+    rpc = _ManagerRpc()
+    _set_rpc_handler(rpc)
+    writer = _new_writer()
+
+    # _find_position_manager scans both managers and picks the one whose
+    # positions(tokenId) returns a valid nonce/liquidity.
+    resolved_pm = writer._find_position_manager(123)
+    _restore_bsc_rpc_call()
+    assert resolved_pm.lower() == PANCAKE_V3_POSITION_MANAGER.lower(), resolved_pm
+    positions_calls = [c for c in rpc.calls if c[0] == "eth_call" and c[1][0].get("data", "").startswith("0x99fbab88")]
+    assert len(positions_calls) == 2, positions_calls
+    print("PASS test_dual_manager_resolves_live_manager_not_record")
+
+
 def main():
     test_resolve_owner_signer_matches_derivable_address()
     test_resolve_owner_signer_no_match_raises()
@@ -287,6 +325,7 @@ def main():
     test_collect_fees_calldata()
     test_close_position_sequence_with_burn()
     test_close_position_skips_burn_when_position_not_empty()
+    test_dual_manager_resolves_live_manager_not_record()
     print("ALL BSC WRITER TESTS PASS")
     return 0
 

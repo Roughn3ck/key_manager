@@ -1,14 +1,17 @@
 """Aerodrome SlipStream CLGauge writer — ColdStack v5.3.28.
 
 Write operations for staked Aerodrome SlipStream V3 positions:
-  - claim AERO emissions  (gauge.claimEmissions(account, recipient, [tokenId]))
+  - claim AERO emissions  (gauge.getReward(tokenId) or claimEmissions(...))
   - unstake               (gauge.withdraw(tokenId))
   - guided close staked   (claim → unstake → existing close flow)
 
 All signing is delegated to the key_manager_agent; this module never touches
-private keys. Selectors are pinned from the public SlipStream source:
-  - claimEmissions(address,address,uint256[]) -> 0xc04dbe2d
-  - withdraw(uint256)                         -> 0x28c55f69
+private keys. Selectors are resolved per deployed gauge by probing the
+implementation bytecode (EIP-1167 clone) and choosing the ABI that is actually
+present. The deployed SlipStream CLGauge uses:
+  - getReward(uint256)  -> 0x1c4b774b
+  - withdraw(uint256) -> 0x2e1a7d4d
+An alternate generation exposes claimEmissions(address,address,uint256[]).
 
 The claim row is written to coldtrack.db via the close-recorder path as a
 FEE_EVENTS SOURCE='HARVEST' row (per the existing close-recorder contract).
@@ -26,14 +29,18 @@ from price_engine import PriceEngine
 from venue_adapters.aerodrome_adapter import (
     AERO_TOKEN,
     SELECTOR_CLAIM_EMISSIONS,
+    SELECTOR_GAUGE_GET_REWARD_UINT,
     SELECTOR_GAUGE_WITHDRAW,
     SELECTOR_OWNER_OF,
     V3_POSITION_MANAGERS,
     _base_rpc_call,
     _decode_address,
+    _gauge_interface,
+    _get_eip1167_implementation,
     _get_gauge_address_for_position,
     _pad_address,
     _pad_int_to_64,
+    _probe_gauge_selectors,
 )
 from venue_adapters.aerodrome_writer import AerodromeWriter
 from venue_adapters.venue_writer import CollectFeesParams
@@ -86,14 +93,22 @@ class AerodromeGaugeWriter:
         self.price_engine = price_engine
 
     # ------------------------------------------------------------------
-    # Calldata builders (pinned selectors)
+    # Calldata builders (interface-resolved per gauge)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _claim_emissions_calldata(account: str, recipient: str, token_id: int) -> str:
-        """Encode claimEmissions(address account, address recipient, uint256[] tokenIds)."""
+    def _claim_emissions_calldata(self, account: str, recipient: str, token_id: int,
+                                  gauge_address: str) -> str:
+        """Encode the claim call that the deployed gauge actually exposes."""
+        interface = _gauge_interface(gauge_address)
+        selector = interface["claim_selector"]
+        args = interface["claim_args"]
+        if args == "uint256":
+            return selector + _pad_int_to_64(token_id)
+        if args == "address":
+            return selector + _pad_address(account)
+        # claimEmissions(address,address,uint256[])
         return (
-            SELECTOR_CLAIM_EMISSIONS
+            selector
             + _pad_address(account)
             + _pad_address(recipient)
             + _pad_int_to_64(0x60)  # array offset
@@ -101,10 +116,10 @@ class AerodromeGaugeWriter:
             + _pad_int_to_64(token_id)
         )
 
-    @staticmethod
-    def _withdraw_calldata(token_id: int) -> str:
-        """Encode withdraw(uint256 tokenId)."""
-        return SELECTOR_GAUGE_WITHDRAW + _pad_int_to_64(token_id)
+    def _withdraw_calldata(self, token_id: int, gauge_address: str) -> str:
+        """Encode withdraw(uint256 tokenId) using the gauge's actual selector."""
+        interface = _gauge_interface(gauge_address)
+        return interface["withdraw_selector"] + _pad_int_to_64(token_id)
 
     # ------------------------------------------------------------------
     # RPC helpers
@@ -112,6 +127,46 @@ class AerodromeGaugeWriter:
 
     def _rpc_call(self, method: str, params: list) -> Optional[Any]:
         return _base_rpc_call(method, params)
+
+    def _classify_simulation_failure(self, gauge_address: str, data: str,
+                                     exception_msg: str) -> str:
+        """Turn a raw eth_call failure into an honest, actionable reason.
+
+        If the selector used is not in the implementation bytecode, report a
+        gauge-interface mismatch before falling back to auth/precondition
+        classification.
+        """
+        selector = data[:10].lower()
+        present = _probe_gauge_selectors(gauge_address)
+        present_sels = {sel: name for name, sel in {
+            "get_reward_uint": SELECTOR_GAUGE_GET_REWARD_UINT[2:],
+            "get_reward_addr": "c00007b0",
+            "claim_emissions": SELECTOR_CLAIM_EMISSIONS[2:],
+            "withdraw_deployed": SELECTOR_GAUGE_WITHDRAW[2:],
+            "withdraw_alt": "28c55f69",
+        }.items()}
+        for name, sel in present_sels.items():
+            if selector == "0x" + sel:
+                if not present.get(name, False):
+                    return (
+                        f"gauge interface mismatch: selector {selector} "
+                        f"({name}) not found in gauge implementation "
+                        f"({_get_eip1167_implementation(gauge_address) or 'unknown'})"
+                    )
+                break
+
+        msg = exception_msg
+        if "execution reverted" in msg:
+            parts = msg.split("execution reverted")
+            if len(parts) > 1:
+                reason = parts[-1].strip(" :")
+                if reason:
+                    return reason
+        if "revert" in msg.lower():
+            return msg
+        if "no data" in msg.lower() or "returned none" in msg.lower():
+            return "gauge interface mismatch: selector not present (eth_call returned no data)"
+        return f"Simulation failed: {msg}"
 
     def _simulate(self, account: str, to: str, data: str) -> Optional[str]:
         """Simulate the exact calldata from the signer. Returns None on success,
@@ -125,19 +180,11 @@ class AerodromeGaugeWriter:
                 [{"from": from_address, "to": to, "data": data}, "latest"],
             )
             if result is None:
-                return "eth_call returned no data (reverted)"
+                return self._classify_simulation_failure(to, data,
+                    "eth_call returned no data (reverted)")
             return None
         except Exception as e:
-            msg = str(e)
-            if "execution reverted" in msg:
-                parts = msg.split("execution reverted")
-                if len(parts) > 1:
-                    reason = parts[-1].strip(" :")
-                    if reason:
-                        return reason
-            if "revert" in msg.lower():
-                return msg
-            return f"Simulation failed: {msg}"
+            return self._classify_simulation_failure(to, data, str(e))
 
     def _owner_of(self, token_id: int, position_manager: str) -> Optional[str]:
         data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
@@ -200,7 +247,7 @@ class AerodromeGaugeWriter:
         if recipient is None:
             recipient = wallet_address
 
-        data = self._claim_emissions_calldata(account, recipient, token_id)
+        data = self._claim_emissions_calldata(account, recipient, token_id, gauge_address)
         reason = self._simulate(account, gauge_address, data)
         if reason:
             return GaugeStepResult(step="claim", error=f"Pre-flight revert: {reason}")
@@ -242,7 +289,7 @@ class AerodromeGaugeWriter:
                                        error="Position is not held by a gauge")
             return GaugeStepResult(step="unstake", error="Could not locate gauge for position")
 
-        data = self._withdraw_calldata(token_id)
+        data = self._withdraw_calldata(token_id, gauge_address)
         reason = self._simulate(account, gauge_address, data)
         if reason:
             return GaugeStepResult(step="unstake", error=f"Pre-flight revert: {reason}")

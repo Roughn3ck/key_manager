@@ -3661,7 +3661,13 @@ class LPTab:
     def _lp_verify_bsc_position_ownership(
         self, position, token_id: int, account_name: str, writer
     ) -> str:
-        """BSC ownership resolver: ownerOf on BSC V3 position managers."""
+        """BSC ownership resolver: ownerOf on the LIVE BSC V3 position manager.
+
+        v5.3.28-patch4: BSC has two V3 position managers (Uniswap V3 + PancakeSwap
+        V3). We resolve the manager that actually owns the token id via
+        positions(tokenId) before running ownerOf, so stale records that point to
+        the wrong manager still resolve correctly.
+        """
         from venue_adapters.bsc_adapter import V3_POSITION_MANAGERS, SELECTOR_OWNER_OF
         from venue_adapters.bsc_adapter import _bsc_rpc_call
         from saved_pools import _find_pool_entry, update_saved_pool_binding
@@ -3676,18 +3682,51 @@ class LPTab:
                 return "0x" + result[-40:]
             return None
 
-        owner: Optional[str] = None
+        def _positions_response(pm: str) -> bool:
+            """Return True if positions(tokenId) returns a valid position."""
+            data = "0x99fbab88" + _pad_int_to_64(token_id)
+            try:
+                result = _bsc_rpc_call("eth_call", [{"to": pm, "data": data}, "latest"])
+            except Exception:
+                return False
+            if not result or not isinstance(result, str) or len(result) < 2 + 32 * 13:
+                return False
+            body = result[2:]
+            try:
+                nonce = int(body[0:64], 16)
+                liquidity = int(body[448:512], 16)
+                return nonce > 0 or liquidity > 0
+            except (ValueError, IndexError):
+                return False
+
+        # Resolve the live manager first. If a token id exists on only one of
+        # the BSC V3 managers, ownerOf on the other will revert, so we use the
+        # manager that actually holds the NFT.
         owner_pm: Optional[str] = None
         for pm in V3_POSITION_MANAGERS:
-            owner = _read_owner(pm)
-            if owner:
+            if _positions_response(pm):
                 owner_pm = pm
                 break
 
+        if owner_pm is None:
+            # Fallback to ownerOf across both managers (handles positions with
+            # zero liquidity but valid ownership).
+            for pm in V3_POSITION_MANAGERS:
+                if _read_owner(pm):
+                    owner_pm = pm
+                    break
+
+        if owner_pm is None:
+            raise RuntimeError(
+                f"stale record — refetch this position: token id {token_id} is not a live "
+                f"NFT on any BSC V3 position manager."
+            )
+
+        owner = _read_owner(owner_pm)
         if not owner:
             raise RuntimeError(
                 f"stale record — refetch this position: ownerOf({token_id}) reverted on "
-                f"all BSC position managers. The position id in this record is not a live NFT."
+                f"{owner_pm}. The position id in this record is not a live NFT."
             )
 
         return self._lp_resolve_evm_owner_to_account(
@@ -4108,11 +4147,22 @@ class LPTab:
             return
 
         # v5.3.17: fatal pre-flight ownership check for EVM positions.
+        # v5.3.28-patch4: catch ALL exceptions here — any uncaught error in a
+        # compound-dialog path must surface in the dialog, never be swallowed.
         if venue_key in ("aerodrome", "hyperliquid", "bsc"):
             try:
                 account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
             except RuntimeError as e:
                 self.gui.show_notification(str(e), error=True)
+                return
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[compound_fees] ownership check crashed: {error_msg}")
+                self.gui.show_notification(
+                    f"Ownership check failed for {position.position_id}: {error_msg}. "
+                    "Refetch this position and try again.",
+                    error=True,
+                )
                 return
 
         confirm = messagebox.askyesno(
@@ -4302,11 +4352,22 @@ class LPTab:
             return
 
         # v5.3.17: fatal pre-flight ownership check for EVM positions.
+        # v5.3.28-patch4: catch ALL exceptions here — any uncaught error in a
+        # collect-dialog path must surface in the dialog, never be swallowed.
         if venue_key in ("aerodrome", "hyperliquid", "bsc"):
             try:
                 account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
             except RuntimeError as e:
                 self.gui.show_notification(str(e), error=True)
+                return
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[collect_fees] ownership check crashed: {error_msg}")
+                self.gui.show_notification(
+                    f"Ownership check failed for {position.position_id}: {error_msg}. "
+                    "Refetch this position and try again.",
+                    error=True,
+                )
                 return
 
         confirm = messagebox.askyesno(
@@ -4481,10 +4542,21 @@ class LPTab:
             return
 
         # Ownership check.
+        # v5.3.28-patch4: catch ALL exceptions — staked close dialog must not
+        # swallow crashes.
         try:
             account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
         except RuntimeError as e:
             self.gui.show_notification(str(e), error=True)
+            return
+        except Exception as e:
+            error_msg = str(e)
+            print(f"[close_staked] ownership check crashed: {error_msg}")
+            self.gui.show_notification(
+                f"Ownership check failed for {position.position_id}: {error_msg}. "
+                "Refetch this position and try again.",
+                error=True,
+            )
             return
 
         confirm = messagebox.askyesno(
@@ -4833,11 +4905,22 @@ class LPTab:
             return
 
         # v5.3.17: fatal pre-flight ownership check for EVM positions.
+        # v5.3.28-patch4: catch ALL exceptions here — any uncaught error in a
+        # close-dialog path must surface in the dialog, never be swallowed.
         if venue_key in ("aerodrome", "hyperliquid", "bsc"):
             try:
                 account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
             except RuntimeError as e:
                 self.gui.show_notification(str(e), error=True)
+                return
+            except Exception as e:
+                error_msg = str(e)
+                print(f"[close_position] ownership check crashed: {error_msg}")
+                self.gui.show_notification(
+                    f"Ownership check failed for {position.position_id}: {error_msg}. "
+                    "Refetch this position and try again.",
+                    error=True,
+                )
                 return
 
         confirm = messagebox.askyesno(

@@ -26,12 +26,14 @@ from venue_adapters.aerodrome_adapter import (
     SELECTOR_COLLECT, SELECTOR_POSITIONS, SELECTOR_BALANCE_OF,
     SELECTOR_DECREASE_LIQUIDITY, SELECTOR_OWNER_OF,
     SELECTOR_CLAIM_EMISSIONS,
+    SELECTOR_GAUGE_GET_REWARD_UINT,
     SELECTOR_GAUGE_WITHDRAW,
     SELECTOR_INCREASE_LIQUIDITY,
     SELECTOR_TOKEN0, SELECTOR_TOKEN1, SELECTOR_SLOT0,
     SELECTOR_DECIMALS, SELECTOR_SYMBOL,
     _pad_int_to_64, _pad_address, _base_rpc_call,
     _decode_address, _decode_int24,
+    _gauge_interface,
     _get_gauge_address_for_position,
     _get_token_decimals, _get_token_symbol,
     _fetch_pool_state,
@@ -348,20 +350,26 @@ class AerodromeWriter(VenueWriter):
         )
 
         if gauge_address:
-            # v5.3.28: STAKED — call claimEmissions(account, recipient, [tokenId]) on gauge.
-            # Selector pinned from SlipStream CLGauge.sol source.
-            data = (
-                SELECTOR_CLAIM_EMISSIONS
-                + _pad_address(params.account)
-                + _pad_address(recipient)
-                + _pad_int_to_64(0x60)  # offset to array data
-                + _pad_int_to_64(1)     # array length
-                + _pad_int_to_64(token_id)
-            )
+            # v5.3.28-patch4: STAKED — call the claim function the deployed gauge
+            # actually exposes (getReward(uint256) or claimEmissions(...)).
+            interface = _gauge_interface(gauge_address)
+            if interface["claim_args"] == "uint256":
+                data = interface["claim_selector"] + _pad_int_to_64(token_id)
+            elif interface["claim_args"] == "address":
+                data = interface["claim_selector"] + _pad_address(params.account)
+            else:
+                data = (
+                    interface["claim_selector"]
+                    + _pad_address(params.account)
+                    + _pad_address(recipient)
+                    + _pad_int_to_64(0x60)  # offset to array data
+                    + _pad_int_to_64(1)     # array length
+                    + _pad_int_to_64(token_id)
+                )
             tx_hash = self._broadcast(params.account, gauge_address, data,
                                       gas_check_address=recipient)
             print(f"[aerodrome-writer] collect_fees (staked): token_id={token_id}, "
-                  f"gauge={gauge_address}, tx={tx_hash}")
+                  f"gauge={gauge_address}, sig={interface['claim_sig']}, tx={tx_hash}")
             return tx_hash
         else:
             # UNSTAKED: Call collect() on the PositionManager
@@ -691,16 +699,22 @@ class AerodromeWriter(VenueWriter):
 
         # Step 1: Collect fees / claim rewards
         if gauge_address:
-            # v5.3.28: STAKED — claimEmissions(account, recipient, [tokenId]).
-            print(f"[aerodrome-compound] Step 1: claimEmissions on gauge {gauge_address}")
-            collect_data = (
-                SELECTOR_CLAIM_EMISSIONS
-                + _pad_address(params.account)
-                + _pad_address(account_address)
-                + _pad_int_to_64(0x60)
-                + _pad_int_to_64(1)
-                + _pad_int_to_64(token_id)
-            )
+            # v5.3.28-patch4: STAKED — call the gauge's actual claim function.
+            interface = _gauge_interface(gauge_address)
+            print(f"[aerodrome-compound] Step 1: {interface['claim_sig']} on gauge {gauge_address}")
+            if interface["claim_args"] == "uint256":
+                collect_data = interface["claim_selector"] + _pad_int_to_64(token_id)
+            elif interface["claim_args"] == "address":
+                collect_data = interface["claim_selector"] + _pad_address(params.account)
+            else:
+                collect_data = (
+                    interface["claim_selector"]
+                    + _pad_address(params.account)
+                    + _pad_address(account_address)
+                    + _pad_int_to_64(0x60)
+                    + _pad_int_to_64(1)
+                    + _pad_int_to_64(token_id)
+                )
             collect_tx = self._broadcast(params.account, gauge_address, collect_data,
                                        gas_check_address=account_address)
             tx_hashes.append(collect_tx)

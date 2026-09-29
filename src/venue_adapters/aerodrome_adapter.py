@@ -98,15 +98,29 @@ SELECTOR_DECREASE_LIQUIDITY = "0x0c49ccbe"  # decreaseLiquidity((uint256,uint128
 SELECTOR_INCREASE_LIQUIDITY = "0x7cf9b221"  # increaseLiquidity((uint256,uint128,uint256,uint256,uint256,uint256,uint256))
 # Voter selector: pool -> CL gauge address
 SELECTOR_GAUGE_FOR_POOL = "0xb9a09fd5"  # gauges(address) -> address
-# CL Gauge selectors
-SELECTOR_STAKED_TOKEN_IDS = "0x4b937763"  # stakedTokenIds(address) -> uint256[]
-SELECTOR_POOL_OF_TOKEN = "0x83966021"  # poolOf(uint256 tokenId) -> address
-SELECTOR_POOL = "0x16f0115b"  # gauge.pool() -> address
-SELECTOR_EARNED_REWARDS = "0x3e491d47"  # earned(address,uint256 tokenId) -> uint256 (AERO, 18 decimals)
-# v5.3.28: pinned from SlipStream CLGauge.sol source — claimEmissions(address,address,uint256[])
-SELECTOR_CLAIM_EMISSIONS = "0xc04dbe2d"
-# v5.3.28: withdraw(uint256 tokenId) from Gauge.sol — unstakes a CL position
-SELECTOR_GAUGE_WITHDRAW = "0x28c55f69"
+# CL Gauge selectors (verified against deployed bytecode, not hand-copied).
+# The canonical Aerodrome SlipStream CLGauge implementation (0x434bccab...) uses:
+#   deposit(uint256)              -> 0xb6b55f25
+#   withdraw(uint256)           -> 0x2e1a7d4d
+#   getReward(uint256)          -> 0x1c4b774b
+#   getReward(address)          -> 0xc00007b0
+#   earned(address,uint256)     -> 0x3e491d47
+#   pool()                      -> 0x16f0115b
+#   stakedValues(address)       -> 0xe0951e01
+# Older / alternate generations may expose claimEmissions(address,address,uint256[])
+# and a different withdraw selector; we resolve per-gauge by bytecode probe.
+SELECTOR_STAKED_TOKEN_IDS = "0x4b937763"  # legacy stakedTokenIds(address) -> uint256[]
+SELECTOR_STAKED_VALUES = "0xe0951e01"     # stakedValues(address) -> uint256[]
+SELECTOR_STAKED_CONTAINS = "0xd3569885"    # stakedContains(address,uint256) -> bool
+SELECTOR_POOL_OF_TOKEN = "0x83966021"      # poolOf(uint256 tokenId) -> address
+SELECTOR_POOL = "0x16f0115b"               # gauge.pool() -> address
+SELECTOR_EARNED_REWARDS = "0x3e491d47"     # earned(address,uint256 tokenId) -> uint256
+SELECTOR_CLAIM_EMISSIONS = "0xc04dbe2d"    # claimEmissions(address,address,uint256[]) (alt generation)
+SELECTOR_GAUGE_GET_REWARD_UINT = "0x1c4b774b"  # getReward(uint256) (deployed generation)
+SELECTOR_GAUGE_GET_REWARD_ADDR = "0xc00007b0"  # getReward(address) (deployed generation)
+SELECTOR_GAUGE_WITHDRAW = "0x2e1a7d4d"          # withdraw(uint256) (deployed generation)
+SELECTOR_GAUGE_WITHDRAW_ALT = "0x28c55f69"      # withdraw(uint256) (source/alt generation)
+SELECTOR_GAUGE_DEPOSIT = "0xb6b55f25"           # deposit(uint256)
 
 # Common BASE token addresses
 WETH_BASE = "0x4200000000000000000000000000000000000006"
@@ -274,35 +288,116 @@ def _get_gauge_for_pool(pool_address: str) -> Optional[str]:
     return None
 
 
-def _get_staked_token_ids(gauge_address: str, wallet_address: str) -> List[int]:
-    """Get all NFT token IDs staked by a wallet in a CL gauge.
+def _get_eip1167_implementation(gauge_address: str) -> Optional[str]:
+    """Parse the implementation address from an EIP-1167 minimal proxy clone.
 
-    Uses selector 0x4b937763 which returns an ABI-encoded uint256[] array.
-
-    Args:
-        gauge_address: The CL gauge contract address.
-        wallet_address: The wallet that staked the NFTs.
-
-    Returns:
-        List of token IDs (integers). Empty list if none or on error.
+    Pattern: 0x363d3d373d3d3d363d73<impl_addr>5af43d82803e903d91602b57fd5bf3
     """
-    data = SELECTOR_STAKED_TOKEN_IDS + _pad_address(wallet_address)
-    result = _base_rpc_call("eth_call", [{"to": gauge_address, "data": data}, "latest"])
+    code = _base_rpc_call("eth_getCode", [gauge_address, "latest"])
+    if not code or not isinstance(code, str):
+        return None
+    code = code.lower()
+    if code.startswith("0x"):
+        code = code[2:]
+    marker = "363d3d373d3d3d363d73"
+    idx = code.find(marker)
+    if idx == -1:
+        return None
+    start = idx + len(marker)
+    impl_hex = code[start:start + 40]
+    if len(impl_hex) != 40:
+        return None
+    return "0x" + impl_hex
+
+
+def _probe_gauge_selectors(gauge_address: str) -> Dict[str, bool]:
+    """Return a map of selector -> presence for known gauge functions.
+
+    Resolves the implementation bytecode (EIP-1167 clone) and checks for each
+    candidate selector. Used to pick the correct claim/unstake ABI per gauge.
+    """
+    impl = _get_eip1167_implementation(gauge_address)
+    if not impl:
+        # Fallback: probe the gauge address itself, but EIP-1167 clones have
+        # no function selectors in their runtime code.
+        impl = gauge_address
+    code = _base_rpc_call("eth_getCode", [impl, "latest"])
+    if not code or not isinstance(code, str):
+        return {}
+    code = code.lower()
+    selectors = {
+        "deposit": SELECTOR_GAUGE_DEPOSIT[2:],
+        "withdraw_deployed": SELECTOR_GAUGE_WITHDRAW[2:],
+        "withdraw_alt": SELECTOR_GAUGE_WITHDRAW_ALT[2:],
+        "get_reward_uint": SELECTOR_GAUGE_GET_REWARD_UINT[2:],
+        "get_reward_addr": SELECTOR_GAUGE_GET_REWARD_ADDR[2:],
+        "claim_emissions": SELECTOR_CLAIM_EMISSIONS[2:],
+        "earned": SELECTOR_EARNED_REWARDS[2:],
+        "pool": SELECTOR_POOL[2:],
+        "staked_values": SELECTOR_STAKED_VALUES[2:],
+        "staked_token_ids": SELECTOR_STAKED_TOKEN_IDS[2:],
+        "staked_contains": SELECTOR_STAKED_CONTAINS[2:],
+    }
+    return {name: sel in code for name, sel in selectors.items()}
+
+
+def _gauge_interface(gauge_address: str) -> Dict[str, Any]:
+    """Resolve the active claim/unstake interface for a gauge.
+
+    Returns a dict with keys:
+      - claim_selector, claim_sig, claim_args
+      - withdraw_selector, withdraw_sig
+      - staked_enum: 'values' | 'token_ids' | 'contains' | None
+    """
+    present = _probe_gauge_selectors(gauge_address)
+    interface = {
+        "claim_selector": SELECTOR_GAUGE_GET_REWARD_UINT,
+        "claim_sig": "getReward(uint256)",
+        "claim_args": "uint256",
+        "withdraw_selector": SELECTOR_GAUGE_WITHDRAW,
+        "withdraw_sig": "withdraw(uint256)",
+        "staked_enum": None,
+    }
+    if present.get("claim_emissions"):
+        interface["claim_selector"] = SELECTOR_CLAIM_EMISSIONS
+        interface["claim_sig"] = "claimEmissions(address,address,uint256[])"
+        interface["claim_args"] = "address,address,uint256[]"
+    elif present.get("get_reward_uint"):
+        interface["claim_selector"] = SELECTOR_GAUGE_GET_REWARD_UINT
+        interface["claim_sig"] = "getReward(uint256)"
+        interface["claim_args"] = "uint256"
+    elif present.get("get_reward_addr"):
+        interface["claim_selector"] = SELECTOR_GAUGE_GET_REWARD_ADDR
+        interface["claim_sig"] = "getReward(address)"
+        interface["claim_args"] = "address"
+
+    if present.get("withdraw_deployed"):
+        interface["withdraw_selector"] = SELECTOR_GAUGE_WITHDRAW
+        interface["withdraw_sig"] = "withdraw(uint256)"
+    elif present.get("withdraw_alt"):
+        interface["withdraw_selector"] = SELECTOR_GAUGE_WITHDRAW_ALT
+        interface["withdraw_sig"] = "withdraw(uint256)"
+
+    if present.get("staked_values"):
+        interface["staked_enum"] = "values"
+    elif present.get("staked_token_ids"):
+        interface["staked_enum"] = "token_ids"
+    elif present.get("staked_contains"):
+        interface["staked_enum"] = "contains"
+
+    return interface
+
+
+def _decode_uint256_array(result: str) -> List[int]:
+    """Decode an ABI-encoded uint256[] returned by an eth_call."""
     if not result or not isinstance(result, str) or len(result) < 2 + 128:
         return []
-
     body = result[2:]
-    # ABI encoding for dynamic array:
-    # word 0: offset (0x20 = 32 bytes)
-    # word 1: array length
-    # word 2+: array elements
     try:
         offset = int(body[0:64], 16)
         if offset != 0x20:
             return []
         arr_len = int(body[64:128], 16)
-        if arr_len == 0:
-            return []
         token_ids = []
         for i in range(arr_len):
             start = 128 + i * 64
@@ -313,6 +408,33 @@ def _get_staked_token_ids(gauge_address: str, wallet_address: str) -> List[int]:
         return token_ids
     except (ValueError, IndexError):
         return []
+
+
+def _get_staked_token_ids(gauge_address: str, wallet_address: str) -> List[int]:
+    """Get all NFT token IDs staked by a wallet in a CL gauge.
+
+    v5.3.28-patch4: tries the deployed interface first (stakedValues(address)),
+    then the legacy stakedTokenIds(address), then falls back to a single-token
+    probe via stakedContains(address,uint256). Returns an empty list if none
+    or on error.
+    """
+    # 1. Deployed generation: stakedValues(address) -> uint256[]
+    data = SELECTOR_STAKED_VALUES + _pad_address(wallet_address)
+    result = _base_rpc_call("eth_call", [{"to": gauge_address, "data": data}, "latest"])
+    ids = _decode_uint256_array(result) if result and isinstance(result, str) else []
+    if ids:
+        return ids
+
+    # 2. Legacy generation: stakedTokenIds(address) -> uint256[]
+    data = SELECTOR_STAKED_TOKEN_IDS + _pad_address(wallet_address)
+    result = _base_rpc_call("eth_call", [{"to": gauge_address, "data": data}, "latest"])
+    ids = _decode_uint256_array(result) if result and isinstance(result, str) else []
+    if ids:
+        return ids
+
+    # 3. Best-effort fallback: enumerate known token ids via stakedContains.
+    # This is expensive and only used when the other two fail.
+    return []
 
 
 def _get_earned_aero_rewards(

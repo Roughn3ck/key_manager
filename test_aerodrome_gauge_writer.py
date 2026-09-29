@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from venue_adapters.aerodrome_adapter import (
     SELECTOR_CLAIM_EMISSIONS,
+    SELECTOR_GAUGE_GET_REWARD_UINT,
     SELECTOR_GAUGE_WITHDRAW,
     AERO_TOKEN,
 )
@@ -82,13 +83,35 @@ class _FakeRpc:
             # gauge.pool()
             if data == "0x16f0115b":
                 return "0x" + "0" * 24 + self.pool[2:]
-            # claimEmissions / withdraw pre-flight
+            # claim / withdraw pre-flight
             if self.preflight_should_revert:
                 raise RuntimeError("execution reverted: NA")
             # A successful eth_call returns 0x for write functions.
             return "0x"
         if method == "eth_getLogs":
             return self.transfer_logs
+        return None
+
+
+class _FakeRpcWithClaimEmissions:
+    """RPC stub where the gauge implementation exposes claimEmissions."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, method, params):
+        self.calls.append((method, params))
+        if method == "eth_getCode":
+            addr = params[0].lower()
+            if addr == "0x1111111111111111111111111111111111111111":
+                # Minimal EIP-1167 clone delegate marker containing claimEmissions only
+                return ("0x363d3d373d3d3d363d73"
+                        "2222222222222222222222222222222222222222"
+                        "5af43d82803e903d91602b57fd5bf3")
+            if addr == "0x2222222222222222222222222222222222222222":
+                # Implementation bytecode with only claimEmissions selector
+                return "0x" + SELECTOR_CLAIM_EMISSIONS[2:] + "00" * 100
+        if method == "eth_call":
+            return "0x"
         return None
 
 
@@ -100,29 +123,47 @@ def _new_writer():
     return writer
 
 
-def test_claim_emissions_calldata():
-    data = AerodromeGaugeWriter._claim_emissions_calldata(
+def test_claim_emissions_calldata_deployed_generation():
+    """G2 generation gauge uses getReward(uint256)."""
+    writer = _new_writer()
+    gauge = "0x61E0B10423a0009C3f83ab4313813d29437d0817"
+    data = writer._claim_emissions_calldata(
         "0x40c33B69e7aB4B22Eb8ec7D164e155F769F8c948",
         "0x40c33B69e7aB4B22Eb8ec7D164e155F769F8c948",
         7088644,
+        gauge,
     )
-    assert data.startswith(SELECTOR_CLAIM_EMISSIONS), data
-    # 2 addresses + offset + length + token_id = 5.125*32 words after selector (330 hex chars total)
-    assert len(data) == 330, f"length {len(data)}"
-    assert data[10:74].lower().endswith("40c33b69e7ab4b22eb8ec7d164e155f769f8c948")
-    # recipient (2nd word)
-    assert data[74:138].lower().endswith("40c33b69e7ab4b22eb8ec7d164e155f769f8c948")
-    # array offset 0x60 (3rd word)
-    assert data[138:202].lower() == "0" * 62 + "60"
-    # length 1 (4th word)
-    assert data[202:266].lower() == "0" * 63 + "1"
-    # token id (5th word)
-    assert int(data[266:330], 16) == 7088644
-    print("PASS test_claim_emissions_calldata")
+    assert data.startswith(SELECTOR_GAUGE_GET_REWARD_UINT), data
+    assert len(data) == 74, f"length {len(data)}"
+    assert int(data[10:], 16) == 7088644
+    print("PASS test_claim_emissions_calldata_deployed_generation")
+
+
+def test_claim_emissions_calldata_alt_generation():
+    """Alternate generation with claimEmissions(address,address,uint256[])."""
+    import venue_adapters.aerodrome_adapter as aero_mod
+    orig = aero_mod._base_rpc_call
+    aero_mod._base_rpc_call = _FakeRpcWithClaimEmissions()
+    try:
+        writer = _new_writer()
+        gauge = "0x1111111111111111111111111111111111111111"
+        data = writer._claim_emissions_calldata(
+            "0x40c33B69e7aB4B22Eb8ec7D164e155F769F8c948",
+            "0x40c33B69e7aB4B22Eb8ec7D164e155F769F8c948",
+            7088644,
+            gauge,
+        )
+        assert data.startswith(SELECTOR_CLAIM_EMISSIONS), data
+        assert len(data) == 330, f"length {len(data)}"
+    finally:
+        aero_mod._base_rpc_call = orig
+    print("PASS test_claim_emissions_calldata_alt_generation")
 
 
 def test_withdraw_calldata():
-    data = AerodromeGaugeWriter._withdraw_calldata(7088644)
+    writer = _new_writer()
+    gauge = "0x61E0B10423a0009C3f83ab4313813d29437d0817"
+    data = writer._withdraw_calldata(7088644, gauge)
     assert data.startswith(SELECTOR_GAUGE_WITHDRAW), data
     assert len(data) == 74, f"length {len(data)}"
     assert int(data[10:], 16) == 7088644
@@ -141,7 +182,7 @@ def test_unstake_happy_path():
     assert result.tx_hash is not None
     assert result.error is None
     assert not result.skipped
-    assert any(c[0] == "eth_call" and c[1][0]["data"].startswith("0x28c55f69")
+    assert any(c[0] == "eth_call" and c[1][0]["data"].startswith(SELECTOR_GAUGE_WITHDRAW)
                for c in rpc.calls)
     print("PASS test_unstake_happy_path")
 
@@ -293,7 +334,8 @@ def test_claim_recorded_as_fee_event():
 
 
 def main():
-    test_claim_emissions_calldata()
+    test_claim_emissions_calldata_deployed_generation()
+    test_claim_emissions_calldata_alt_generation()
     test_withdraw_calldata()
     test_unstake_happy_path()
     test_unstake_idempotent_when_already_unstaked()

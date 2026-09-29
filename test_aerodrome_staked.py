@@ -519,6 +519,7 @@ def test_guard_helper_allows_staked_aerodrome():
 
 def _make_simulation_rpc(gauge: str, authorized: set, non_auth_reason="NA", preconditions=None):
     """Return a fake _base_rpc_call that supports gauge simulation."""
+    from venue_adapters.aerodrome_adapter import SELECTOR_GAUGE_WITHDRAW
     preconditions = preconditions or {}
 
     def _fake_base_rpc(method, params):
@@ -530,7 +531,7 @@ def _make_simulation_rpc(gauge: str, authorized: set, non_auth_reason="NA", prec
                 return "0x" + "0" * 24 + gauge[2:]
             if data == "0x16f0115b":
                 return "0x" + "0" * 24 + "42d4a22cad0f5a49681a5715ce994af73a43b76b"
-            if data.startswith("0x28c55f69") and to == gauge.lower():
+            if data.startswith(SELECTOR_GAUGE_WITHDRAW) and to == gauge.lower():
                 if from_addr in {a.lower() for a in authorized}:
                     # Non-auth precondition overrides success if configured.
                     reason = preconditions.get(from_addr)
