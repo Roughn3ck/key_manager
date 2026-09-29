@@ -58,6 +58,7 @@ class _FakeRpc:
         self.position_manager = "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53"
         self.voter = "0x16613524e02ad97eDfeF371bC883F2F5d6C480A5"
         self._owner_calls = 0
+        self.transfer_logs = []  # list of log dicts for eth_getLogs stake transfer
 
     def __call__(self, method, params):
         self.calls.append((method, params))
@@ -86,6 +87,8 @@ class _FakeRpc:
                 raise RuntimeError("execution reverted: NA")
             # A successful eth_call returns 0x for write functions.
             return "0x"
+        if method == "eth_getLogs":
+            return self.transfer_logs
         return None
 
 
@@ -190,6 +193,55 @@ def test_guided_close_state_machine():
     print("PASS test_guided_close_state_machine")
 
 
+def test_close_staked_position_records_claim():
+    """Guided close should write a FEE_EVENTS row for the AERO claim."""
+    import coldtrack.db as db_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "coldtrack.db"
+        db = db_mod.ColdTrackDB(db_path)
+        db.init_schema()
+        conn = db.conn()
+        conn.execute(
+            "INSERT INTO PORTFOLIOS (NAME, TYPE) VALUES (?, ?)",
+            ("test", "internal"),
+        )
+        conn.execute(
+            "INSERT INTO ACCOUNTS (PORTFOLIO_ID, NAME, TYPE) VALUES (?, ?, ?)",
+            (1, "G2", "wallet"),
+        )
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO LP_POSITIONS (ACCOUNT_ID, POOL_NAME, PLATFORM, CHAIN, TOKEN_ID, STATUS, TOKEN_A, TOKEN_B, OPENED_DATE) "
+            "VALUES ((SELECT ID FROM ACCOUNTS WHERE NAME=?), ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("G2", "ETH/cbBTC", "Aerodrome", "Base", "7088644", "active", "ETH", "cbBTC", "2026-01-01"),
+        )
+        pos_id = cur.lastrowid
+        db.commit()
+        db.close()
+
+        writer = _new_writer()
+        rpc = _FakeRpc()
+        rpc.post_owner = writer.base_writer.address
+        writer._rpc_call = rpc
+        writer._find_position_manager = lambda tid: rpc.position_manager
+        writer._read_erc20_balance = lambda token, wallet: 1_000 * (10 ** 18)
+
+        result = writer.close_staked_position("base:7088644", "G2", db_path=db_path, base_dir=Path(tmp))
+        assert result.error is None, result.error
+
+        conn2 = sqlite3.connect(db_path)
+        conn2.row_factory = sqlite3.Row
+        row = conn2.execute(
+            "SELECT * FROM FEE_EVENTS WHERE POSITION_ID = ?", (pos_id,)
+        ).fetchone()
+        assert row is not None, "FEE_EVENTS row missing"
+        assert row["SOURCE"] == "HARVEST", row["SOURCE"]
+        assert "gauge" in row["NOTES"].lower(), row["NOTES"]
+        conn2.close()
+    print("PASS test_close_staked_position_records_claim")
+
+
 def test_claim_recorded_as_fee_event():
     """A claim should write a FEE_EVENTS row with SOURCE='HARVEST'."""
     import coldtrack.db as db_mod
@@ -247,6 +299,7 @@ def main():
     test_unstake_idempotent_when_already_unstaked()
     test_preflight_revert_aborts_before_broadcast()
     test_guided_close_state_machine()
+    test_close_staked_position_records_claim()
     test_claim_recorded_as_fee_event()
     print("ALL AERODROME GAUGE WRITER TESTS PASS")
     return 0

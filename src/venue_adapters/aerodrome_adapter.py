@@ -396,6 +396,51 @@ def _gauge_for_owner(owner: str, token_id: int = 0) -> Optional[str]:
     return None
 
 
+def _resolve_staker_from_transfer(
+    token_id: int,
+    position_manager: str,
+    gauge_address: str,
+    from_block: str = "0x0",
+    to_block: str = "latest",
+) -> Optional[str]:
+    """Return the staker address for a gauge-held NFT via ERC-721 Transfer logs.
+
+    Queries `eth_getLogs` for Transfer events of this token id where the
+    recipient is the gauge. The `from` of that transfer is the staker.
+    Public RPCs may limit range; if the query fails, returns None.
+    """
+    from venue_adapters.aerodrome_staked import TRANSFER_TOPIC
+
+    params = [{
+        "address": position_manager,
+        "fromBlock": from_block,
+        "toBlock": to_block,
+        "topics": [
+            TRANSFER_TOPIC,
+            None,
+            "0x" + "0" * 24 + gauge_address[2:].lower(),
+            "0x" + format(token_id, "064x"),
+        ],
+    }]
+    try:
+        result = _base_rpc_call("eth_getLogs", params)
+    except Exception:
+        return None
+    logs = result if isinstance(result, list) else []
+    if not logs:
+        return None
+    # The most recent transfer is the stake; take the last by block/log index.
+    logs.sort(key=lambda l: (
+        int(l.get("blockNumber", "0x0"), 16),
+        int(l.get("logIndex", "0x0"), 16),
+    ))
+    last = logs[-1]
+    topics = last.get("topics", [])
+    if len(topics) >= 2:
+        return "0x" + topics[1][-40:]
+    return None
+
+
 def _get_app_base_dir() -> Path:
     """Return the application's runtime directory, mirroring the vault logic.
 

@@ -73,6 +73,22 @@ First-phase write support for staked Aerodrome SlipStream V3 positions. Position
   - `test_aerodrome_staked.py`: added `test_guard_helper_allows_staked_aerodrome` to ensure staked Aerodrome cards use the dedicated gauge buttons.
 - Full `test_*.py` suite — ALL PASS.
 
+#### 6. Patch 2: staked signer for unsaved fetched positions (2026-09-29)
+- `src/lp_tab.py`:
+  - `_lp_verify_evm_position_ownership()` now resolves staked Aerodrome signers through a validated fallback chain:
+    1. saved-pool binding,
+    2. account context passed to the call (only accepted if its derived address matches the on-chain staker **and** the name is in the vault),
+    3. on-chain stake-transfer `eth_getLogs` lookup (Transfer → gauge; the `from` is the staker) matched against vault accounts.
+  - The "matches no vault account" error now names the **staker**, not the gauge.
+- `src/venue_adapters/aerodrome_adapter.py`:
+  - Added `_resolve_staker_from_transfer()` helper for the single-token stake-transfer lookup.
+- `src/venue_adapters/aerodrome_gauge_writer.py`:
+  - `close_staked_position()` records the claim row; test `test_close_staked_position_records_claim` added.
+- `test_aerodrome_staked.py`:
+  - Added `test_staked_signer_resolution_unsaved` (account context + vault match + stake transfer).
+  - Added `test_staked_signer_resolution_no_vault_match` (error names the staker).
+- Full `test_*.py` suite — ALL PASS.
+
 ---
 
 ## v5.3.27 — Minor bug fixes & hardening (2026-09-29, released)

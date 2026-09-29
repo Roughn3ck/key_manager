@@ -517,6 +517,122 @@ def test_guard_helper_allows_staked_aerodrome():
     gui.show_notification.assert_not_called()
 
 
+def test_staked_signer_resolution_unsaved():
+    """Unsaved staked position resolves signer from stake transfer via account context."""
+    from lp_tab import LPTab
+    from lp_engine import LPPosition
+    from unittest.mock import MagicMock, patch
+
+    gui = MagicMock()
+    tab = LPTab.__new__(LPTab)
+    tab.gui = gui
+
+    staker_address = "0x40c33B69e7aB4B22Eb8ec7D164e155F769F8c948"
+    gauge = "0x61E0B10423a0009C3f83ab4313813d29437d0817"
+    position_manager = "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53"
+
+    pos = LPPosition(
+        position_id="base:7088644",
+        venue="Aerodrome",
+        chain="BASE",
+        raw_data={"is_staked": True},
+    )
+
+    writer = MagicMock()
+    writer.is_available.return_value = True
+    writer._get_account_address.return_value = staker_address
+    gui.lp_engine.get_writer.return_value = writer
+    # Vault contains the staker account under the name passed as context.
+    gui.key_manager.address_db.get.return_value = {
+        "G2": {"addresses": [{"address": staker_address}]}
+    }
+
+    def _fake_base_rpc(method, params):
+        if method == "eth_call":
+            data = params[0]["data"]
+            to = params[0]["to"]
+            if data.startswith("0x6352211e"):
+                return "0x" + "0" * 24 + gauge[2:]
+            if data == "0x16f0115b":
+                return "0x" + "0" * 24 + "42d4a22cad0f5a49681a5715ce994af73a43b76b"
+        if method == "eth_getLogs":
+            return [{
+                "address": position_manager,
+                "blockNumber": "0x5",
+                "logIndex": "0x1",
+                "topics": [
+                    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                    "0x" + "0" * 24 + staker_address[2:].lower(),
+                    "0x" + "0" * 24 + gauge[2:].lower(),
+                    "0x" + format(7088644, "064x"),
+                ],
+            }]
+        return None
+
+    with patch("venue_adapters.aerodrome_adapter._base_rpc_call", _fake_base_rpc):
+        acct = tab._lp_verify_evm_position_ownership(pos, "G2", "aerodrome")
+    assert acct == "G2", acct
+
+
+def test_staked_signer_resolution_no_vault_match():
+    """If stake transfer staker is not in vault, error names the staker (not the gauge)."""
+    from lp_tab import LPTab
+    from lp_engine import LPPosition
+    from unittest.mock import MagicMock, patch
+
+    gui = MagicMock()
+    tab = LPTab.__new__(LPTab)
+    tab.gui = gui
+
+    staker_address = "0x0000000000000000000000000000000000000001"
+    gauge = "0x61E0B10423a0009C3f83ab4313813d29437d0817"
+    position_manager = "0xe1f8cd9AC4e4A65F54f38a5CdAfCA44f6dD68b53"
+
+    pos = LPPosition(
+        position_id="base:7088644",
+        venue="Aerodrome",
+        chain="BASE",
+        raw_data={"is_staked": True},
+    )
+
+    writer = MagicMock()
+    writer.is_available.return_value = True
+    writer._get_account_address.return_value = staker_address
+    gui.lp_engine.get_writer.return_value = writer
+    gui.key_manager = None  # no saved binding; vault has no matching account
+
+    def _fake_base_rpc(method, params):
+        if method == "eth_call":
+            data = params[0]["data"]
+            if data.startswith("0x6352211e"):
+                return "0x" + "0" * 24 + gauge[2:]
+            if data == "0x16f0115b":
+                return "0x" + "0" * 24 + "42d4a22cad0f5a49681a5715ce994af73a43b76b"
+        if method == "eth_getLogs":
+            return [{
+                "address": position_manager,
+                "blockNumber": "0x5",
+                "logIndex": "0x1",
+                "topics": [
+                    "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef",
+                    "0x" + "0" * 24 + staker_address[2:].lower(),
+                    "0x" + "0" * 24 + gauge[2:].lower(),
+                    "0x" + format(7088644, "064x"),
+                ],
+            }]
+        return None
+
+    try:
+        with patch("venue_adapters.aerodrome_adapter._base_rpc_call", _fake_base_rpc):
+            tab._lp_verify_evm_position_ownership(pos, "NOBODY", "aerodrome")
+    except RuntimeError as e:
+        msg = str(e)
+        assert "staked position #7088644" in msg, msg
+        assert "0x0000000000000000000000000000000000000001" in msg, msg
+        return
+    raise AssertionError("expected RuntimeError")
+
+
 def test_guard_helper_allows_unstaked_position():
     from lp_tab import LPTab
 
@@ -553,6 +669,8 @@ if __name__ == "__main__":
         test_wallet_address_active,
         test_guard_helper_blocks_staked_position,
         test_guard_helper_allows_staked_aerodrome,
+        test_staked_signer_resolution_unsaved,
+        test_staked_signer_resolution_no_vault_match,
         test_guard_helper_allows_unstaked_position,
     ]
     failed = 0

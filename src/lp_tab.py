@@ -3619,33 +3619,37 @@ class LPTab:
                 f"all Base position managers. The position id in this record is not a live NFT."
             )
 
-        # v5.3.28-patch: staked Aerodrome positions are held by a CL gauge.
-        # The signer is the bound account (the staker), not the gauge address.
+        # v5.3.28-patch2: staked Aerodrome positions are held by a CL gauge.
+        # The signer is the STAKER, not the gauge address. Resolve the staker by:
+        #   1. saved-pool binding (if present and derivable)
+        #   2. account context passed to this call (derive address; confirm via stake transfer)
+        #   3. on-chain stake-transfer lookup (eth_getLogs Transfer -> gauge; the 'from' is the staker)
+        # Validation: the chosen account's derived address must match the on-chain staker.
         if venue_key == "aerodrome" and owner_pm:
             from venue_adapters.aerodrome_adapter import _gauge_for_owner
             if _gauge_for_owner(owner):
-                saved_entry = None
-                if self.gui.key_manager:
-                    saved_entry = _find_pool_entry(
-                        self.gui.key_manager.address_db, token_id,
-                        (position.venue or "Aerodrome"),
+                staker = self._lp_resolve_staked_aerodrome_staker(
+                    token_id, owner_pm, owner, account_name, writer
+                )
+                if staker:
+                    print(
+                        f"[verify_ownership] {position.venue or 'Aerodrome'} #{token_id}: "
+                        f"staked in gauge {owner}; acting as '{staker['account']}' "
+                        f"(staker {staker['staker_address']})"
                     )
-                bound_account = (saved_entry.get("account_name") or "").strip() if saved_entry else ""
-                bound_address = (saved_entry.get("account_address") or "").strip() if saved_entry else ""
-                if bound_account and bound_address:
-                    try:
-                        derived_bound = writer._get_account_address(bound_account)
-                    except Exception:
-                        derived_bound = ""
-                    if derived_bound and derived_bound.lower() == bound_address.lower():
-                        print(
-                            f"[verify_ownership] {position.venue or 'Aerodrome'} #{token_id}: "
-                            f"staked in gauge {owner}; acting as bound account "
-                            f"'{bound_account}' ({derived_bound})"
-                        )
-                        return bound_account
-                # No usable binding: fall through to legacy path, which will fail
-                # cleanly because ownerOf == gauge is not a vault account.
+                    return staker["account"]
+                # Nothing validated: report the on-chain staker address, not the gauge.
+                # Resolve staker address explicitly for the error message.
+                staker_addr = "unknown"
+                try:
+                    from venue_adapters.aerodrome_adapter import _resolve_staker_from_transfer
+                    staker_addr = _resolve_staker_from_transfer(token_id, owner_pm, owner) or "unknown"
+                except Exception:
+                    pass
+                raise RuntimeError(
+                    f"staked position #{token_id}: staker {staker_addr} "
+                    f"matches no vault account on this chain — refetch"
+                )
 
         # 1. If the saved-pool record has a binding, verify it against the live owner.
         saved_entry = None
@@ -3838,6 +3842,97 @@ class LPTab:
             account_name = self._lp_get_current_account_name()
 
         return wallet_address, account_name
+
+    def _lp_resolve_staked_aerodrome_staker(
+        self,
+        token_id: int,
+        position_manager: str,
+        gauge_address: str,
+        account_name_hint: str,
+        writer,
+    ) -> Optional[Dict[str, str]]:
+        """Resolve and validate the staker account for a staked Aerodrome position.
+
+        Validation order:
+          1. saved-pool binding (account_name + account_address)
+          2. account context (account_name_hint) — derive address and confirm it
+             matches the on-chain staker
+          3. on-chain stake-transfer lookup (Transfer -> gauge; the 'from' is the staker)
+             matched against vault accounts
+
+        Returns {"account": str, "staker_address": str} or None if nothing validates.
+        """
+        from saved_pools import _find_pool_entry
+        from venue_adapters.aerodrome_adapter import _resolve_staker_from_transfer
+
+        staker_address = _resolve_staker_from_transfer(token_id, position_manager, gauge_address)
+
+        def _vault_accounts() -> Dict[str, str]:
+            """Return account_name -> EVM address for all vault accounts."""
+            if not self.gui.key_manager:
+                return {}
+            out = {}
+            accounts = self.gui.key_manager.address_db.get("accounts", {})
+            for name, data in accounts.items():
+                for addr in data.get("addresses", []):
+                    a = (addr.get("address") or "").strip().lower()
+                    if a.startswith("0x") and len(a) == 42:
+                        out[name] = a
+            return out
+
+        def _account_for_staker(staker: str) -> Optional[str]:
+            staker_l = (staker or "").lower()
+            if not staker_l:
+                return None
+            for name, addr in _vault_accounts().items():
+                if addr == staker_l:
+                    return name
+            return None
+
+        # 1. Saved-pool binding.
+        saved_entry = None
+        if self.gui.key_manager:
+            saved_entry = _find_pool_entry(
+                self.gui.key_manager.address_db, token_id, "Aerodrome"
+            )
+        bound_account = (saved_entry.get("account_name") or "").strip() if saved_entry else ""
+        bound_address = (saved_entry.get("account_address") or "").strip() if saved_entry else ""
+        if bound_account and bound_address:
+            try:
+                derived = writer._get_account_address(bound_account)
+            except Exception:
+                derived = ""
+            if derived and derived.lower() == bound_address.lower():
+                # Validate against on-chain staker when known.
+                if staker_address and derived.lower() != staker_address.lower():
+                    print(
+                        f"[staked-staker] #{token_id}: saved binding '{bound_account}' "
+                        f"address {derived} != on-chain staker {staker_address}"
+                    )
+                else:
+                    return {"account": bound_account, "staker_address": bound_address}
+
+        # 2. Account context passed to the verify call.
+        # We only trust the account context if it matches the on-chain staker
+        # (validated) AND the account name is present in the vault. This prevents
+        # accepting an arbitrary account name whose derived address happens to
+        # match a staker address read from chain.
+        if account_name_hint and staker_address:
+            try:
+                derived_hint = writer._get_account_address(account_name_hint)
+            except Exception:
+                derived_hint = ""
+            if derived_hint and derived_hint.lower() == staker_address.lower():
+                if _account_for_staker(staker_address) == account_name_hint:
+                    return {"account": account_name_hint, "staker_address": staker_address}
+
+        # 3. Stake-transfer lookup -> vault account match.
+        if staker_address:
+            acct = _account_for_staker(staker_address)
+            if acct:
+                return {"account": acct, "staker_address": staker_address}
+
+        return None
 
     def _lp_derive_address_for_account(self, account_name: str, expected_address: str) -> Optional[str]:
         """Derive the on-chain address for an account and compare it to expected.
