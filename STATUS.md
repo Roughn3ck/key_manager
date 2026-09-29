@@ -97,6 +97,24 @@ Iterative hardening release: no new functionality, just fixes for panel-persiste
 - Updated `src/crypto_engine.py`, `src/main.py`, `src/lp_tab.py`.
 - Updated `src/gui_main_v5.py`: lock-screen `VERSION` updated to `"5.3.27"` and header comment updated.
 - Full test suite run: all `test_*.py` files PASS.
+
+#### 11. Card-key canonicalization — fixed the "Fetch failed" root cause
+- `src/lp_tab.py`:
+  - Added one canonical helper `_lp_card_key(venue, position_id)` returning `venue.lower() + ":" + position_id` (lower-cased); Solana mints / Sui object IDs / numeric IDs are all used as-is.
+  - Converted every card-registry site to the canonical key: `_lp_update_saved_cards_in_place`, `_lp_fetch_all_saved_entries`, `_lp_refresh_saved_pools_in_place`, `_lp_on_loaded_all_saved`, `_lp_on_loaded`, `_lp_render_card`, `_lp_update_card_saved_state`, `_lp_remove_pool`, `_lp_update_card_fees`, and all saved-pool placeholder paths.
+  - Removed the destructive `for widget in scroll.winfo_children(): widget.destroy()` loop in `_lp_render_fetching_state()`; that loop was the card-vanish bug. The progress state now lives in the status line only.
+  - Enforced the correct state matrix:
+    - Fetch OK → existing saved card updates in place with live data (never a placeholder).
+    - Genuine per-pool adapter/RPC error → card shows the real error text.
+    - Rescan cannot reach the pool → existing card content is kept with a quiet `"refresh pending"` note.
+    - Generic `Fetch failed — live data unavailable` is no longer shown for pools whose fetch succeeded.
+  - Left legacy-fallback card-key lookups in `_lp_update_card_saved_state`, `_lp_remove_pool`, and `_lp_update_card_fees` so pre-canonicalization card keys still get cleaned up.
+- New `test_lp_card_keys.py`:
+  - Asserts historical 2-segment, 3-segment, and prefix-only card-key formats all resolve to the same canonical key.
+  - Asserts a saved pool present in fetched positions does **not** fall into the placeholder branch.
+  - Asserts `_lp_render_fetching_state()` does not destroy existing cards.
+- New `forge-coldstack-v5327-01d-card-key-canonicalization.md` prompt/checklist.
+- Full suite still green.
 - No EXE build, no release version bump beyond the lock-screen constant, no git push.
 
 ---

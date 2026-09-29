@@ -30,6 +30,17 @@ class LPTab:
         self._lp_auto_fetched = False
         self._lp_last_fetched_address = ""
 
+    @staticmethod
+    def _lp_card_key(venue: str, position_id: str) -> str:
+        """Return the canonical registry key for a position card.
+
+        v5.3.27d: ONE canonical key everywhere.  Lowercase venue + the raw
+        position_id (which already carries the chain prefix, e.g. ``base:123``
+        or ``solana:FbNH...``).  Numeric IDs are left as strings; Sui object
+        IDs / Orca mints are used as-is.
+        """
+        return f"{(venue or '').lower().strip()}:{position_id or ''}".lower()
+
     def create_tab(self, parent):
         """Build the LP Positions tab content with wallet scan + single position fetch."""
         root = ctk.CTkFrame(parent, fg_color="transparent")
@@ -656,7 +667,7 @@ class LPTab:
         for pos in extra_positions or []:
             if not pos or not pos.position_id:
                 continue
-            key = f"{pos.venue}:{pos.position_id}"
+            key = self._lp_card_key(pos.venue, pos.position_id)
             if key not in self._lp_widgets.setdefault("position_cards", {}):
                 self._lp_render_card(pos)
 
@@ -694,7 +705,8 @@ class LPTab:
                 continue
 
             prefix = self._lp_venue_prefix(venue)
-            pos_key = f"{venue}:{prefix}:{tid}"
+            position_id = f"{prefix}:{tid}"
+            pos_key = self._lp_card_key(venue, position_id)
 
             if wallet_error:
                 print(f"[rescan] {venue} #{tid}: WALLET ERROR {wallet_error}")
@@ -845,14 +857,14 @@ class LPTab:
         seen = set()
         unique = []
         for pos in positions:
-            key = f"{pos.venue}:{pos.position_id}"
+            key = self._lp_card_key(pos.venue, pos.position_id)
             if key not in seen:
                 seen.add(key)
                 unique.append(pos)
 
         # Update existing cards with fresh data, or add new cards.
         for pos in unique:
-            key = f"{pos.venue}:{pos.position_id}"
+            key = self._lp_card_key(pos.venue, pos.position_id)
             cards = self._lp_widgets.setdefault("position_cards", {})
             card = cards.get(key)
             if card:
@@ -870,7 +882,8 @@ class LPTab:
             if not tid:
                 continue
             prefix = self._lp_venue_prefix(venue)
-            pos_key = f"{venue}:{prefix}:{tid}"
+            position_id = f"{prefix}:{tid}"
+            pos_key = self._lp_card_key(venue, position_id)
             if pos_key in seen:
                 continue
             error = errors.get(pos_key)
@@ -952,7 +965,7 @@ class LPTab:
         seen = set()
         unique = []
         for pos in positions:
-            key = f"{pos.venue}:{pos.position_id}"
+            key = self._lp_card_key(pos.venue, pos.position_id)
             if key not in seen:
                 seen.add(key)
                 unique.append(pos)
@@ -969,23 +982,11 @@ class LPTab:
             wallet_address = entry.get("wallet_address", "")
             if not tid:
                 continue
-            if venue == "HyperEVM":
-                prefix = "hyperevm"
-            elif venue == "Aerodrome":
-                prefix = "base"
-            elif venue in ("Orca", "orca"):
-                prefix = "solana"
-            elif venue in ("Cetus", "cetus"):
-                prefix = "sui"
-            else:
-                prefix = "bsc"
-            pos_key = f"{venue}:{prefix}:{tid}"
+            prefix = self._lp_venue_prefix(venue)
+            position_id = f"{prefix}:{tid}"
+            pos_key = self._lp_card_key(venue, position_id)
             # Check if this pool was already rendered as a live card
-            already_rendered = False
-            for pos in unique:
-                if pos.position_id == f"{prefix}:{tid}":
-                    already_rendered = True
-                    break
+            already_rendered = pos_key in seen
             if already_rendered:
                 continue
             # Saved-pool placeholder: only this pool's card (closed ↔ failed).
@@ -2147,24 +2148,27 @@ class LPTab:
                 f"No {chain_label} address for this {venue or 'saved'} pool. Select the correct account or address.")
 
     def _lp_render_fetching_state(self, all_saved, extra_positions):
-        """Immediate neutral state while the saved-pool rescan runs (v5.3.20).
+        """Immediate neutral state while the saved-pool rescan runs (v5.3.27d).
 
-        Renders the just-fetched positions as live cards and every other saved
-        pool as a neutral "Fetching positions…" card — so a warning is never
-        shown before a pool's own refetch has actually failed.
+        v5.3.27d: cards are NEVER destroyed here — that was the vanish bug.
+        Instead, the status line shows the neutral "Fetching positions…"
+        message while the background rescan updates each card in place.
+        Any newly-arrived extra positions are appended; existing cards keep
+        their last-known content.
         """
         scroll = self._lp_widgets.get("scroll")
         if not scroll:
             return
-        for widget in scroll.winfo_children():
-            widget.destroy()
         rendered_ids = set()
         for pos in extra_positions or []:
-            key = f"{pos.venue}:{pos.position_id}"
+            key = self._lp_card_key(pos.venue, pos.position_id)
             if key in rendered_ids:
                 continue
             rendered_ids.add(key)
-            self._lp_render_card(pos)
+            if key not in self._lp_widgets.setdefault("position_cards", {}):
+                self._lp_render_card(pos)
+        # Existing saved-pool cards stay visible; only append fetching-state
+        # placeholders for pools not already in the panel.
         for entry in all_saved or []:
             tid = entry.get("token_id")
             venue = entry.get("venue", "HyperEVM")
@@ -2172,7 +2176,9 @@ class LPTab:
             if not tid:
                 continue
             prefix = self._lp_venue_prefix(venue)
-            if f"{prefix}:{tid}" in rendered_ids:
+            position_id = f"{prefix}:{tid}"
+            pos_key = self._lp_card_key(venue, position_id)
+            if pos_key in rendered_ids or pos_key in self._lp_widgets.get("position_cards", {}):
                 continue
             self._lp_render_saved_placeholder(
                 scroll, entry, prefix, tid, venue, pair, state="fetching")
@@ -2391,7 +2397,7 @@ class LPTab:
         seen = set()
         unique_positions = []
         for pos in positions:
-            key = f"{pos.venue}:{pos.position_id}"
+            key = self._lp_card_key(pos.venue, pos.position_id)
             if key not in seen:
                 seen.add(key)
                 unique_positions.append(pos)
@@ -2415,22 +2421,11 @@ class LPTab:
             pair = entry.get("pair", "Unknown Pair")
             if not tid:
                 continue
-            if venue == "HyperEVM":
-                prefix = "hyperevm"
-            elif venue == "Aerodrome":
-                prefix = "base"
-            elif venue in ("Orca", "orca"):
-                prefix = "solana"
-            elif venue in ("Cetus", "cetus"):
-                prefix = "sui"
-            else:
-                prefix = "bsc"
+            prefix = self._lp_venue_prefix(venue)
+            position_id = f"{prefix}:{tid}"
+            pos_key = self._lp_card_key(venue, position_id)
             # Check if this pool was already rendered as a live card
-            already_rendered = False
-            for pos in unique_positions:
-                if pos.position_id == f"{prefix}:{tid}":
-                    already_rendered = True
-                    break
+            already_rendered = pos_key in seen
             if already_rendered:
                 continue
             # Saved-pool placeholder: only this pool's card (closed ↔ failed).
@@ -2525,7 +2520,7 @@ class LPTab:
         # v5.1: Track rendered cards by position_id so individual cards can be
         # removed without triggering a full wallet rescan.
         cards = self._lp_widgets.setdefault("position_cards", {})
-        key = f"{position.venue}:{position.position_id}"
+        key = self._lp_card_key(position.venue, position.position_id)
         cards[key] = card
         # Card layout: info on top (full width), buttons below (full width)
         # to prevent button clipping on long position text.
@@ -2928,15 +2923,17 @@ class LPTab:
         Keeps all other cards untouched and makes no network calls.
         """
         cards = self._lp_widgets.get("position_cards", {})
-        key = f"{position.venue}:{position.position_id}"
+        key = self._lp_card_key(position.venue, position.position_id)
         card = cards.get(key)
         if not card:
-            card = cards.get(position.position_id)
+            # Legacy fallback: position_id alone (pre-canonicalization keys).
+            legacy_key = (position.position_id or "").lower()
+            card = cards.get(legacy_key)
         if not card:
             return
         card.destroy()
         cards.pop(key, None)
-        cards.pop(position.position_id, None)
+        cards.pop((position.position_id or "").lower(), None)
         self._lp_render_card(position)
         self._lp_update_saved_pools_count("")
 
@@ -3337,7 +3334,8 @@ class LPTab:
             except Exception:
                 card_frame = None
         if not destroyed:
-            card_key = f"{venue}:{prefix}:{token_id}"
+            position_id = f"{prefix}:{token_id}"
+            card_key = self._lp_card_key(venue, position_id)
             cards = self._lp_widgets.get("position_cards", {})
             card = cards.pop(card_key, None)
             if card:
@@ -3347,9 +3345,17 @@ class LPTab:
                 except Exception:
                     pass
         if not destroyed:
-            # Fallback: some cards are keyed by the raw position_id
+            # Fallback: pre-canonicalization keys stored by raw position_id only.
             cards = self._lp_widgets.get("position_cards", {})
-            card = cards.pop(pid, None)
+            for raw_key in (pid, pid.lower()):
+                card = cards.pop(raw_key, None)
+                if card:
+                    try:
+                        card.destroy()
+                        destroyed = True
+                    except Exception:
+                        pass
+                    break
             if card:
                 try:
                     card.destroy()
@@ -3545,10 +3551,11 @@ class LPTab:
             venue: The venue name used as the card key prefix
         """
         cards = self._lp_widgets.get("position_cards", {})
-        key = f"{venue}:{position_id}"
+        key = self._lp_card_key(venue, position_id)
         card = cards.get(key)
         if not card:
-            card = cards.get(position_id)
+            # Legacy fallback for pre-canonicalization keys.
+            card = cards.get(position_id.lower())
         if not card:
             print(f"[update_card_fees] card not found for {key}, in-place refresh")
             self._lp_refresh_saved_pools_in_place(extra_positions=[fresh_pos])
@@ -3557,7 +3564,7 @@ class LPTab:
         # Destroy the old card and re-render with fresh data in the same position
         card.destroy()
         cards.pop(key, None)
-        cards.pop(position_id, None)
+        cards.pop(position_id.lower(), None)
         self._lp_render_card(fresh_pos)
 
         status = self._lp_widgets.get("status_label")

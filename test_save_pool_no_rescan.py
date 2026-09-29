@@ -58,7 +58,7 @@ def test_save_pool_no_rescan():
     tab._lp_render_card(pos)
     cards = tab._lp_widgets["position_cards"]
     assert cards, "Card should be tracked after render"
-    key = f"{pos.venue}:{pos.position_id}"
+    key = tab._lp_card_key(pos.venue, pos.position_id)
     assert key in cards, f"Card key {key} missing; cards={list(cards.keys())}"
     original_card = cards[key]
 
