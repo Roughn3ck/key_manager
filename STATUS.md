@@ -115,6 +115,24 @@ Iterative hardening release: no new functionality, just fixes for panel-persiste
   - Asserts `_lp_render_fetching_state()` does not destroy existing cards.
 - New `forge-coldstack-v5327-01d-card-key-canonicalization.md` prompt/checklist.
 - Full suite still green.
+
+#### 12. Fetch pipeline rerouted to multi-account, data-first refresh
+- `src/lp_tab.py`:
+  - Replaced the single-address, placeholder-first flows in `_lp_do_fetch`, `_lp_do_filtered_scan`, and `_lp_preload_saved_only` with the multi-account pipeline (`_lp_refresh_saved_pools_in_place` / `_lp_auto_fetch_all_saved`). The selected address/platform now scopes only the discovery scan, never the saved-pool refresh.
+  - Deleted the old `_lp_fetch_saved_only(address)` and `_lp_render_saved_placeholders(address)` single-address helpers; they are no longer called.
+  - Rewrote `_lp_on_loaded` to merge discovered positions into the existing panel instead of clearing it. Saved-pool placeholders are no longer rendered here — that is the responsibility of the multi-account refresh.
+  - Added mandatory `[card-render]` trace logging via `_lp_log_card_render(fn, key, state, error)` so every card render can be diagnosed from the log alone.
+  - Changed `_lp_render_saved_placeholder` default state to neutral fetching; the generic `Fetch failed — live data unavailable` text is now unreachable. A failure placeholder is rendered only when a real per-pool error is supplied.
+  - Updated `_lp_render_all_saved_placeholders()` to register cards under canonical keys and log `state=cached`.
+- New `test_lp_fetch_pipeline.py`:
+  - Asserts `_lp_do_fetch` refreshes saved pools across all accounts, not only those matching the selected address.
+  - Asserts `_lp_do_filtered_scan` still refreshes all saved venues even when the platform is filtered.
+  - Asserts `_lp_on_loaded` does not destroy existing cards.
+  - Asserts placeholder default state is `Fetching positions…`, not `Fetch failed`.
+  - Asserts the `[card-render]` trace format.
+- Updated `test_lp_fetch_fixes.py` for the new neutral-placeholder default.
+- New `forge-coldstack-v5327-01e-fetch-pipeline.md` prompt/checklist.
+- Full test suite run: all `test_*.py` files PASS.
 - No EXE build, no release version bump beyond the lock-screen constant, no git push.
 
 ---

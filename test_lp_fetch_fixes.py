@@ -125,7 +125,10 @@ def test_venue_scoped_refresh():
     assert ("solana", "Orca", "FbNHxe9VV797JWG7XH2msjwp5Rvb6dGzndwwkEXXXBKX") in closed_calls
     # Exactly one placeholder per saved pool (3 cards x 3 labels), none skipped.
     assert len(rendered) == 9, rendered
-    assert rendered.count("Fetch failed — live data unavailable. Click Scan Wallet to retry.") == 3
+    # v5.3.27e: neutral fetching placeholders replace the alarming generic
+    # "Fetch failed" default; failures appear only when a real error is passed.
+    assert rendered.count("Fetching positions…") == 3, rendered
+    assert rendered.count("Fetch failed — live data unavailable. Click Scan Wallet to retry.") == 0
     print("✅ venue-scoped refresh/dispatch tests PASS")
 
 

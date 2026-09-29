@@ -41,6 +41,13 @@ class LPTab:
         """
         return f"{(venue or '').lower().strip()}:{position_id or ''}".lower()
 
+    def _lp_log_card_render(self, fn_name: str, key: str, state: str, error: Optional[str] = None):
+        """Mandatory render trace so the next bug can be diagnosed from the log."""
+        err_text = error if error else "-"
+        if len(err_text) > 60:
+            err_text = err_text[:57] + "..."
+        print(f"[card-render] fn={fn_name} key={key} state={state} error={err_text}")
+
     def create_tab(self, parent):
         """Build the LP Positions tab content with wallet scan + single position fetch."""
         root = ctk.CTkFrame(parent, fg_color="transparent")
@@ -599,20 +606,16 @@ class LPTab:
                 return
 
     def _lp_preload_saved_only(self, address: str):
-        """Pre-load saved pool positions for a wallet without triggering a full scan.
+        """Pre-load saved pool positions without triggering a full scan.
 
-        This is called on tab change to show cached positions quickly.
-        The user must manually click Fetch/Scan to discover new positions.
+        v5.3.27e: previously this was a single-address, placeholder-first
+        fast path that stranded every other account's saved pools. It now
+        routes through the multi-account pipeline so all saved pools refresh
+        via their own bindings.
         """
-        if not self.gui.lp_engine or not self.gui.online_mode:
-            return
-        saved = load_saved_pools(self.gui.key_manager.address_db, wallet_address=address)
-        if not saved:
-            return
-        # Render saved pool placeholders immediately
-        self._lp_render_saved_placeholders(address)
-        # Fetch saved positions in background (fast — 1-4 seconds)
-        self._lp_fetch_saved_only(address)
+        # The address argument scopes only the wallet entry; the refresh itself
+        # covers every saved pool across all wallets.
+        self._lp_auto_fetch_all_saved()
 
     def _lp_auto_fetch_all_saved(self, extra_positions=None):
         """Auto-fetch ALL saved pools on tab open / restore.
@@ -1018,11 +1021,12 @@ class LPTab:
     def _lp_do_fetch(self):
         """Fetch LP positions for the entered address (threaded).
 
-        v5.1: Fast-path — if saved pools exist for this wallet, fetch them
-        first (1-4 seconds) so the user sees live cards quickly, then run
-        the full wallet scan in the background to discover new positions.
-        If no saved pools exist, the full scan runs immediately (existing
-        behavior).
+        v5.3.27e: Scan Wallet now uses the multi-account pipeline.
+        The selected address scopes only the discovery scan; every saved pool
+        is refreshed via its own bound account regardless of the current
+        selector. Existing cards are never bulk-cleared — the saved-pool
+        rescan updates them in place and the full scan appends newly
+        discovered positions.
         """
         if not self.gui.lp_engine or not self.gui.online_mode:
             self.gui.show_notification("Offline - enable Online Mode in Settings", error=True)
@@ -1038,9 +1042,10 @@ class LPTab:
                 else:
                     status.configure(text="Enter a wallet address first")
             return
+
         # Warn user about scan time for full wallet scans without saved pools
-        saved = load_saved_pools(self.gui.key_manager.address_db, wallet_address=address)
-        if not saved:
+        all_saved = load_saved_pools(self.gui.key_manager.address_db)
+        if not all_saved:
             from tkinter import messagebox
             confirm = messagebox.askyesno(
                 "Scan Wallet — Estimated Time",
@@ -1056,27 +1061,20 @@ class LPTab:
 
         status = self._lp_widgets.get("status_label")
         refresh_btn = self._lp_widgets.get("refresh_btn")
-        scroll = self._lp_widgets.get("scroll")
         if refresh_btn:
             refresh_btn.configure(state="disabled")
-        if scroll:
-            for widget in scroll.winfo_children():
-                widget.destroy()
 
-        # Fast-path — saved pools render first, then the full wallet scan follows.
-        if saved:
-            if status:
-                status.configure(text="Fetching saved positions... Full wallet scan will follow (seconds to <30 s; Aerodrome fallback 1–3 min under rate limits).")
-            # Render placeholders immediately, then fast-fetch saved pools,
-            # then schedule the full scan in the background.
-            self._lp_render_saved_placeholders(address)
-            self._lp_fetch_saved_only(address)
-            self.gui.root.after(2000, lambda: self._lp_do_full_scan(address))
-        else:
-            if status:
-                status.configure(text="Scanning wallet — Aerodrome ledger-seeded (seconds); full fallback scans may take 1–3 min under rate limits.")
-            # No saved pools — do full scan immediately (existing behavior).
-            self._lp_do_full_scan(address)
+        # v5.3.27e: do NOT clear the scroll frame. Existing saved-pool cards
+        # persist and are refreshed in place via their own bindings.
+        if status:
+            status.configure(text="Fetching saved positions across all accounts... Full wallet scan will follow.")
+
+        # Multi-account saved-pool refresh first (fast). The address is only
+        # used later to discover new positions in the full scan.
+        self._lp_refresh_saved_pools_in_place()
+        # Full wallet scan for the selected address follows; new positions are
+        # appended without destroying existing saved-pool cards.
+        self.gui.root.after(100, lambda: self._lp_do_full_scan(address))
 
     # ------------------------------------------------------------------
     # Close → ledger recording (v5.3.16)
@@ -1163,126 +1161,6 @@ class LPTab:
             if fees_earned:
                 return False
         return True
-
-    def _lp_fetch_saved_only(self, address: str):
-        """Fast-path: fetch only saved-pool positions by token ID (threaded).
-
-        Queries each saved pool's token ID via HyperliquidAdapter — no full
-        wallet scan.  For 1-3 saved pools this takes 1.4-4.2 seconds vs ~6
-        minutes for the full NFT scan.
-        """
-        from venue_adapters.hyperliquid_adapter import HyperliquidAdapter
-
-        saved = load_saved_pools(self.gui.key_manager.address_db, wallet_address=address)
-        if not saved:
-            return
-
-        adapter = HyperliquidAdapter()
-
-        # v5.3.4: resurrection filter — when "Include closed" is unchecked,
-        # closed saved positions must not reappear on the fast path either.
-        include_closed_var = self._lp_widgets.get("include_closed_var")
-        include_closed = include_closed_var.get() if include_closed_var else False
-
-        def _fast_thread():
-            # v5.3.20: validate saved-pool bindings against on-chain owners before
-            # rendering, so stale top-bar-selector bindings cannot poison labels.
-            self._lp_heal_saved_pool_bindings(saved)
-
-            positions = []
-            for entry in saved:
-                tid = entry.get("token_id")
-                venue = entry.get("venue", "HyperEVM")
-                if not tid:
-                    continue
-                # Convert token_id to int for EVM chains (stored as string in JSON)
-                if venue not in ("Orca", "orca", "Cetus", "cetus") and isinstance(tid, str):
-                    try:
-                        tid = int(tid)
-                    except ValueError:
-                        pass
-                if venue == "HyperEVM":
-                    try:
-                        pos = adapter.fetch_evm_position_by_token_id(
-                            tid, self.gui.price_engine, wallet_address=address
-                        )
-                        if pos and not pos.error:
-                            if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
-                                positions.append(pos)
-                    except Exception:
-                        pass
-                elif venue in ("Aerodrome", "aerodrome"):
-                    try:
-                        from venue_adapters.aerodrome_adapter import AerodromeAdapter
-                        pos = AerodromeAdapter()._fetch_position_by_token_id(
-                            tid, self.gui.price_engine, wallet_address=address
-                        )
-                        if pos and not pos.error:
-                            if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
-                                positions.append(pos)
-                    except Exception:
-                        pass
-                elif venue in ("BSC", "bsc"):
-                    try:
-                        from venue_adapters.bsc_adapter import BSCAdapter
-                        pos = BSCAdapter()._fetch_position_by_token_id(
-                            tid, self.gui.price_engine, wallet_address=address
-                        )
-                        if pos and not pos.error:
-                            if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
-                                positions.append(pos)
-                    except Exception:
-                        pass
-                elif venue in ("Orca", "orca"):
-                    # Orca: tid is the base58 position mint string
-                    try:
-                        from venue_adapters.orca_adapter import OrcaAdapter
-                        pos = OrcaAdapter()._fetch_by_position_mint(
-                            tid, self.gui.price_engine, wallet_address=address
-                        )
-                        if pos and not pos.error:
-                            # Attach wallet address for display
-                            if address:
-                                pos.wallet_address = address
-                            if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
-                                positions.append(pos)
-                    except Exception:
-                        pass
-                elif venue in ("Cetus", "cetus"):
-                    # Cetus (Sui): tid is the position object id (0x+64 hex)
-                    try:
-                        from venue_adapters.cetus_adapter import CetusAdapter
-                        pos = CetusAdapter().fetch_position(
-                            tid, online_mode=True, price_engine=self.gui.price_engine,
-                            wallet_address=address,
-                        )
-                        if pos and not pos.error:
-                            if address:
-                                pos.wallet_address = address
-                            if include_closed or not self._lp_saved_entry_is_closed(pos, venue):
-                                positions.append(pos)
-                    except Exception:
-                        pass
-            # v5.2.2: Saved Aerodrome pools may be staked in a gauge, and
-            # fetch_all_positions cannot enumerate them. Check gauges here.
-            aero_saved = [
-                e for e in saved
-                if e.get("venue", "").lower() == "aerodrome"
-            ]
-            if aero_saved:
-                try:
-                    from venue_adapters.aerodrome_adapter import AerodromeAdapter
-                    staked = AerodromeAdapter()._find_staked_positions_via_saved_pools(
-                        address, self.gui.price_engine, aero_saved
-                    )
-                    for staked_pos in staked:
-                        if not any(p.position_id == staked_pos.position_id for p in positions):
-                            positions.append(staked_pos)
-                except Exception:
-                    pass
-            self.gui.root.after(0, lambda: self._lp_on_loaded(positions, address))
-
-        threading.Thread(target=_fast_thread, daemon=True).start()
 
     def _lp_do_full_scan(self, address: str):
         """Full wallet scan: fetch all positions + merge saved pools (threaded).
@@ -1522,6 +1400,10 @@ class LPTab:
         Used when the user selects a specific Platform and clicks Fetch Position
         with an empty Position ID. Skips the "20 minutes" warning since the
         scan is limited to one venue.
+
+        v5.3.27e: the platform filter scopes only the discovery scan; saved-pool
+        refresh still runs across all accounts and venues so no other cards
+        are stranded.
         """
         if not self.gui.lp_engine or not self.gui.online_mode:
             self.gui.show_notification("Offline - enable Online Mode in Settings", error=True)
@@ -1529,25 +1411,17 @@ class LPTab:
 
         status = self._lp_widgets.get("status_label")
         refresh_btn = self._lp_widgets.get("refresh_btn")
-        scroll = self._lp_widgets.get("scroll")
         if refresh_btn:
             refresh_btn.configure(state="disabled")
-        if scroll:
-            for widget in scroll.winfo_children():
-                widget.destroy()
 
-        # Check saved pools first for fast-path
-        saved = load_saved_pools(self.gui.key_manager.address_db, wallet_address=address)
-        if saved:
-            if status:
-                status.configure(text=f"Fetching saved positions on {venue_key}... Full scan will follow.")
-            self._lp_render_saved_placeholders(address)
-            self._lp_fetch_saved_only(address)
-            self.gui.root.after(2000, lambda: self._lp_do_filtered_full_scan(address, venue_key))
-        else:
-            if status:
-                status.configure(text=f"Scanning wallet on {venue_key}...")
-            self._lp_do_filtered_full_scan(address, venue_key)
+        # v5.3.27e: do NOT clear the scroll frame. Existing cards persist.
+        if status:
+            status.configure(text=f"Fetching saved positions across all accounts... {venue_key} scan will follow.")
+
+        # Refresh all saved pools via their own bindings first.
+        self._lp_refresh_saved_pools_in_place()
+        # Then run the filtered discovery scan for the selected address/venue.
+        self.gui.root.after(100, lambda: self._lp_do_filtered_full_scan(address, venue_key))
 
     def _lp_do_filtered_full_scan(self, address: str, venue_key: str):
         """Full scan filtered to a specific venue (threaded).
@@ -1729,21 +1603,29 @@ class LPTab:
         clean Remove affordance instead of an alarming 'Fetch failed'. Only the
         specific saved pool's card is rendered — other saved pools are untouched.
 
-        v5.3.20: ``state="fetching"`` renders a NEUTRAL in-flight card (no
-        on-chain closed check, no warning styling) while the saved-pool rescan
-        runs — so a card never flashes "Fetch failed" before its refetch lands.
-
-        v5.3.21: ``error`` carries the adapter/RPC failure text for this pool so
-        the placeholder explains *why* it could not be fetched.
+        v5.3.27e: default state is ``"fetching"`` (neutral). The generic
+        "Fetch failed — live data unavailable" text is unreachable; a failure
+        placeholder is rendered only when a real per-pool ``error`` is supplied.
         """
+        position_id = f"{prefix}:{tid}"
+        pos_key = self._lp_card_key(venue, position_id)
+        cards = self._lp_widgets.setdefault("position_cards", {})
+        # Never paint a placeholder over an existing data card.
+        if pos_key in cards:
+            try:
+                cards[pos_key].destroy()
+            except Exception:
+                pass
+            cards.pop(pos_key, None)
         card = ctk.CTkFrame(scroll, corner_radius=10)
         card.pack(fill="x", pady=5, padx=5)
+        cards[pos_key] = card
         info = ctk.CTkFrame(card, fg_color="transparent")
         info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
 
         acct = self._lp_pool_account_label(entry)
         acct_suffix = f"  ·  {acct}" if acct else ""
-        if state == "fetching":
+        if state == "fetching" and not error:
             ctk.CTkLabel(info, text=f"⏳ {pair}  ·  {venue}{acct_suffix}",
                          font=ctk.CTkFont(size=14, weight="bold"),
                          text_color=("#666666", "#9a9a9a")).pack(anchor="w")
@@ -1751,6 +1633,7 @@ class LPTab:
                          font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
             ctk.CTkLabel(info, text="Fetching positions…",
                          font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+            self._lp_log_card_render("_lp_render_saved_placeholder", pos_key, "fetching")
         else:
             closed = self._lp_saved_pool_is_closed(entry, prefix, tid, venue)
             if closed:
@@ -1761,20 +1644,30 @@ class LPTab:
                              font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
                 ctk.CTkLabel(info, text="Position closed — nothing left on-chain. You can remove this entry.",
                              font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-            else:
+                self._lp_log_card_render("_lp_render_saved_placeholder", pos_key, "closed")
+            elif error:
                 ctk.CTkLabel(info, text=f"⚠️ {pair}  ·  {venue}{acct_suffix}",
                              font=ctk.CTkFont(size=14, weight="bold"),
                              text_color=("#cccc00", "#cccc00")).pack(anchor="w")
                 ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
                              font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
                 # Keep the message concise; very long RPC traces would dominate the card.
-                if error:
-                    err_text = error if len(error) <= 120 else error[:117] + "..."
-                    label_text = f"Fetch failed: {err_text}"
-                else:
-                    label_text = "Fetch failed — live data unavailable. Click Scan Wallet to retry."
+                err_text = error if len(error) <= 120 else error[:117] + "..."
+                label_text = f"Fetch failed: {err_text}"
                 ctk.CTkLabel(info, text=label_text,
                              font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+                self._lp_log_card_render("_lp_render_saved_placeholder", pos_key, "failed", error)
+            else:
+                # No error and not closed → neutral fetching state. The old
+                # generic "Fetch failed — live data unavailable" text is gone.
+                ctk.CTkLabel(info, text=f"⏳ {pair}  ·  {venue}{acct_suffix}",
+                             font=ctk.CTkFont(size=14, weight="bold"),
+                             text_color=("#666666", "#9a9a9a")).pack(anchor="w")
+                ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
+                             font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+                ctk.CTkLabel(info, text="Fetching positions…",
+                             font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+                self._lp_log_card_render("_lp_render_saved_placeholder", pos_key, "fetching")
 
         button_frame = ctk.CTkFrame(card, fg_color="transparent")
         button_frame.pack(side="right", padx=10, pady=8)
@@ -2376,10 +2269,15 @@ class LPTab:
         self._lp_do_fetch_single()
 
     def _lp_on_loaded(self, positions, address, orca_skip_note: str = "", empty_message: str = ""):
-        """Render fetched LP positions as cards. Keep unfetched saved pools as placeholders.
+        """Merge discovered positions into the existing card panel.
+
+        v5.3.27e: this callback no longer clears the scroll frame or bulk-renders
+        saved-pool placeholders. It appends only newly discovered positions and
+        leaves existing saved-pool cards untouched (they were already refreshed
+        in place by the multi-account pipeline).
 
         Args:
-            positions: Fetched LPPosition objects.
+            positions: Fetched LPPosition objects from the discovery scan.
             address: The wallet address that was scanned.
             orca_skip_note: Optional suffix explaining an Orca skip (v5.3.4),
                 e.g. " · Orca skipped (no Solana address for account)".
@@ -2391,21 +2289,20 @@ class LPTab:
         refresh_btn = self._lp_widgets.get("refresh_btn")
         if not scroll:
             return
-        for widget in scroll.winfo_children():
-            widget.destroy()
-        # v5.1: Deduplicate by venue:position_id
-        seen = set()
+
+        # Deduplicate by canonical key and against already-rendered cards.
+        cards = self._lp_widgets.setdefault("position_cards", {})
+        seen = set(cards.keys())
         unique_positions = []
         for pos in positions:
             key = self._lp_card_key(pos.venue, pos.position_id)
             if key not in seen:
                 seen.add(key)
                 unique_positions.append(pos)
-        if not unique_positions:
-            if empty_message:
-                label = empty_message
-            else:
-                label = f"No LP positions found for {address}"
+
+        if not unique_positions and not cards:
+            # Only show the empty message when the panel is truly empty.
+            label = empty_message or f"No LP positions found for {address}"
             ctk.CTkLabel(scroll, text=label,
                          font=ctk.CTkFont(size=13), text_color=("#555555", "gray60")).pack(pady=20)
         else:
@@ -2413,33 +2310,12 @@ class LPTab:
                 self._lp_initialize_tracking(pos, address)
                 self._lp_render_card(pos)
 
-        # Render placeholders for saved pools that failed to fetch
-        all_saved = load_saved_pools(self.gui.key_manager.address_db) if self.gui.key_manager else []
-        for entry in all_saved:
-            tid = entry.get("token_id")
-            venue = entry.get("venue", "HyperEVM")
-            pair = entry.get("pair", "Unknown Pair")
-            if not tid:
-                continue
-            prefix = self._lp_venue_prefix(venue)
-            position_id = f"{prefix}:{tid}"
-            pos_key = self._lp_card_key(venue, position_id)
-            # Check if this pool was already rendered as a live card
-            already_rendered = pos_key in seen
-            if already_rendered:
-                continue
-            # Saved-pool placeholder: only this pool's card (closed ↔ failed).
-            self._lp_render_saved_placeholder(scroll, entry, prefix, tid, venue, pair)
-
         if status:
-            fetched = len(unique_positions)
-            total_saved = len(all_saved)
-            if fetched < total_saved:
-                status.configure(text=f"Last check: {fetched}/{total_saved} position(s) — {total_saved - fetched} saved pool(s) failed to fetch{orca_skip_note}")
+            if unique_positions:
+                status.configure(text=f"Last check: {len(unique_positions)} new position(s){orca_skip_note}")
             else:
-                status.configure(text=f"Last check: {fetched} position(s){orca_skip_note}")
+                status.configure(text=f"No new positions discovered for {address}{orca_skip_note}")
         self._lp_update_button_states()
-        # v5.1: Update saved-pools counter after rendering live cards
         self._lp_update_saved_pools_count(address)
 
     def _lp_initialize_tracking(self, position, wallet_address: str):
@@ -2522,6 +2398,7 @@ class LPTab:
         cards = self._lp_widgets.setdefault("position_cards", {})
         key = self._lp_card_key(position.venue, position.position_id)
         cards[key] = card
+        self._lp_log_card_render("_lp_render_card", key, "data", position.error or None)
         # Card layout: info on top (full width), buttons below (full width)
         # to prevent button clipping on long position text.
         info = ctk.CTkFrame(card, corner_radius=10)
@@ -2937,85 +2814,6 @@ class LPTab:
         self._lp_render_card(position)
         self._lp_update_saved_pools_count("")
 
-    def _lp_render_saved_placeholders(self, address: str):
-        """Render placeholder cards for saved pools immediately from cache.
-
-        Called at the start of _lp_do_fetch() so the user sees cached pool
-        data (pair, venue, token_id) while the full wallet scan runs in the
-        background.  When the scan completes, _lp_on_loaded() clears the
-        scroll frame and re-renders with live data — replacing these
-        placeholders automatically.
-        """
-        if not self.gui.key_manager:
-            return
-        scroll = self._lp_widgets.get("scroll")
-        if not scroll:
-            return
-        saved = load_saved_pools(self.gui.key_manager.address_db, wallet_address=address)
-        if not saved:
-            return
-        for entry in saved:
-            tid = entry.get("token_id")
-            venue = entry.get("venue", "HyperEVM")
-            pair = entry.get("pair", "Unknown Pair")
-            if not tid:
-                continue
-            if venue == "HyperEVM":
-                prefix = "hyperevm"
-            elif venue == "Aerodrome":
-                prefix = "base"
-            elif venue in ("Orca", "orca"):
-                prefix = "solana"
-            elif venue in ("Cetus", "cetus"):
-                prefix = "sui"
-            else:
-                prefix = "bsc"
-            # Placeholder card
-            card = ctk.CTkFrame(scroll, corner_radius=10)
-            card.pack(fill="x", pady=5, padx=5)
-            info = ctk.CTkFrame(card, fg_color="transparent")
-            info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
-
-            header_text = f"⏳ {pair}  ·  {venue}"
-            _acct = self._lp_pool_account_label(entry)
-            if _acct:
-                header_text += f"  ·  {_acct}"
-            ctk.CTkLabel(info, text=header_text,
-                         font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
-            ctk.CTkLabel(info, text=f"ID: {prefix}:{tid}",
-                         font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-            if venue == "HyperEVM":
-                platform_label = "Platform: HyperEVM (Project X)"
-            elif venue == "Aerodrome":
-                platform_label = "Platform: Aerodrome (BASE)"
-            elif venue in ("Orca", "orca"):
-                platform_label = "Platform: Orca (Solana)"
-            else:
-                platform_label = "Platform: BSC (BNB Chain)"
-            ctk.CTkLabel(info, text=platform_label,
-                         font=ctk.CTkFont(size=11), text_color=("#444444", "gray70")).pack(anchor="w", pady=(2, 0))
-            ctk.CTkLabel(info, text="Fetching live data...",
-                         font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
-
-            button_frame = ctk.CTkFrame(card, fg_color="transparent")
-            button_frame.pack(side="right", padx=10, pady=8)
-
-            # Remove Pool button on placeholder (same logic as live cards)
-            class _PlaceholderPos:
-                def __init__(self, position_id, pair, venue):
-                    self.position_id = position_id
-                    self.pair = pair
-                    self.venue = venue
-                    self.pool_id = ""
-
-            ph_pos = _PlaceholderPos(f"{prefix}:{tid}", pair, venue)
-            ctk.CTkButton(button_frame, text="Remove Pool", width=90, height=26,
-                          font=ctk.CTkFont(size=10),
-                          fg_color=("#dc3545", "#c82333"),
-                          hover_color=("#c82333", "#a71d2a"),
-                          command=lambda pos=ph_pos, card=card: self._lp_remove_pool(pos, card)
-                          ).pack(pady=2)
-
     def _lp_render_all_saved_placeholders(self):
         """Render ALL saved pools from the encrypted vault as placeholder cards.
 
@@ -3052,18 +2850,13 @@ class LPTab:
             wallet_address = entry.get("wallet_address", "")
             if not tid:
                 continue
-            if venue == "HyperEVM":
-                prefix = "hyperevm"
-            elif venue == "Aerodrome":
-                prefix = "base"
-            elif venue in ("Orca", "orca"):
-                prefix = "solana"
-            elif venue in ("Cetus", "cetus"):
-                prefix = "sui"
-            else:
-                prefix = "bsc"
+            prefix = self._lp_venue_prefix(venue)
+            position_id = f"{prefix}:{tid}"
+            pos_key = self._lp_card_key(venue, position_id)
             card = ctk.CTkFrame(scroll, corner_radius=10)
             card.pack(fill="x", pady=5, padx=5)
+            cards = self._lp_widgets.setdefault("position_cards", {})
+            cards[pos_key] = card
             info = ctk.CTkFrame(card, fg_color="transparent")
             info.pack(side="left", fill="both", expand=True, padx=10, pady=8)
 
@@ -3073,6 +2866,7 @@ class LPTab:
                 header_text += f"  ·  {_acct}"
             ctk.CTkLabel(info, text=header_text,
                          font=ctk.CTkFont(size=14, weight="bold")).pack(anchor="w")
+            self._lp_log_card_render("_lp_render_all_saved_placeholders", pos_key, "cached")
             if pool_address:
                 ctk.CTkLabel(info, text=f"Pool: {pool_address[:20]}...",
                              font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
