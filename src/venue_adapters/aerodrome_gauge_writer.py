@@ -439,10 +439,30 @@ class AerodromeGaugeWriter:
 
         # Record the claim if it produced a tx. The close itself is recorded by
         # AerodromeWriter._post_close_state / record_close_and_export in lp_tab.
-        if claim.tx_hash:
-            # position_db_id unknown here; lp_tab should call claim_and_record()
-            # separately if ledger matching is needed, or record via the close result.
-            pass
+        if claim.tx_hash and db_path:
+            # Best-effort ledger row for the AERO emissions claim. We do not have
+            # the portfolio LP_POSITIONS.ID here, so we look it up by TOKEN_ID.
+            from coldtrack.db import ColdTrackDB
+            try:
+                db = ColdTrackDB(Path(db_path))
+                db.init_schema()
+                row = db.conn().execute(
+                    "SELECT ID FROM LP_POSITIONS WHERE TOKEN_ID = ? AND STATUS = 'active'",
+                    (str(token_id),),
+                ).fetchone()
+                if row:
+                    self.claim_and_record(
+                        token_id, account, row["ID"], db_path,
+                        position_manager=position_manager,
+                        base_dir=base_dir,
+                    )
+            except Exception as e:
+                print(f"[aero-gauge] claim ledger recording skipped: {e}")
+            finally:
+                try:
+                    db.close()
+                except Exception:
+                    pass
 
         return result
 

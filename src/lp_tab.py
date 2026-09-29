@@ -3552,8 +3552,14 @@ class LPTab:
         binding is missing or stale, the owner-anchored path resolves the correct
         account and PERSISTS it back into the saved-pool record (self-heal).
 
+        v5.3.28-patch: for STAKED Aerodrome positions the live owner is the CL
+        gauge, so the acting signer is the bound staker account (not ownerOf).
+        We detect gauge-held NFTs via `_is_gauge()` and verify the bound account
+        instead. The "owner matches no vault account" error only fires for
+        UNSTAKED positions whose EOA owner is not in the vault.
+
         Returns:
-            The owner-resolved account name.
+            The owner-resolved or staker-bound account name.
 
         Raises:
             RuntimeError: on any failure. Distinct messages for:
@@ -3612,6 +3618,34 @@ class LPTab:
                 f"stale record — refetch this position: ownerOf({token_id}) reverted on "
                 f"all Base position managers. The position id in this record is not a live NFT."
             )
+
+        # v5.3.28-patch: staked Aerodrome positions are held by a CL gauge.
+        # The signer is the bound account (the staker), not the gauge address.
+        if venue_key == "aerodrome" and owner_pm:
+            from venue_adapters.aerodrome_adapter import _gauge_for_owner
+            if _gauge_for_owner(owner):
+                saved_entry = None
+                if self.gui.key_manager:
+                    saved_entry = _find_pool_entry(
+                        self.gui.key_manager.address_db, token_id,
+                        (position.venue or "Aerodrome"),
+                    )
+                bound_account = (saved_entry.get("account_name") or "").strip() if saved_entry else ""
+                bound_address = (saved_entry.get("account_address") or "").strip() if saved_entry else ""
+                if bound_account and bound_address:
+                    try:
+                        derived_bound = writer._get_account_address(bound_account)
+                    except Exception:
+                        derived_bound = ""
+                    if derived_bound and derived_bound.lower() == bound_address.lower():
+                        print(
+                            f"[verify_ownership] {position.venue or 'Aerodrome'} #{token_id}: "
+                            f"staked in gauge {owner}; acting as bound account "
+                            f"'{bound_account}' ({derived_bound})"
+                        )
+                        return bound_account
+                # No usable binding: fall through to legacy path, which will fail
+                # cleanly because ownerOf == gauge is not a vault account.
 
         # 1. If the saved-pool record has a binding, verify it against the live owner.
         saved_entry = None

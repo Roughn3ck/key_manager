@@ -174,21 +174,19 @@ def test_preflight_revert_aborts_before_broadcast():
 def test_guided_close_state_machine():
     writer = _new_writer()
     rpc = _FakeRpc()
+    rpc.post_owner = writer.base_writer.address
     writer._rpc_call = rpc
     writer._find_position_manager = lambda tid: rpc.position_manager
-
-    # Speed up by making unstake report already-unstaked so close still runs.
-    def _fake_unstake(tid, account, position_manager=None):
-        return GaugeStepResult(step="unstake", skipped=True,
-                               error="Position already unstaked")
-    writer.unstake = _fake_unstake
 
     result = writer.close_staked_position("base:7088644", "G2", db_path=None)
     assert len(result.steps) == 2
     assert result.steps[0].step == "claim"
     assert result.steps[1].step == "unstake"
     assert len(result.close_tx_hashes) == 1
+    assert result.close_tx_hashes == ["0x" + "c" * 64]
     assert result.error is None
+    # The close flow used the bound account, not the gauge address.
+    assert writer.base_writer.close_position_calls == [("base:7088644", "G2")]
     print("PASS test_guided_close_state_machine")
 
 

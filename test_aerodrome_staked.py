@@ -499,6 +499,24 @@ def test_guard_helper_blocks_staked_position():
     assert "Unstake" in gui.show_notification.call_args[0][0]
 
 
+def test_guard_helper_allows_staked_aerodrome():
+    """Staked Aerodrome cards have their own dedicated gauge buttons."""
+    from lp_tab import LPTab
+
+    gui = MagicMock()
+    tab = LPTab.__new__(LPTab)
+    tab.gui = gui
+
+    pos = LPPosition(
+        position_id="base:7088644",
+        venue="Aerodrome",
+        chain="BASE",
+        raw_data={"is_staked": True},
+    )
+    assert tab._lp_guard_staked_action(pos, "Close") is False
+    gui.show_notification.assert_not_called()
+
+
 def test_guard_helper_allows_unstaked_position():
     from lp_tab import LPTab
 
@@ -534,6 +552,7 @@ if __name__ == "__main__":
         test_hard_budget_reports_coverage,
         test_wallet_address_active,
         test_guard_helper_blocks_staked_position,
+        test_guard_helper_allows_staked_aerodrome,
         test_guard_helper_allows_unstaked_position,
     ]
     failed = 0

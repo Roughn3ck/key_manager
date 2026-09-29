@@ -61,6 +61,18 @@ First-phase write support for staked Aerodrome SlipStream V3 positions. Position
 - Full suite run pending.
 - No EXE build, no git push, no release.
 
+#### 5. Patch: staked signer = bound account, not ownerOf (2026-09-29)
+- `src/lp_tab.py`:
+  - `_lp_verify_evm_position_ownership()` now detects gauge-held Aerodrome NFTs via `_gauge_for_owner()`.
+  - For staked positions the bound account is accepted as the signer; the "position owner matches no vault account" error is unreachable for gauge-held positions.
+  - Unstaked positions keep the existing ownerOf guard.
+- `src/venue_adapters/aerodrome_gauge_writer.py`:
+  - `close_staked_position()` now records the AERO emissions claim row to `FEE_EVENTS` by looking up the active `LP_POSITIONS` row by `TOKEN_ID` and calling `claim_and_record()`.
+- Tests updated:
+  - `test_aerodrome_gauge_writer.py`: `test_guided_close_state_machine` asserts the close step uses the bound account (`G2`), not the gauge address.
+  - `test_aerodrome_staked.py`: added `test_guard_helper_allows_staked_aerodrome` to ensure staked Aerodrome cards use the dedicated gauge buttons.
+- Full `test_*.py` suite — ALL PASS.
+
 ---
 
 ## v5.3.27 — Minor bug fixes & hardening (2026-09-29, released)
