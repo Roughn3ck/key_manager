@@ -107,6 +107,25 @@ First-phase write support for staked Aerodrome SlipStream V3 positions. Position
     - `test_staked_signer_resolution_non_auth_revert_validates`
 - Full `test_*.py` suite — ALL PASS.
 
+#### 8. Patch 4: BSC ownership pre-check + honest not-implemented errors + close burn (2026-09-30)
+- `src/venue_adapters/bsc_writer.py`:
+  - Added `_get_position_owner()`, `_resolve_owner_signer()` mirroring the Aerodrome owner-anchored signer resolution (binding first, owner match, precise mismatch error).
+  - `close_position()` now reads position state, decreases liquidity (if any), collects fees, re-reads the position, and burns the empty NFT when liquidity + tokensOwed are zero. Reports token symbols, fee, tx list, and end state.
+  - `collect_fees()` and close use the correct position manager per token; no private-key handling.
+- `src/lp_tab.py`:
+  - Split `_lp_verify_evm_position_ownership()` into venue-specific helpers:
+    - `_lp_verify_aerodrome_position_ownership()` — existing Aerodrome logic (unstaked + staked gauge simulation).
+    - `_lp_verify_bsc_position_ownership()` — new BSC path: `ownerOf(tokenId)` over BSC V3 position managers; binding self-heal; owner-anchored account resolution.
+    - `_lp_resolve_evm_owner_to_account()` — shared binding self-heal + owner resolution.
+  - Honest not-implemented wording: unsupported venues now report `ownership pre-check not yet implemented for venue '<v>' — close disabled until supported` instead of `stale record`.
+- `test_bsc_writer.py` (NEW):
+  - Signer resolution match / no-match.
+  - `get_address` passes `chain_id=56`.
+  - `collect_fees` calldata selector + tokenId encoding.
+  - Close sequence produces decrease + collect + burn when post-collect state is empty.
+  - Close sequence skips burn when position still holds liquidity/fees.
+- Full `test_*.py` suite — ALL PASS.
+
 ---
 
 ## v5.3.27 — Minor bug fixes & hardening (2026-09-29, released)

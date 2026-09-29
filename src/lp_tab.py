@@ -3581,13 +3581,28 @@ class LPTab:
                 "stale record — refetch this position: agent not available for ownership check"
             )
 
-        # EVM-only for now
-        if venue_key != "aerodrome":
-            raise RuntimeError(
-                f"stale record — refetch this position: ownership pre-check not implemented "
-                f"for venue '{venue_key}'"
+        # v5.3.28: unified EVM ownership pre-check dispatch. Each venue implements
+        # its own owner-resolution path below.
+        if venue_key == "aerodrome":
+            return self._lp_verify_aerodrome_position_ownership(
+                position, token_id, account_name, writer
+            )
+        if venue_key == "bsc":
+            return self._lp_verify_bsc_position_ownership(
+                position, token_id, account_name, writer
             )
 
+        # Honest wording for venues without a pre-check.
+        raise RuntimeError(
+            f"ownership pre-check not yet implemented for venue '{venue_key}' — "
+            f"close disabled until supported"
+        )
+
+    def _lp_verify_aerodrome_position_ownership(
+        self, position, token_id: int, account_name: str, writer
+    ) -> str:
+        """Aerodrome-specific ownership resolver. Handles both unstaked
+        (ownerOf == wallet) and staked (gauge-held) positions."""
         from venue_adapters.aerodrome_adapter import V3_POSITION_MANAGERS
         from venue_adapters.aerodrome_writer import SELECTOR_OWNER_OF, _pad_int_to_64
         from venue_adapters.aerodrome_writer import _base_rpc_call
@@ -3620,34 +3635,85 @@ class LPTab:
             )
 
         # v5.3.28-patch3: staked Aerodrome positions are held by a CL gauge.
-        # The signer is the STAKER, not the gauge address. Validate candidates by
-        # SIMULATING the gauge operation: a successful eth_call of
-        # gauge.withdraw(tokenId) from the candidate proves the candidate is the
-        # staker. The simulation IS the authorization the chain enforces.
-        if venue_key == "aerodrome" and owner_pm:
-            from venue_adapters.aerodrome_adapter import _gauge_for_owner
-            if _gauge_for_owner(owner):
-                staker = self._lp_resolve_staked_aerodrome_staker_by_simulation(
-                    token_id, owner, account_name, writer
+        # Validate candidates by simulating gauge.withdraw(tokenId).
+        from venue_adapters.aerodrome_adapter import _gauge_for_owner
+        if _gauge_for_owner(owner):
+            staker = self._lp_resolve_staked_aerodrome_staker_by_simulation(
+                token_id, owner, account_name, writer
+            )
+            if staker:
+                print(
+                    f"[verify_ownership] {position.venue or 'Aerodrome'} #{token_id}: "
+                    f"staked in gauge {owner}; acting as '{staker['account']}' "
+                    f"(validated by simulation)"
                 )
-                if staker:
-                    print(
-                        f"[verify_ownership] {position.venue or 'Aerodrome'} #{token_id}: "
-                        f"staked in gauge {owner}; acting as '{staker['account']}' "
-                        f"(validated by simulation)"
-                    )
-                    return staker["account"]
-                raise RuntimeError(
-                    f"staked position #{token_id}: no vault account is authorized to "
-                    f"act on this position — refetch"
-                )
+                return staker["account"]
+            raise RuntimeError(
+                f"staked position #{token_id}: no vault account is authorized to "
+                f"act on this position — refetch"
+            )
 
-        # 1. If the saved-pool record has a binding, verify it against the live owner.
+        return self._lp_resolve_evm_owner_to_account(
+            position, token_id, owner, owner_pm, account_name, writer,
+            chain_label="base", venue_default="Aerodrome",
+        )
+
+    def _lp_verify_bsc_position_ownership(
+        self, position, token_id: int, account_name: str, writer
+    ) -> str:
+        """BSC ownership resolver: ownerOf on BSC V3 position managers."""
+        from venue_adapters.bsc_adapter import V3_POSITION_MANAGERS, SELECTOR_OWNER_OF
+        from venue_adapters.bsc_adapter import _bsc_rpc_call
+        from saved_pools import _find_pool_entry, update_saved_pool_binding
+
+        def _read_owner(pm: str) -> Optional[str]:
+            data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
+            try:
+                result = _bsc_rpc_call("eth_call", [{"to": pm, "data": data}, "latest"])
+            except Exception:
+                return None
+            if result and isinstance(result, str) and len(result) >= 66:
+                return "0x" + result[-40:]
+            return None
+
+        owner: Optional[str] = None
+        owner_pm: Optional[str] = None
+        for pm in V3_POSITION_MANAGERS:
+            owner = _read_owner(pm)
+            if owner:
+                owner_pm = pm
+                break
+
+        if not owner:
+            raise RuntimeError(
+                f"stale record — refetch this position: ownerOf({token_id}) reverted on "
+                f"all BSC position managers. The position id in this record is not a live NFT."
+            )
+
+        return self._lp_resolve_evm_owner_to_account(
+            position, token_id, owner, owner_pm, account_name, writer,
+            chain_label="bsc", venue_default="BSC",
+        )
+
+    def _lp_resolve_evm_owner_to_account(
+        self,
+        position,
+        token_id: int,
+        owner: str,
+        owner_pm: Optional[str],
+        account_name: str,
+        writer,
+        chain_label: str,
+        venue_default: str,
+    ) -> str:
+        """Shared EVM owner->account resolution with binding self-heal."""
+        from saved_pools import _find_pool_entry, update_saved_pool_binding
+
         saved_entry = None
         if self.gui.key_manager:
             saved_entry = _find_pool_entry(
                 self.gui.key_manager.address_db, token_id,
-                (position.venue or "Aerodrome"),
+                (position.venue or venue_default),
             )
         bound_account = (saved_entry.get("account_name") or "").strip() if saved_entry else ""
         bound_address = (saved_entry.get("account_address") or "").strip() if saved_entry else ""
@@ -3658,11 +3724,7 @@ class LPTab:
             except Exception:
                 derived_bound = ""
             if derived_bound and derived_bound.lower() == owner.lower():
-                # Binding is correct and matches live owner.
                 return bound_account
-            # v5.3.20: binding is stale — self-heal to the live owner instead of
-            # erroring, so a top-bar selector that was set to the wrong account
-            # at save-time cannot permanently poison the card label.
             try:
                 owner_account = writer._resolve_owner_signer(token_id, owner_pm)
             except RuntimeError as e:
@@ -3674,7 +3736,7 @@ class LPTab:
                 raise
             derived_owner = writer._get_account_address(owner_account)
             print(
-                f"[verify_ownership] {position.venue or 'Aerodrome'} #{token_id}: "
+                f"[verify_ownership] {position.venue or venue_default} #{token_id}: "
                 f"binding poisoned as '{bound_account}' -> '{owner_account}' "
                 f"(owner {owner})"
             )
@@ -3683,10 +3745,10 @@ class LPTab:
                     update_saved_pool_binding(
                         self.gui.key_manager.address_db,
                         token_id,
-                        (position.venue or "Aerodrome"),
+                        (position.venue or venue_default),
                         owner_account,
                         derived_owner,
-                        "base",
+                        chain_label,
                     )
                     note = (
                         f"binding auto-healed (pre-flight): {bound_account} -> {owner_account} "
@@ -3698,7 +3760,7 @@ class LPTab:
                     print(f"[verify_ownership] failed to persist binding (non-fatal): {e}")
             return owner_account
 
-        # 2. Legacy self-heal path: no binding. Resolve owner-anchored account and persist it.
+        # No binding: resolve owner-anchored account.
         try:
             owner_account = writer._resolve_owner_signer(token_id, owner_pm)
         except RuntimeError as e:
@@ -3715,10 +3777,10 @@ class LPTab:
                 update_saved_pool_binding(
                     self.gui.key_manager.address_db,
                     token_id,
-                    (position.venue or "Aerodrome"),
+                    (position.venue or venue_default),
                     owner_account,
                     derived_owner,
-                    "base",
+                    chain_label,
                 )
                 self.gui.key_manager.save_encrypted_data(self.gui.current_password)
             except Exception as e:

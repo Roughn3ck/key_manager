@@ -24,8 +24,11 @@ from venue_adapters.bsc_adapter import (
     SELECTOR_COLLECT, SELECTOR_POSITIONS, SELECTOR_BALANCE_OF,
     SELECTOR_DECREASE_LIQUIDITY, SELECTOR_OWNER_OF,
     _pad_int_to_64, _pad_address, _bsc_rpc_call,
-    _decode_address,
+    _decode_address, _get_token_symbol,
 )
+
+SELECTOR_BURN = "0x42966c68"  # burn(uint256 tokenId)
+
 
 
 MAX_UINT128 = (1 << 128) - 1
@@ -98,13 +101,49 @@ class BSCWriter(VenueWriter):
         return False
 
     def _get_account_address(self, account: str) -> str:
-        """Get the EVM address for a vault account name."""
-        result = self._agent_call("get_address", account=account, chain="EVM")
+        """Get the EVM address for a vault account name on BSC (chain_id 56)."""
+        result = self._agent_call("get_address", account=account, chain="EVM", chain_id=self.chain_id)
         if isinstance(result, list) and result:
             return result[0].get("address", "")
         if isinstance(result, dict):
             return result.get("address", "")
         return str(result)
+
+    def _get_position_owner(self, token_id: int, position_manager: str) -> Optional[str]:
+        """Read ownerOf(tokenId) from the BSC position manager (read-only)."""
+        data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
+        result = _bsc_rpc_call("eth_call", [{"to": position_manager, "data": data}, "latest"])
+        if result and isinstance(result, str) and len(result) >= 66:
+            return "0x" + result[-40:]
+        return None
+
+    def _resolve_owner_signer(self, token_id: int, position_manager: str) -> str:
+        """Resolve the vault account that signs this BSC close by matching
+        ownerOf(tokenId) to a derivable BSC address — never a default/selected
+        account."""
+        owner = self._get_position_owner(token_id, position_manager)
+        if not owner:
+            raise RuntimeError(
+                f"Could not read ownerOf({token_id}) on {position_manager} — "
+                "cannot resolve the close signer."
+            )
+        owner_l = owner.lower()
+        accounts = self._agent_call("list_accounts")
+        accounts = accounts.get("result", accounts) if isinstance(accounts, dict) else accounts
+        derivable = []
+        if isinstance(accounts, dict):
+            for name, data in accounts.items():
+                for addr in (data or {}).get("addresses", []):
+                    a = (addr.get("address") or "").lower()
+                    if a.startswith("0x"):
+                        derivable.append((name, a))
+                        if a == owner_l:
+                            return name
+        addrs = ", ".join(sorted({a for _, a in derivable})) or "(none)"
+        raise RuntimeError(
+            f"position owner {owner} matches no account in this vault for BSC "
+            f"(derivable: {addrs})."
+        )
 
     def _read_native_balance(self, address: str) -> int:
         """Read BNB balance (in wei) for an address on BSC."""
@@ -256,8 +295,24 @@ class BSCWriter(VenueWriter):
         print(f"[bsc-writer] collect_fees: token_id={token_id}, pm={position_manager}, tx={tx_hash}")
         return tx_hash
 
+    def _get_position_state(self, token_id: int, position_manager: str) -> tuple:
+        """Read current liquidity and tokensOwed from positions(tokenId)."""
+        data = SELECTOR_POSITIONS + _pad_int_to_64(token_id)
+        result = _bsc_rpc_call("eth_call", [{"to": position_manager, "data": data}, "latest"])
+        if not result or not isinstance(result, str) or len(result) < 2 + 32 * 13:
+            return (0, 0, 0)
+        body = result[2:]
+        liquidity = int(body[448:512], 16)
+        owed0 = int(body[512:576], 16) if len(body) >= 576 else 0
+        owed1 = int(body[576:640], 16) if len(body) >= 640 else 0
+        return (liquidity, owed0, owed1)
+
     def close_position(self, position_id: str, account: str) -> List[str]:
         """Close a BSC V3 LP position: decrease liquidity (100%) + collect fees.
+
+        v5.3.28: after decrease+collect, read the position back. If liquidity
+        and tokensOwed are both zero, burn the empty NFT and report the
+        confirmed end state. Signing is delegated to the key_manager_agent.
 
         Returns a list of transaction hashes.
         """
@@ -268,17 +323,23 @@ class BSCWriter(VenueWriter):
         position_manager = self._find_position_manager(token_id)
         tx_hashes: List[str] = []
 
-        # 1. Read position to get liquidity
+        # Read full position state once for tokens/decimals.
         data = SELECTOR_POSITIONS + _pad_int_to_64(token_id)
         result = _bsc_rpc_call("eth_call", [{"to": position_manager, "data": data}, "latest"])
         if not result or not isinstance(result, str) or len(result) < 2 + 32 * 13:
             raise RuntimeError(f"Could not read position {token_id}")
 
         body = result[2:]
+        token0 = _decode_address(body[128:192]).lower()
+        token1 = _decode_address(body[192:256]).lower()
+        fee = int(body[256:320], 16)
         liquidity = int(body[448:512], 16)
 
+        recipient = self._get_account_address(account)
+        if not recipient:
+            raise RuntimeError(f"Could not resolve BSC address for account '{account}'")
+
         if liquidity > 0:
-            # 2. Decrease liquidity (remove all)
             decrease_data = (
                 SELECTOR_DECREASE_LIQUIDITY
                 + _pad_int_to_64(token_id)
@@ -289,17 +350,40 @@ class BSCWriter(VenueWriter):
             )
             tx1 = self._broadcast(account, position_manager, decrease_data)
             tx_hashes.append(tx1)
-            # Wait for receipt
             self._wait_for_tx_receipt(tx1, timeout=60)
 
-        # 3. Collect fees (also returns remaining tokens)
         collect_tx = self.collect_fees(CollectFeesParams(
             account=account,
             position_id=position_id,
         ))
         tx_hashes.append(collect_tx)
+        self._wait_for_tx_receipt(collect_tx, timeout=60)
 
+        # Burn the empty NFT if the position is now fully drained.
+        burn_sig = None
+        try:
+            post_liq, post_owed0, post_owed1 = self._get_position_state(token_id, position_manager)
+            if post_liq == 0 and post_owed0 == 0 and post_owed1 == 0:
+                burn_data = SELECTOR_BURN + _pad_int_to_64(token_id)
+                burn_sig = self._broadcast(account, position_manager, burn_data)
+                tx_hashes.append(burn_sig)
+                self._wait_for_tx_receipt(burn_sig, timeout=60)
+                print(f"[bsc-writer] burn ok: token_id={token_id}, tx={burn_sig}")
+            else:
+                print(
+                    f"[bsc-writer] skip burn: token_id={token_id}, "
+                    f"liq={post_liq}, owed0={post_owed0}, owed1={post_owed1}"
+                )
+        except Exception as e:
+            print(f"[bsc-writer] burn failed (non-fatal): {e}")
+
+        print(
+            f"[bsc-writer] close_position: token_id={token_id}, pm={position_manager}, "
+            f"token0={_get_token_symbol(token0)}({token0}), token1={_get_token_symbol(token1)}({token1}), "
+            f"fee={fee}, txs={tx_hashes}, end_state={'burned' if burn_sig else 'open'}"
+        )
         return tx_hashes
+
 
     # ------------------------------------------------------------------
     # Stubs for operations not yet implemented on BSC
