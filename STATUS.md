@@ -1,8 +1,8 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.28 (Staked Aerodrome SlipStream gauge write operations) — in progress 2026-09-29
-**Last Updated:** 2026-09-29
+**Current Version:** v5.3.28 (Staked Aerodrome SlipStream gauge write operations) — in progress 2026-09-30
+**Last Updated:** 2026-09-30
 
 ---
 
@@ -149,6 +149,27 @@ First-phase write support for staked Aerodrome SlipStream V3 positions. Position
   - `test_aerodrome_gauge_writer.py`: updated calldata tests for deployed-generation selectors and added alternate-generation probe test.
   - `test_aerodrome_staked.py`: updated simulation RPC stub to use the real `SELECTOR_GAUGE_WITHDRAW`.
 - Full `test_*.py` suite — ALL PASS.
+
+#### 10. Patch 6: BSC ownership reads centralized + closure/runtime lint fixes (2026-09-30)
+- Goal: complete the `forge-coldstack-bsc-round1-import-sweep.md` prompt.
+- `src/venue_adapters/bsc_adapter.py`:
+  - Added `owner_of(token_id)` helper that tries PancakeSwap V3, then Uniswap V3 `ownerOf(tokenId)` and returns the owner address (lowercase) or `None`.
+  - Added `position_manager_for_token_id(token_id)` helper that returns the manager address whose `positions(tokenId)` returns a valid nonce/liquidity, or `None`.
+- `src/lp_tab.py`:
+  - `_lp_verify_bsc_position_ownership()` now delegates the `ownerOf` read to `bsc_adapter.owner_of()` and manager resolution to `bsc_adapter.position_manager_for_token_id()` instead of hand-encoding calldata.
+  - Fixed `except Exception as e:` closure bug where `lambda: str(e)` would fail because `e` is deleted after the `except` block; changed to `lambda err=e: str(err)` in close/collect/compound/staked-close error surfacing paths.
+  - Removed stale `saved_pools` import in the BSC ownership helper.
+- `test_bsc_writer.py`:
+  - Added four tests that execute the real `LPTab._lp_verify_bsc_position_ownership()` with mocked `bsc_adapter._bsc_rpc_call` and writer:
+    - `test_lp_verify_bsc_position_ownership_match`
+    - `test_lp_verify_bsc_position_ownership_mismatch`
+    - `test_lp_verify_bsc_position_ownership_dual_manager`
+    - `test_lp_verify_bsc_position_ownership_stale_token`
+  - Cleaned up `nonlocal` and unused-variable lint noise surfaced by `pyflakes`.
+- Quality gates:
+  - `python -m py_compile` passes for `src/lp_tab.py`, `src/venue_adapters/bsc_adapter.py`, `src/venue_adapters/bsc_writer.py`, and `test_bsc_writer.py`.
+  - `pyflakes` (4.0.0) has zero undefined-name / import-star / syntax errors in the BSC/lp_tab close path files; remaining warnings are unused locals/imports elsewhere in `lp_tab.py` not introduced by this patch.
+  - Full `test_*.py` suite — ALL PASS.
 
 ---
 

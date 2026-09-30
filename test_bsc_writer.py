@@ -58,7 +58,6 @@ class _FakeRpc:
         if method != "eth_call":
             return None
         tx = params[0]
-        to = tx.get("to", "").lower()
         data = tx.get("data", "")
         # ownerOf
         if data.startswith("0x6352211e"):
@@ -198,7 +197,6 @@ def test_close_position_sequence_with_burn():
     _burn_test_broadcasts = []
 
     def broadcast(account, to, data, value=0):
-        nonlocal receipts
         _burn_test_broadcasts.append(data)
         tx_hash = f"0x{len(receipts):064x}"
         receipts[tx_hash] = {"status": "0x1"}
@@ -238,10 +236,6 @@ def test_close_position_sequence_with_burn():
 
     assert len(tx_hashes) == 3, tx_hashes  # decrease + collect + burn
 
-    # Calldata checks (broadcasted calldata, not eth_call reads)
-    broadcast_data = [b[2] for b in receipts.values() if isinstance(b, tuple)]
-    # receipts is a dict of tx_hash -> {"status": ...}; broadcasts were captured
-    # via the side-effect lambda above. Extract from a separate capture list.
     assert any(d.startswith(SELECTOR_DECREASE_LIQUIDITY) for d in _burn_test_broadcasts), _burn_test_broadcasts
     dec = next(d for d in _burn_test_broadcasts if d.startswith(SELECTOR_DECREASE_LIQUIDITY))
     assert dec[10:74].lower().endswith("7b")  # tokenId
@@ -258,7 +252,6 @@ def test_close_position_skips_burn_when_position_not_empty():
     receipts = {}
 
     def broadcast(account, to, data, value=0):
-        nonlocal receipts
         tx_hash = f"0x{len(receipts):064x}"
         receipts[tx_hash] = {"status": "0x1"}
         return tx_hash
@@ -281,10 +274,205 @@ def test_close_position_skips_burn_when_position_not_empty():
     print("PASS test_close_position_skips_burn_when_position_not_empty")
 
 
+def _make_lp_tab(gui):
+    """Build a bare LPTab instance wired to the supplied gui mock."""
+    from lp_tab import LPTab
+    tab = LPTab.__new__(LPTab)
+    tab.gui = gui
+    return tab
+
+
+def _stub_bsc_adapter(owner, pm, no_owner=False):
+    """Patch bsc_adapter._bsc_rpc_call with a stub that resolves ownerOf and
+    positions() per manager. Returns the original callable."""
+    import venue_adapters.bsc_adapter as bsc_mod
+    from venue_adapters.bsc_adapter import (
+        SELECTOR_OWNER_OF, SELECTOR_POSITIONS,
+    )
+    orig = bsc_mod._bsc_rpc_call
+
+    def stub(method, params):
+        if method != "eth_call":
+            return None
+        data = params[0]["data"]
+        to = params[0].get("to", "").lower()
+        if data.startswith(SELECTOR_OWNER_OF):
+            if no_owner:
+                return "0x"
+            return "0x" + "0" * 24 + owner[2:]
+        if data.startswith(SELECTOR_POSITIONS):
+            if to == pm.lower():
+                return "0x" + "1" + "0" * 831  # nonce>0
+            return "0x" + "0" * 832
+        return "0x"
+
+    bsc_mod._bsc_rpc_call = stub
+    return orig
+
+
+def test_lp_verify_bsc_position_ownership_match():
+    """Execute the real lp_tab BSC pre-check when owner matches the vault."""
+    from lp_tab import LPTab
+    from lp_engine import LPPosition
+    from unittest.mock import MagicMock
+    import venue_adapters.bsc_adapter as bsc_mod
+
+    gui = MagicMock()
+    gui.key_manager = None
+    tab = LPTab.__new__(LPTab)
+    tab.gui = gui
+
+    owner = "0x1111111111111111111111111111111111111111"
+    orig = _stub_bsc_adapter(owner, PANCAKE_V3_POSITION_MANAGER)
+    try:
+        writer = MagicMock()
+        writer.is_available.return_value = True
+        writer._get_account_address.return_value = owner
+        writer._resolve_owner_signer.return_value = "B1"
+
+        pos = LPPosition(position_id="bsc:123", venue="BSC", chain="BSC")
+        account = tab._lp_verify_bsc_position_ownership(pos, 123, "B1", writer)
+        assert account == "B1", account
+        print("PASS test_lp_verify_bsc_position_ownership_match")
+    finally:
+        bsc_mod._bsc_rpc_call = orig
+
+
+def test_lp_verify_bsc_position_ownership_mismatch():
+    """Execute the real lp_tab BSC pre-check when owner is not in vault."""
+    from lp_tab import LPTab
+    from lp_engine import LPPosition
+    from unittest.mock import MagicMock
+    import venue_adapters.bsc_adapter as bsc_mod
+
+    gui = MagicMock()
+    gui.key_manager = None
+    tab = LPTab.__new__(LPTab)
+    tab.gui = gui
+
+    owner = "0x2222222222222222222222222222222222222222"
+    orig = _stub_bsc_adapter(owner, PANCAKE_V3_POSITION_MANAGER)
+    try:
+        writer = MagicMock()
+        writer.is_available.return_value = True
+        writer._get_account_address.return_value = "0x1111111111111111111111111111111111111111"
+        writer._resolve_owner_signer.side_effect = RuntimeError(
+            "position owner 0x2222... matches no account in this vault for BSC"
+        )
+
+        pos = LPPosition(position_id="bsc:123", venue="BSC", chain="BSC")
+        try:
+            tab._lp_verify_bsc_position_ownership(pos, 123, "B1", writer)
+        except RuntimeError as e:
+            msg = str(e)
+            assert "position owner" in msg or "matches no account" in msg or "refetch" in msg, msg
+            print("PASS test_lp_verify_bsc_position_ownership_mismatch")
+            return
+        raise AssertionError("expected RuntimeError")
+    finally:
+        bsc_mod._bsc_rpc_call = orig
+
+
+def test_lp_verify_bsc_position_ownership_dual_manager():
+    """Execute the real lp_tab BSC pre-check when the token is only on the
+    second manager (PancakeSwap) but the record says nothing about manager."""
+    from lp_tab import LPTab
+    from lp_engine import LPPosition
+    from unittest.mock import MagicMock
+    import venue_adapters.bsc_adapter as bsc_mod
+    from venue_adapters.bsc_adapter import (
+        PANCAKE_V3_POSITION_MANAGER, UNISWAP_V3_POSITION_MANAGER,
+        SELECTOR_OWNER_OF, SELECTOR_POSITIONS,
+    )
+
+    gui = MagicMock()
+    gui.key_manager = None
+    tab = LPTab.__new__(LPTab)
+    tab.gui = gui
+
+    owner = "0x1111111111111111111111111111111111111111"
+    orig = bsc_mod._bsc_rpc_call
+
+    def stub(method, params):
+        if method != "eth_call":
+            return None
+        data = params[0]["data"]
+        to = params[0].get("to", "").lower()
+        if data.startswith(SELECTOR_OWNER_OF):
+            return "0x" + "0" * 24 + owner[2:]
+        if data.startswith(SELECTOR_POSITIONS):
+            if to == UNISWAP_V3_POSITION_MANAGER.lower():
+                return "0x" + "0" * 832  # empty
+            if to == PANCAKE_V3_POSITION_MANAGER.lower():
+                return "0x" + "1" + "0" * 831  # holds NFT
+        return "0x"
+
+    bsc_mod._bsc_rpc_call = stub
+    try:
+        writer = MagicMock()
+        writer.is_available.return_value = True
+        writer._get_account_address.return_value = owner
+        writer._resolve_owner_signer.return_value = "B1"
+
+        pos = LPPosition(position_id="bsc:123", venue="BSC", chain="BSC")
+        account = tab._lp_verify_bsc_position_ownership(pos, 123, "B1", writer)
+        assert account == "B1", account
+        print("PASS test_lp_verify_bsc_position_ownership_dual_manager")
+    finally:
+        bsc_mod._bsc_rpc_call = orig
+
+
+def test_lp_verify_bsc_position_ownership_stale_token():
+    """Execute the real lp_tab BSC pre-check when the token id is not live
+    on either manager."""
+    from lp_tab import LPTab
+    from lp_engine import LPPosition
+    from unittest.mock import MagicMock
+    import venue_adapters.bsc_adapter as bsc_mod
+    from venue_adapters.bsc_adapter import (
+        PANCAKE_V3_POSITION_MANAGER, UNISWAP_V3_POSITION_MANAGER,
+        SELECTOR_OWNER_OF, SELECTOR_POSITIONS,
+    )
+
+    gui = MagicMock()
+    gui.key_manager = None
+    tab = LPTab.__new__(LPTab)
+    tab.gui = gui
+
+    orig = bsc_mod._bsc_rpc_call
+
+    def stub(method, params):
+        if method != "eth_call":
+            return None
+        data = params[0]["data"]
+        to = params[0].get("to", "").lower()
+        if data.startswith(SELECTOR_OWNER_OF):
+            return "0x" + "0" * 64  # zero address
+        if data.startswith(SELECTOR_POSITIONS):
+            if to in {PANCAKE_V3_POSITION_MANAGER.lower(), UNISWAP_V3_POSITION_MANAGER.lower()}:
+                return "0x" + "0" * 832  # empty
+        return "0x"
+
+    bsc_mod._bsc_rpc_call = stub
+    try:
+        writer = MagicMock()
+        writer.is_available.return_value = True
+        pos = LPPosition(position_id="bsc:123", venue="BSC", chain="BSC")
+        try:
+            tab._lp_verify_bsc_position_ownership(pos, 123, "B1", writer)
+        except RuntimeError as e:
+            msg = str(e)
+            assert "not a live NFT" in msg or "refetch" in msg, msg
+            print("PASS test_lp_verify_bsc_position_ownership_stale_token")
+            return
+        raise AssertionError("expected RuntimeError")
+    finally:
+        bsc_mod._bsc_rpc_call = orig
+
+
 def test_dual_manager_resolves_live_manager_not_record():
     """Token exists only on PancakeSwap V3; a stale saved record that points to
     Uniswap V3 must still resolve to the manager that actually owns the NFT."""
-    import venue_adapters.bsc_adapter as bsc_mod
 
     class _ManagerRpc:
         def __init__(self):
@@ -325,6 +513,10 @@ def main():
     test_collect_fees_calldata()
     test_close_position_sequence_with_burn()
     test_close_position_skips_burn_when_position_not_empty()
+    test_lp_verify_bsc_position_ownership_match()
+    test_lp_verify_bsc_position_ownership_mismatch()
+    test_lp_verify_bsc_position_ownership_dual_manager()
+    test_lp_verify_bsc_position_ownership_stale_token()
     test_dual_manager_resolves_live_manager_not_record()
     print("ALL BSC WRITER TESTS PASS")
     return 0

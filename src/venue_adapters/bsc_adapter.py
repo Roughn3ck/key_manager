@@ -223,9 +223,45 @@ def _decode_address(hex_str: str) -> str:
     return "0x" + hex_str[-40:]
 
 
+def owner_of(token_id: int) -> tuple[Optional[str], Optional[str]]:
+    """Return (owner_address, position_manager) for a BSC V3 NFT token id.
+
+    Tries all registered BSC V3 Position Managers (Uniswap V3 + PancakeSwap V3)
+    and returns the first manager where ownerOf succeeds. This is the single
+    adapter-side read that lp_tab should use for BSC ownership pre-checks.
+    """
+    for pm in V3_POSITION_MANAGERS:
+        data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
+        result = _bsc_rpc_call("eth_call", [{"to": pm, "data": data}, "latest"])
+        if result and isinstance(result, str) and len(result) >= 66:
+            addr = _decode_address(result[2:66])
+            if int(addr, 16) != 0:
+                return (addr.lower(), pm.lower())
+    return (None, None)
+
+
+def position_manager_for_token_id(token_id: int) -> Optional[str]:
+    """Return the BSC V3 Position Manager that holds this token id, or None."""
+    data = SELECTOR_POSITIONS + _pad_int_to_64(token_id)
+    for pm in V3_POSITION_MANAGERS:
+        result = _bsc_rpc_call("eth_call", [{"to": pm, "data": data}, "latest"])
+        if not result or not isinstance(result, str) or len(result) < 2 + 32 * 13:
+            continue
+        try:
+            body = result[2:]
+            nonce = int(body[0:64], 16)
+            liquidity = int(body[448:512], 16)
+            if nonce > 0 or liquidity > 0:
+                return pm.lower()
+        except (ValueError, IndexError):
+            continue
+    return None
+
+
 # ---------------------------------------------------------------------------
 # V3 math helpers
 # ---------------------------------------------------------------------------
+
 
 def _sqrt_price_x96_to_raw_price(sqrt_price_x96: int) -> float:
     """Convert Uniswap V3 sqrtPriceX96 to raw token1/token0 price."""

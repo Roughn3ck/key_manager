@@ -18,10 +18,10 @@ from venue_adapters.venue_writer import (
     OpenPositionParams, RebalanceParams, SwapParams,
 )
 from venue_adapters.bsc_adapter import (
-    BSC_RPC_URL, BSC_RPC_FALLBACK, BSC_CHAIN_ID,
-    UNISWAP_V3_POSITION_MANAGER, PANCAKE_V3_POSITION_MANAGER,
+    BSC_RPC_URL, BSC_CHAIN_ID,
+    PANCAKE_V3_POSITION_MANAGER,
     V3_POSITION_MANAGERS,
-    SELECTOR_COLLECT, SELECTOR_POSITIONS, SELECTOR_BALANCE_OF,
+    SELECTOR_COLLECT, SELECTOR_POSITIONS,
     SELECTOR_DECREASE_LIQUIDITY, SELECTOR_OWNER_OF,
     _pad_int_to_64, _pad_address, _bsc_rpc_call,
     _decode_address, _get_token_symbol,

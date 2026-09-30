@@ -1390,7 +1390,9 @@ class LPTab:
             except OfflineError:
                 self.gui.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
             except Exception as e:
-                self.gui.root.after(0, lambda: self._lp_on_error(str(e)))
+                # Bind the exception in the lambda default; the except-variable
+                # is deleted after the block, so a bare capture would be unbound.
+                self.gui.root.after(0, lambda err=e: self._lp_on_error(str(err)))
 
         threading.Thread(target=_fetch_thread, daemon=True).start()
 
@@ -1587,7 +1589,7 @@ class LPTab:
             except OfflineError:
                 self.gui.root.after(0, lambda: self._lp_on_error("Offline mode enabled"))
             except Exception as e:
-                self.gui.root.after(0, lambda: self._lp_on_error(str(e)))
+                self.gui.root.after(0, lambda err=e: self._lp_on_error(str(err)))
 
         threading.Thread(target=_fetch_thread, daemon=True).start()
 
@@ -3606,9 +3608,6 @@ class LPTab:
         from venue_adapters.aerodrome_adapter import V3_POSITION_MANAGERS
         from venue_adapters.aerodrome_writer import SELECTOR_OWNER_OF, _pad_int_to_64
         from venue_adapters.aerodrome_writer import _base_rpc_call
-        from saved_pools import (
-            _find_pool_entry, update_saved_pool_binding,
-        )
 
         def _read_owner(pm: str) -> Optional[str]:
             data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
@@ -3661,68 +3660,29 @@ class LPTab:
     def _lp_verify_bsc_position_ownership(
         self, position, token_id: int, account_name: str, writer
     ) -> str:
-        """BSC ownership resolver: ownerOf on the LIVE BSC V3 position manager.
+        """BSC ownership resolver: use the adapter's owner_of() read.
 
-        v5.3.28-patch4: BSC has two V3 position managers (Uniswap V3 + PancakeSwap
-        V3). We resolve the manager that actually owns the token id via
-        positions(tokenId) before running ownerOf, so stale records that point to
-        the wrong manager still resolve correctly.
+        v5.3.28-patch5: lp_tab no longer hand-encodes EVM calldata. The BSC
+        adapter exposes owner_of(token_id) which tries both V3 Position Managers
+        and returns the live owner + manager. Stale records pointing to the
+        wrong manager still resolve because the adapter scans both.
         """
-        from venue_adapters.bsc_adapter import V3_POSITION_MANAGERS, SELECTOR_OWNER_OF
-        from venue_adapters.bsc_adapter import _bsc_rpc_call
-        from saved_pools import _find_pool_entry, update_saved_pool_binding
+        from venue_adapters.bsc_adapter import owner_of, position_manager_for_token_id
 
-        def _read_owner(pm: str) -> Optional[str]:
-            data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
-            try:
-                result = _bsc_rpc_call("eth_call", [{"to": pm, "data": data}, "latest"])
-            except Exception:
-                return None
-            if result and isinstance(result, str) and len(result) >= 66:
-                return "0x" + result[-40:]
-            return None
-
-        def _positions_response(pm: str) -> bool:
-            """Return True if positions(tokenId) returns a valid position."""
-            data = "0x99fbab88" + _pad_int_to_64(token_id)
-            try:
-                result = _bsc_rpc_call("eth_call", [{"to": pm, "data": data}, "latest"])
-            except Exception:
-                return False
-            if not result or not isinstance(result, str) or len(result) < 2 + 32 * 13:
-                return False
-            body = result[2:]
-            try:
-                nonce = int(body[0:64], 16)
-                liquidity = int(body[448:512], 16)
-                return nonce > 0 or liquidity > 0
-            except (ValueError, IndexError):
-                return False
-
-        # Resolve the live manager first. If a token id exists on only one of
-        # the BSC V3 managers, ownerOf on the other will revert, so we use the
-        # manager that actually holds the NFT.
-        owner_pm: Optional[str] = None
-        for pm in V3_POSITION_MANAGERS:
-            if _positions_response(pm):
+        owner_pm = position_manager_for_token_id(token_id)
+        if owner_pm is None:
+            # Fallback: try ownerOf across both managers (handles zero-liquidity
+            # positions that still have a valid owner).
+            owner, pm = owner_of(token_id)
+            if owner and pm:
                 owner_pm = pm
-                break
+            else:
+                raise RuntimeError(
+                    f"stale record — refetch this position: token id {token_id} is not a live "
+                    f"NFT on any BSC V3 position manager."
+                )
 
-        if owner_pm is None:
-            # Fallback to ownerOf across both managers (handles positions with
-            # zero liquidity but valid ownership).
-            for pm in V3_POSITION_MANAGERS:
-                if _read_owner(pm):
-                    owner_pm = pm
-                    break
-
-        if owner_pm is None:
-            raise RuntimeError(
-                f"stale record — refetch this position: token id {token_id} is not a live "
-                f"NFT on any BSC V3 position manager."
-            )
-
-        owner = _read_owner(owner_pm)
+        owner, _ = owner_of(token_id)
         if not owner:
             raise RuntimeError(
                 f"stale record — refetch this position: ownerOf({token_id}) reverted on "
