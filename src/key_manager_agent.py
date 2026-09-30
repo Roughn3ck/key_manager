@@ -537,21 +537,83 @@ def get_chain_id(rpc_url: str) -> int:
     return int(result["result"], 16)
 
 
-def estimate_gas(rpc_url: str, tx: dict) -> int:
-    """Estimate gas for a transaction. Returns gas limit or 0 on error."""
-    try:
-        result = rpc_call(rpc_url, "eth_estimateGas", [tx])
+# v5.3.28: per-chain RPC fallbacks so estimate failures can be retried on an
+# alternate endpoint when the primary strips revert data.
+EVM_RPC_FALLBACKS: Dict[str, List[str]] = {
+    # Base
+    "8453": [
+        "https://base.llamarpc.com",
+        "https://base.drpc.org",
+        "https://mainnet.base.org",
+    ],
+    # BSC
+    "56": [
+        "https://bsc-dataseed.binance.org",
+        "https://bsc-dataseed1.defibit.io",
+        "https://bsc-dataseed1.ninicoin.io",
+        "https://bnb.api.onfinality.io/public",
+    ],
+    # HyperEVM
+    "999": [
+        "https://rpc.hyperliquid.xyz",
+    ],
+}
+
+
+class GasEstimationError(RuntimeError):
+    """Raised when eth_estimateGas fails so callers can abort instead of falling back."""
+    pass
+
+
+def estimate_gas(rpc_url: str, tx: dict, chain_id: Optional[int] = None) -> int:
+    """Estimate gas for a transaction. Returns gas limit on success.
+
+    If ``chain_id`` is provided, rotates through known public fallbacks when an
+    RPC returns an error without a revert reason, so the real revert data reaches
+    the caller instead of being hidden behind a stripped "execution reverted".
+
+    Raises:
+        GasEstimationError: if the RPC returns an error or the estimate is 0,
+            so callers never silently broadcast a zero-gas transaction.
+    """
+    urls = [rpc_url]
+    if chain_id is not None:
+        for u in EVM_RPC_FALLBACKS.get(str(chain_id), []):
+            if u.rstrip("/").lower() != rpc_url.rstrip("/").lower():
+                urls.append(u)
+
+    last_err: Optional[str] = None
+    urls_tried = []
+    for attempt_url in urls:
+        urls_tried.append(attempt_url)
+        try:
+            result = rpc_call(attempt_url, "eth_estimateGas", [tx])
+        except Exception as e:
+            last_err = f"[{attempt_url}] estimate_gas RPC failed: {type(e).__name__}: {e}"
+            print(last_err)
+            continue
+
         if "result" in result and result["result"]:
-            return int(result["result"], 16)
-        else:
-            # RPC returned an error (e.g., "execution reverted")
-            err = result.get("error", {})
-            err_msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
-            print(f"[estimate_gas] RPC error: {err_msg}")
-            return 0
-    except Exception as e:
-        print(f"[estimate_gas] exception: {type(e).__name__}: {e}")
-        return 0
+            estimated = int(result["result"], 16)
+            if estimated == 0:
+                last_err = "eth_estimateGas returned 0"
+                continue
+            return estimated
+
+        # RPC returned an error (e.g., "execution reverted")
+        err = result.get("error", {})
+        err_msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
+        # If the message is generic, the endpoint may be stripping revert data.
+        # Try the next fallback.
+        if err_msg and "revert" in err_msg.lower() and len(err_msg) < 40 and len(urls_tried) < len(urls):
+            last_err = f"[{attempt_url}] eth_estimateGas failed: {err_msg}"
+            print(last_err)
+            continue
+        # If the message contains a reason, raise it immediately.
+        raise GasEstimationError(f"[{attempt_url}] eth_estimateGas failed: {err_msg}")
+
+    # All URLs exhausted without a usable estimate or explicit revert reason.
+    raise GasEstimationError(last_err or "eth_estimateGas failed on all endpoints")
 
 
 def get_gas_price(rpc_url: str) -> dict:
@@ -899,14 +961,25 @@ class KeyManagerAgent:
                     "value": hex(val),
                 }
                 try:
-                    gas_limit = estimate_gas(rpc, tx_for_estimate)
+                    gas_limit = estimate_gas(rpc, tx_for_estimate, chain_id=chain_id)
                     # Add 20% buffer
                     gas_limit = int(gas_limit * 1.2)
-                except Exception:
-                    gas_limit = 200000  # fallback
+                except GasEstimationError as e:
+                    # v5.3.28: a failed estimate is a pre-flight revert signal.
+                    # Do NOT fall back to a fixed gas limit — surface the reason.
+                    return {
+                        "status": "error",
+                        "error": f"gas estimation failed — not broadcasting: {e}",
+                    }
 
-            if gas_limit is None:
-                gas_limit = 200000
+            # v5.3.28: zero-gas can never broadcast. If the caller passed an
+            # explicit gas_limit of 0, abort instead of letting the node reject it
+            # with the opaque "intrinsic gas too low" error.
+            if gas_limit is None or gas_limit == 0:
+                return {
+                    "status": "error",
+                    "error": "gas estimation failed — not broadcasting: gas_limit is 0",
+                }
 
             # Get gas price if not provided and RPC is available
             if rpc and gas_price is None and max_fee_per_gas is None:

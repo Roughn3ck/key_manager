@@ -171,6 +171,32 @@ First-phase write support for staked Aerodrome SlipStream V3 positions. Position
   - `pyflakes` (4.0.0) has zero undefined-name / import-star / syntax errors in the BSC/lp_tab close path files; remaining warnings are unused locals/imports elsewhere in `lp_tab.py` not introduced by this patch.
   - Full `test_*.py` suite — ALL PASS.
 
+#### 11. Patch 7: zero-gas broadcast guard + gas estimation as pre-flight (2026-09-30)
+- Goal: complete the `forge-coldstack-bsc-round2-zero-gas.md` prompt.
+- Root cause of G4's `gas=0` broadcast error:
+  - `src/key_manager_agent.py` `sign_tx()` lines 894-909: when `gas_limit is None and rpc`, the agent called `estimate_gas()`. `estimate_gas()` returned `0` on *any* failure (revert, RPC error, exception) and the agent swallowed that into a 200,000 fallback. The BSC writer passes `gas_limit=None` through `broadcast_tx`, so a failed estimate produced a fixed 200,000 fallback — but the error log shows `gas 0, minimum needed 21896`, which means in G4's live path `estimate_gas` returned `0` and the agent's `except Exception: gas_limit = 200000` fallback was not reached (likely an earlier code path or the explicit 0 check). The new code removes all silent fallbacks and aborts.
+  - Fixed by removing the `200000` fallback and replacing it with an explicit error return: `"gas estimation failed — not broadcasting: <reason>"`.
+- `src/key_manager_agent.py`:
+  - Added `EVM_RPC_FALLBACKS` table for chain IDs 56 (BSC), 8453 (Base), and 999 (HyperEVM).
+  - `estimate_gas()` now takes `chain_id` and rotates through fallbacks when the primary RPC returns a generic/stripped revert message, raising `GasEstimationError` with the first endpoint that returns a concrete revert reason.
+  - `estimate_gas()` no longer returns `0` on failure; it raises `GasEstimationError` with the RPC error or exception text.
+  - `sign_tx()` aborts with `"gas estimation failed — not broadcasting"` when `estimate_gas()` raises, and also aborts if `gas_limit` is explicitly `None`/`0`.
+  - `broadcast_tx()` propagates the same estimate-failure error because it calls `sign_tx()` first.
+- Writers:
+  - Confirmed `BSCWriter`, `AerodromeWriter`, and `AerodromeGaugeWriter` do not pass an explicit `gas_limit` to the agent, so they rely on the agent's estimation path.
+  - No `gas_limit: int = 0` defaults remain in the BSC/Aerodrome writer `_broadcast` signatures.
+- Tests:
+  - Added `test_gas_estimate.py` with five tests using a stubbed `KeyManagerAgent`:
+    - `test_sign_tx_estimates_and_buffers_20_percent` — `gas_limit=None` → 21000 estimate → 25200 buffered.
+    - `test_sign_tx_aborts_on_estimate_revert` — revert reason surfaces and broadcast is blocked.
+    - `test_sign_tx_aborts_on_zero_estimate` — zero estimate aborts.
+    - `test_broadcast_tx_aborts_when_sign_tx_estimation_fails` — `broadcast_tx` returns the estimate error.
+    - `test_estimate_gas_rotates_to_fallback_for_real_revert` — generic stripped revert triggers fallback rotation and reports `EXPIRED_DEADLINE`.
+- Quality gates:
+  - `python -m py_compile` passes for `src/key_manager_agent.py`, affected writers, and `test_gas_estimate.py`.
+  - `pyflakes` has zero undefined-name / syntax errors in the touched files; existing unused-local warnings in `lp_tab.py` / `aerodrome_writer.py` predate this patch.
+  - Full `test_*.py` suite — ALL PASS.
+
 ---
 
 ## v5.3.27 — Minor bug fixes & hardening (2026-09-29, released)
