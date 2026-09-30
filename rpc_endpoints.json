@@ -18,9 +18,15 @@
       "fallback": "https://base-rpc.publicnode.com"
     },
     "bsc": {
-      "url": "https://bsc-dataseed.binance.org/",
+      "url": "https://bsc-dataseed.binance.org",
       "auth": null,
-      "fallback": "https://bsc-dataseed1.binance.org"
+      "fallback": [
+        "https://bsc-dataseed1.binance.org",
+        "https://bsc-dataseed2.binance.org",
+        "https://bsc-rpc.publicnode.com",
+        "https://1rpc.io/bnb",
+        "https://bnb.api.onfinality.io/public"
+      ]
     },
     "polygon": {
       "url": "https://polygon-bor-rpc.publicnode.com",

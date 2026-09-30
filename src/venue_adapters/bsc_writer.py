@@ -46,8 +46,11 @@ class BSCWriter(VenueWriter):
     def __init__(self, agent_url: str = "http://127.0.0.1:8842"):
         self.agent_url = agent_url.rstrip("/")
         self.chain_id = BSC_CHAIN_ID  # 56
+        # v5.3.28: rpc_url is resolved dynamically from the rotated config list
+        # via _bsc_rpc_urls(); this remains a backward-compatible default.
         self.rpc_url = BSC_RPC_URL
         self._unlocked = False
+
 
     # ------------------------------------------------------------------
     # Agent communication
@@ -154,9 +157,16 @@ class BSCWriter(VenueWriter):
 
     def _broadcast(self, account: str, to: str, data: str, value: str = "0") -> str:
         """Sign and broadcast a transaction on BSC via the agent. Returns tx hash."""
+        # v5.3.28: pick a healthy BSC RPC from the rotated config list. If the
+        # primary fails during estimate/broadcast, the agent rotates internally;
+        # we still verify the one we hand to the agent.
+        from venue_adapters.bsc_adapter import _bsc_rpc_urls
+        bsc_rpc_urls = _bsc_rpc_urls()
+        rpc_url = bsc_rpc_urls[0] if bsc_rpc_urls else self.rpc_url
+
         # v5.3.17: writer-side chain guard. Gas-balance read and agent broadcast
         # must use the same chain-verified RPC.
-        self._verify_rpc_chain(self.rpc_url, self.chain_id)
+        self._verify_rpc_chain(rpc_url, self.chain_id)
 
         # Pre-flight: check BNB gas balance
         vault_address = self._get_account_address(account)
@@ -168,7 +178,7 @@ class BSCWriter(VenueWriter):
             )
 
         # Re-verify before the agent broadcast.
-        self._verify_rpc_chain(self.rpc_url, self.chain_id)
+        self._verify_rpc_chain(rpc_url, self.chain_id)
 
         result = self._agent_call(
             "broadcast_tx",
@@ -178,8 +188,9 @@ class BSCWriter(VenueWriter):
             data=data,
             value=value,
             chain_id=self.chain_id,
-            rpc=self.rpc_url,
+            rpc=rpc_url,
         )
+
         if isinstance(result, dict):
             tx_hash = result.get("tx_hash", "")
         else:
@@ -339,7 +350,11 @@ class BSCWriter(VenueWriter):
         if not recipient:
             raise RuntimeError(f"Could not resolve BSC address for account '{account}'")
 
+        # v5.3.28: pace consecutive close-sequence calls to the same endpoint.
+        _step_delay = 1.0
+
         if liquidity > 0:
+            time.sleep(_step_delay)
             decrease_data = (
                 SELECTOR_DECREASE_LIQUIDITY
                 + _pad_int_to_64(token_id)
@@ -352,6 +367,7 @@ class BSCWriter(VenueWriter):
             tx_hashes.append(tx1)
             self._wait_for_tx_receipt(tx1, timeout=60)
 
+        time.sleep(_step_delay)
         collect_tx = self.collect_fees(CollectFeesParams(
             account=account,
             position_id=position_id,
@@ -362,8 +378,10 @@ class BSCWriter(VenueWriter):
         # Burn the empty NFT if the position is now fully drained.
         burn_sig = None
         try:
+            time.sleep(_step_delay)
             post_liq, post_owed0, post_owed1 = self._get_position_state(token_id, position_manager)
             if post_liq == 0 and post_owed0 == 0 and post_owed1 == 0:
+                time.sleep(_step_delay)
                 burn_data = SELECTOR_BURN + _pad_int_to_64(token_id)
                 burn_sig = self._broadcast(account, position_manager, burn_data)
                 tx_hashes.append(burn_sig)

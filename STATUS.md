@@ -197,6 +197,41 @@ First-phase write support for staked Aerodrome SlipStream V3 positions. Position
   - `pyflakes` has zero undefined-name / syntax errors in the touched files; existing unused-local warnings in `lp_tab.py` / `aerodrome_writer.py` predate this patch.
   - Full `test_*.py` suite — ALL PASS.
 
+#### 12. Patch 8: BSC RPC rotation + backoff for estimate/broadcast (2026-09-30)
+- Goal: complete the `forge-coldstack-bsc-round3-rpc-rotation.md` prompt.
+- Root cause: G4's close hit a single 429 on `bnb.api.onfinality.io/public`; there was no fallback endpoint, so one burst killed the close.
+- Endpoint list updated:
+  - `rpc_endpoints.json` (repo root + `USB_DEPLOYMENT/`)
+  - `src/rpc_config.py` `DEFAULT_ENDPOINTS`
+  - BSC entry now uses `url = https://bsc-dataseed.binance.org` and `fallback = [bsc-dataseed1.binance.org, bsc-dataseed2.binance.org, bsc-rpc.publicnode.com, 1rpc.io/bnb, bnb.api.onfinality.io/public]`.
+- `src/rpc_config.py`:
+  - `load_rpc_config()` now accepts `fallback` as either a string or a list.
+  - Added `get_evm_rpc_urls(chain_id)` returning an ordered `[primary, ...fallbacks]` list for rotation.
+- `src/venue_adapters/bsc_adapter.py`:
+  - Replaced single `BSC_RPC_URL`/`BSC_RPC_FALLBACK` globals with `BSC_RPC_URLS` ordered table (primary + 5 fallbacks). Old aliases kept for backward compatibility.
+  - Added `_bsc_rpc_urls()` that prefers `rpc_config.get_evm_rpc_urls("bsc")` and falls back to the hardcoded table.
+  - Added `_is_rate_limit_error()` heuristic for 429/403/timeout.
+  - `_bsc_rpc_call()` now rotates through the full list and applies linear backoff (`base_delay + idx * 2.0`) on transient errors.
+  - `_bsc_rpc_batch()` updated to use the rotated list.
+  - `owner_of()` and `position_manager_for_token_id()` add `0.3 * idx` pacing delay between consecutive manager calls to avoid burst 429s.
+- `src/key_manager_agent.py`:
+  - `estimate_gas()` now takes `base_delay` and detects transient HTTP errors (429/403/timeout), rotating through `EVM_RPC_FALLBACKS` with linear backoff.
+  - BSC final abort message now reads `all N BSC RPCs failed estimation` instead of naming a single endpoint.
+  - `sign_tx()` calls `estimate_gas(..., base_delay=1.0)` so the close sequence is paced before estimation.
+- `src/venue_adapters/bsc_writer.py`:
+  - `_broadcast()` resolves the RPC URL from `_bsc_rpc_urls()` rather than the stale `self.rpc_url` single URL.
+  - `close_position()` inserts ~1 s pacing delays between the pre-check read, decrease, collect, state re-read, and optional burn broadcasts to avoid burst 429s.
+- Tests: added `test_bsc_rpc_rotation.py` with five tests:
+  - `test_bsc_rpc_call_rotates_on_429_and_succeeds`
+  - `test_bsc_rpc_call_all_429_aborts_honestly`
+  - `test_estimate_gas_rotates_on_429_and_succeeds`
+  - `test_estimate_gas_all_429_aborts_honestly`
+  - `test_bsc_writer_broadcast_resolves_rpc_from_rotated_config`
+- Quality gates:
+  - `python -m py_compile` passes for all touched files.
+  - `pyflakes` clean on touched files (remaining warnings predate this patch).
+  - Full `test_*.py` suite — ALL PASS.
+
 ---
 
 ## v5.3.27 — Minor bug fixes & hardening (2026-09-29, released)

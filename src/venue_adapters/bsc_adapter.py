@@ -30,9 +30,23 @@ from price_engine import PriceEngine
 # RPC and chain configuration
 # ---------------------------------------------------------------------------
 
-BSC_RPC_URL = "https://bsc-dataseed.binance.org/"
 BSC_CHAIN_ID = 56
-BSC_RPC_FALLBACK = "https://rpc.ankr.com/bsc"
+
+# v5.3.28: ordered list of healthy BSC endpoints (primary + fallbacks). Code paths
+# should use _bsc_rpc_urls() / get_evm_rpc_urls("bsc") instead of a single URL.
+BSC_RPC_URLS = [
+    "https://bsc-dataseed.binance.org",
+    "https://bsc-dataseed1.binance.org",
+    "https://bsc-dataseed2.binance.org",
+    "https://bsc-rpc.publicnode.com",
+    "https://1rpc.io/bnb",
+    "https://bnb.api.onfinality.io/public",
+]
+
+# Backward-compatible aliases for callers still importing the old names.
+BSC_RPC_URL = BSC_RPC_URLS[0]
+BSC_RPC_FALLBACK = BSC_RPC_URLS[1]
+
 
 # ---------------------------------------------------------------------------
 # V3 DEX contract addresses on BSC
@@ -111,8 +125,40 @@ TOKEN_SYMBOLS = {
 # RPC layer
 # ---------------------------------------------------------------------------
 
-def _bsc_rpc_call(method: str, params: list, request_id: int = 1) -> Optional[Any]:
-    """Make a single JSON-RPC call to BSC and return the 'result' field."""
+def _bsc_rpc_urls() -> List[str]:
+    """Return the ordered list of BSC RPC URLs.
+
+    v5.3.28: prefers the config-driven list when rpc_endpoints.json is present,
+    otherwise falls back to the hardcoded BSC_RPC_URLS table.
+    """
+    try:
+        from rpc_config import get_evm_rpc_urls
+        return get_evm_rpc_urls("bsc")
+    except Exception:
+        return BSC_RPC_URLS.copy()
+
+
+def _is_rate_limit_error(e: Exception) -> bool:
+    """Heuristic: HTTP 429 / 403 / timeout should trigger backoff + rotation."""
+    msg = str(e).lower()
+    return any(k in msg for k in ("429", "too many requests", "rate limit",
+                                    "403", "forbidden", "timeout", "timed out"))
+
+
+def _bsc_rpc_call(method: str, params: list, request_id: int = 1,
+                  base_delay: float = 0.0) -> Optional[Any]:
+    """Make a JSON-RPC call to BSC, rotating and backing off on transient errors.
+
+    Args:
+        method: JSON-RPC method name.
+        params: Method params.
+        request_id: Request ID.
+        base_delay: Optional base pacing delay in seconds. Each transient-failure
+            attempt adds 2 s of linear backoff.
+
+    Returns:
+        The RPC 'result' field, or None if all endpoints fail.
+    """
     payload = json.dumps(
         {"jsonrpc": "2.0", "method": method, "params": params, "id": request_id}
     ).encode("utf-8")
@@ -121,27 +167,44 @@ def _bsc_rpc_call(method: str, params: list, request_id: int = 1) -> Optional[An
         "User-Agent": "ColdStack/5.2",
     }
 
-    for url in (BSC_RPC_URL, BSC_RPC_FALLBACK):
+    urls = _bsc_rpc_urls()
+    last_err: Optional[str] = None
+    for idx, url in enumerate(urls):
+        if base_delay > 0:
+            time.sleep(base_delay + idx * 2.0)
         try:
             req = urllib.request.Request(url, data=payload, headers=headers)
             with urllib.request.urlopen(req, timeout=15) as response:
                 data = json.loads(response.read().decode("utf-8"))
                 return data.get("result")
-        except Exception:
-            # Fall back to next URL on any error.
-            continue
+        except Exception as e:
+            last_err = f"[bsc-rpc] {url}: {type(e).__name__}: {e}"
+            print(last_err)
+            # On transient errors, keep rotating/backing off while more URLs exist.
+            if _is_rate_limit_error(e) and idx < len(urls) - 1:
+                continue
+            # Hard errors also rotate, but only while endpoints remain.
+            if idx < len(urls) - 1:
+                continue
+    print(f"[bsc-rpc] all {len(urls)} BSC RPC endpoints failed for {method}")
     return None
 
 
+
 def _bsc_rpc_batch(
-    method_calls: List[Tuple[str, list]], request_id_base: int = 1
+    method_calls: List[Tuple[str, list]], request_id_base: int = 1,
+    base_delay: float = 0.0
 ) -> List[Optional[Any]]:
-    """Execute batched JSON-RPC calls. BSC supports larger batches than HyperEVM."""
+    """Execute batched JSON-RPC calls. BSC supports larger batches than HyperEVM.
+
+    v5.3.28: rotates through the full config-driven endpoint list on transient
+    errors and applies linear backoff.
+    """
     if not method_calls:
         return []
     if len(method_calls) == 1:
         method, params = method_calls[0]
-        return [_bsc_rpc_call(method, params, request_id_base)]
+        return [_bsc_rpc_call(method, params, request_id_base, base_delay=base_delay)]
 
     # BSC public RPCs generally tolerate up to 5 calls per batch.
     MAX_BATCH = 5
@@ -150,6 +213,7 @@ def _bsc_rpc_batch(
         "Content-Type": "application/json",
         "User-Agent": "ColdStack/5.2",
     }
+    urls = _bsc_rpc_urls()
 
     for chunk_start in range(0, len(method_calls), MAX_BATCH):
         chunk = method_calls[chunk_start:chunk_start + MAX_BATCH]
@@ -159,7 +223,9 @@ def _bsc_rpc_batch(
                 {"jsonrpc": "2.0", "id": request_id_base + chunk_start + idx, "method": method, "params": params}
             )
 
-        for url in (BSC_RPC_URL, BSC_RPC_FALLBACK):
+        for idx, url in enumerate(urls):
+            if base_delay > 0:
+                time.sleep(base_delay + idx * 2.0)
             try:
                 payload = json.dumps(payload_obj).encode("utf-8")
                 req = urllib.request.Request(url, data=payload, headers=headers)
@@ -173,12 +239,17 @@ def _bsc_rpc_batch(
                     for idx in range(len(chunk)):
                         results.append(by_id.get(request_id_base + chunk_start + idx, {}).get("result"))
                     break  # successful batch, move to next chunk
-            except Exception:
-                # On last URL, fall back to sequential calls for this chunk.
-                if url == BSC_RPC_FALLBACK:
-                    for idx, (method, params) in enumerate(chunk):
-                        results.append(_bsc_rpc_call(method, params, request_id_base + chunk_start + idx))
+            except Exception as e:
+                print(f"[bsc-rpc-batch] {url}: {type(e).__name__}: {e}")
+                # On transient/hard errors, rotate while more endpoints remain.
+                if idx < len(urls) - 1:
+                    continue
+                # Last URL: fall back to sequential calls for this chunk.
+                for seq_idx, (method, params) in enumerate(chunk):
+                    results.append(_bsc_rpc_call(method, params, request_id_base + chunk_start + seq_idx))
+
     return results
+
 
 
 # ---------------------------------------------------------------------------
@@ -229,10 +300,17 @@ def owner_of(token_id: int) -> tuple[Optional[str], Optional[str]]:
     Tries all registered BSC V3 Position Managers (Uniswap V3 + PancakeSwap V3)
     and returns the first manager where ownerOf succeeds. This is the single
     adapter-side read that lp_tab should use for BSC ownership pre-checks.
+
+    v5.3.28: uses base_delay=0.3 between consecutive ownerOf calls so burst
+    requests to the same endpoint do not trigger 429s.
     """
-    for pm in V3_POSITION_MANAGERS:
+    for idx, pm in enumerate(V3_POSITION_MANAGERS):
         data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
-        result = _bsc_rpc_call("eth_call", [{"to": pm, "data": data}, "latest"])
+        result = _bsc_rpc_call(
+            "eth_call",
+            [{"to": pm, "data": data}, "latest"],
+            base_delay=0.3 * idx,
+        )
         if result and isinstance(result, str) and len(result) >= 66:
             addr = _decode_address(result[2:66])
             if int(addr, 16) != 0:
@@ -243,8 +321,12 @@ def owner_of(token_id: int) -> tuple[Optional[str], Optional[str]]:
 def position_manager_for_token_id(token_id: int) -> Optional[str]:
     """Return the BSC V3 Position Manager that holds this token id, or None."""
     data = SELECTOR_POSITIONS + _pad_int_to_64(token_id)
-    for pm in V3_POSITION_MANAGERS:
-        result = _bsc_rpc_call("eth_call", [{"to": pm, "data": data}, "latest"])
+    for idx, pm in enumerate(V3_POSITION_MANAGERS):
+        result = _bsc_rpc_call(
+            "eth_call",
+            [{"to": pm, "data": data}, "latest"],
+            base_delay=0.3 * idx,
+        )
         if not result or not isinstance(result, str) or len(result) < 2 + 32 * 13:
             continue
         try:

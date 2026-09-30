@@ -565,12 +565,31 @@ class GasEstimationError(RuntimeError):
     pass
 
 
-def estimate_gas(rpc_url: str, tx: dict, chain_id: Optional[int] = None) -> int:
+def _is_rate_limit_or_transient(err_msg: str) -> bool:
+    """True for HTTP 429/403/timeout/connection errors that should trigger rotation/backoff."""
+    if not err_msg:
+        return False
+    lowered = err_msg.lower()
+    return any(k in lowered for k in ("429", "too many requests", "rate limit",
+                                       "403", "forbidden", "timeout", "timed out",
+                                       "connection", "remote end closed"))
+
+
+def estimate_gas(rpc_url: str, tx: dict, chain_id: Optional[int] = None,
+                 base_delay: float = 0.0) -> int:
     """Estimate gas for a transaction. Returns gas limit on success.
 
     If ``chain_id`` is provided, rotates through known public fallbacks when an
-    RPC returns an error without a revert reason, so the real revert data reaches
-    the caller instead of being hidden behind a stripped "execution reverted".
+    RPC returns an error without a revert reason or a transient HTTP error, so
+    the real revert data reaches the caller instead of being hidden behind a
+    stripped "execution reverted" or a single 429.
+
+    Args:
+        rpc_url: Primary RPC URL to try first.
+        tx: Transaction object to estimate.
+        chain_id: Optional chain ID to select additional fallbacks.
+        base_delay: Optional base delay in seconds before the first attempt.
+            Each subsequent transient-failure attempt waits an additional 2 s.
 
     Raises:
         GasEstimationError: if the RPC returns an error or the estimate is 0,
@@ -584,13 +603,21 @@ def estimate_gas(rpc_url: str, tx: dict, chain_id: Optional[int] = None) -> int:
 
     last_err: Optional[str] = None
     urls_tried = []
-    for attempt_url in urls:
+    for idx, attempt_url in enumerate(urls):
         urls_tried.append(attempt_url)
+        if base_delay > 0:
+            time.sleep(base_delay + idx * 2.0)
         try:
             result = rpc_call(attempt_url, "eth_estimateGas", [tx])
         except Exception as e:
-            last_err = f"[{attempt_url}] estimate_gas RPC failed: {type(e).__name__}: {e}"
+            err_text = str(e)
+            last_err = f"[{attempt_url}] estimate_gas RPC failed: {type(e).__name__}: {err_text}"
             print(last_err)
+            # Transient HTTP errors keep us rotating; hard errors stop only on the last URL.
+            if _is_rate_limit_or_transient(err_text) and idx < len(urls) - 1:
+                continue
+            if idx < len(urls) - 1:
+                continue
             continue
 
         if "result" in result and result["result"]:
@@ -603,9 +630,10 @@ def estimate_gas(rpc_url: str, tx: dict, chain_id: Optional[int] = None) -> int:
         # RPC returned an error (e.g., "execution reverted")
         err = result.get("error", {})
         err_msg = err.get("message", "unknown") if isinstance(err, dict) else str(err)
-        # If the message is generic, the endpoint may be stripping revert data.
-        # Try the next fallback.
-        if err_msg and "revert" in err_msg.lower() and len(err_msg) < 40 and len(urls_tried) < len(urls):
+        # If the message is generic or transient, the endpoint may be stripping
+        # revert data or throttling. Try the next fallback when one exists.
+        is_generic_revert = (err_msg and "revert" in err_msg.lower() and len(err_msg) < 40)
+        if (is_generic_revert or _is_rate_limit_or_transient(err_msg)) and idx < len(urls) - 1:
             last_err = f"[{attempt_url}] eth_estimateGas failed: {err_msg}"
             print(last_err)
             continue
@@ -613,7 +641,12 @@ def estimate_gas(rpc_url: str, tx: dict, chain_id: Optional[int] = None) -> int:
         raise GasEstimationError(f"[{attempt_url}] eth_estimateGas failed: {err_msg}")
 
     # All URLs exhausted without a usable estimate or explicit revert reason.
-    raise GasEstimationError(last_err or "eth_estimateGas failed on all endpoints")
+    count = len(urls_tried)
+    raise GasEstimationError(
+        f"all {count} BSC RPCs failed estimation"
+        if str(chain_id) == "56" and count > 1
+        else (last_err or f"eth_estimateGas failed on all {count} endpoints")
+    )
 
 
 def get_gas_price(rpc_url: str) -> dict:
@@ -960,8 +993,10 @@ class KeyManagerAgent:
                     "data": data_hex,
                     "value": hex(val),
                 }
+                # v5.3.28: start with a small pacing delay to avoid burst 429s,
+                # then rotate+backoff inside estimate_gas on transient errors.
                 try:
-                    gas_limit = estimate_gas(rpc, tx_for_estimate, chain_id=chain_id)
+                    gas_limit = estimate_gas(rpc, tx_for_estimate, chain_id=chain_id, base_delay=1.0)
                     # Add 20% buffer
                     gas_limit = int(gas_limit * 1.2)
                 except GasEstimationError as e:

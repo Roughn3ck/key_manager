@@ -291,7 +291,7 @@ def _stub_bsc_adapter(owner, pm, no_owner=False):
     )
     orig = bsc_mod._bsc_rpc_call
 
-    def stub(method, params):
+    def stub(method, params, request_id=1, base_delay=0.0):
         if method != "eth_call":
             return None
         data = params[0]["data"]
@@ -393,7 +393,7 @@ def test_lp_verify_bsc_position_ownership_dual_manager():
     owner = "0x1111111111111111111111111111111111111111"
     orig = bsc_mod._bsc_rpc_call
 
-    def stub(method, params):
+    def stub(method, params, request_id=1, base_delay=0.0):
         if method != "eth_call":
             return None
         data = params[0]["data"]
@@ -441,7 +441,7 @@ def test_lp_verify_bsc_position_ownership_stale_token():
 
     orig = bsc_mod._bsc_rpc_call
 
-    def stub(method, params):
+    def stub(method, params, request_id=1, base_delay=0.0):
         if method != "eth_call":
             return None
         data = params[0]["data"]

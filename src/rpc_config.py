@@ -14,7 +14,7 @@ import json
 import os
 import sys
 from datetime import date
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 
 # v5.3.9: self-heal map for deprecated endpoints. Evidence-based only —
 # one live-verified dead URL per entry. When a loaded config (user file,
@@ -46,9 +46,15 @@ DEFAULT_ENDPOINTS: Dict[str, Dict[str, Any]] = {
         "fallback": "https://base-rpc.publicnode.com",
     },
     "bsc": {
-        "url": "https://bsc-dataseed.binance.org/",
+        "url": "https://bsc-dataseed.binance.org",
         "auth": None,
-        "fallback": "https://bsc-dataseed1.binance.org",
+        "fallback": [
+            "https://bsc-dataseed1.binance.org",
+            "https://bsc-dataseed2.binance.org",
+            "https://bsc-rpc.publicnode.com",
+            "https://1rpc.io/bnb",
+            "https://bnb.api.onfinality.io/public",
+        ],
     },
     "polygon": {
         "url": "https://polygon-bor-rpc.publicnode.com",
@@ -270,10 +276,16 @@ def _try_load_file(path: str, source: str) -> Optional[Dict[str, Dict[str, Any]]
             url = entry.get("url")
             if not url:
                 continue
+            fallback = entry.get("fallback")
+            # v5.3.28: accept either a single fallback URL string or a list of URLs.
+            if isinstance(fallback, str):
+                fallback = [fallback]
+            elif not isinstance(fallback, list):
+                fallback = []
             validated[chain_id] = {
                 "url": url,
                 "auth": entry.get("auth"),
-                "fallback": entry.get("fallback"),
+                "fallback": fallback,
             }
 
         if not validated:
@@ -342,3 +354,35 @@ def get_default_for_chain(chain_id: str) -> Optional[Dict[str, Any]]:
     """
     entry = DEFAULT_ENDPOINTS.get(chain_id)
     return entry.copy() if entry else None
+
+
+def get_evm_rpc_urls(chain_id: str, base_dir: Optional[str] = None) -> List[str]:
+    """Return the ordered list of RPC URLs for an EVM-compatible chain.
+
+    The primary URL is first, followed by every fallback URL that is different
+    from the primary. This lets estimate/broadcast paths rotate instead of
+    pinning to a single endpoint.
+
+    Args:
+        chain_id: Chain identifier (e.g., "bsc", "base", "hyperliquid_evm").
+        base_dir: Optional override for the runtime directory.
+
+    Returns:
+        Ordered list of RPC URLs (non-empty; falls back to hardcoded defaults).
+    """
+    config = load_rpc_config(base_dir)
+    entry = config.get(chain_id) or DEFAULT_ENDPOINTS.get(chain_id, {})
+    urls: List[str] = []
+    primary = entry.get("url")
+    if primary:
+        urls.append(primary.rstrip("/"))
+    for fb in entry.get("fallback", []):
+        fb_norm = fb.rstrip("/")
+        if fb_norm.lower() not in {u.lower() for u in urls}:
+            urls.append(fb_norm)
+    # Final fallback to the hardcoded default primary if config is empty.
+    if not urls:
+        primary = DEFAULT_ENDPOINTS.get(chain_id, {}).get("url")
+        if primary:
+            urls.append(primary.rstrip("/"))
+    return urls
