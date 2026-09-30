@@ -1,4 +1,4 @@
-"""Aerodrome SlipStream CLGauge writer — ColdStack v5.3.28.
+"""Aerodrome SlipStream CLGauge writer — ColdStack v5.3.29.
 
 Write operations for staked Aerodrome SlipStream V3 positions:
   - claim AERO emissions  (gauge.getReward(tokenId) or claimEmissions(...))
@@ -68,8 +68,9 @@ class GaugeClaimRecord:
     date_iso: str
     aero_amount: float
     value_usd: Optional[float] = None
+    value_cad: Optional[float] = None
     tx_hash: Optional[str] = None
-    notes: str = "AERO emissions claim — gauge"
+    notes: str = "gauge emissions"
 
 
 @dataclass
@@ -263,7 +264,7 @@ class AerodromeGaugeWriter:
             return GaugeStepResult(step="claim", tx_hash=tx_hash,
                                    error="Transaction not mined within timeout")
         if receipt.get("status") != "0x1":
-            return GaugeStepResult(step="claim", tx_hash=tx_hash, receipt=receipt,
+            return GaugeStepResult(step="claim", tx_hash=tx_hash,
                                    error="Transaction failed on-chain")
         return GaugeStepResult(step="claim", tx_hash=tx_hash, receipt=receipt)
 
@@ -305,7 +306,7 @@ class AerodromeGaugeWriter:
             return GaugeStepResult(step="unstake", tx_hash=tx_hash,
                                    error="Transaction not mined within timeout")
         if receipt.get("status") != "0x1":
-            return GaugeStepResult(step="unstake", tx_hash=tx_hash, receipt=receipt,
+            return GaugeStepResult(step="unstake", tx_hash=tx_hash,
                                    error="Transaction failed on-chain")
 
         # Confirm NFT returned to the wallet before reporting success.
@@ -317,25 +318,29 @@ class AerodromeGaugeWriter:
 
     def _record_claim(self, record: GaugeClaimRecord, db_path: Any,
                       base_dir: Optional[Path] = None) -> Dict[str, Any]:
-        """Write a FEE_EVENTS row for a gauge claim."""
+        """Write a TRANSACTIONS + FEE_EVENTS row for an AERO emissions claim.
+
+        v5.3.29: NOTES tag is the exact string "gauge emissions". Dedupe by
+        TX_HASH against both tables so external claims and retries never double-
+        record.
+        """
         from coldtrack.db import ColdTrackDB
-        from coldtrack.close_recorder import record_close_and_export
 
         db = ColdTrackDB(Path(db_path))
         db.init_schema()
         try:
-            # Dedupe by TX_HASH so a retry never double-records.
             cur = db.conn().cursor()
-            dup = cur.execute(
-                "SELECT 1 FROM FEE_EVENTS WHERE TX_HASH = ? AND POSITION_ID = ?",
-                (record.tx_hash, record.position_db_id),
-            ).fetchone()
-            if dup:
-                return {"ok": True, "note": "already recorded", "fee_events": 0}
+            # v5.3.29: dedupe by tx hash against both tables.
+            for table in ("FEE_EVENTS", "TRANSACTIONS"):
+                dup = cur.execute(
+                    f"SELECT 1 FROM {table} WHERE TX_HASH = ?", (record.tx_hash,)
+                ).fetchone()
+                if dup:
+                    return {"ok": True, "note": "already recorded", "fee_events": 0, "transactions": 0}
 
             # Best-effort CAD conversion via FX_RATES (same contract as close recorder).
-            value_cad = None
-            if record.value_usd:
+            value_cad = record.value_cad
+            if value_cad is None and record.value_usd:
                 date_key = record.date_iso[:10]
                 cadusd = cur.execute(
                     "SELECT RATE FROM FX_RATES WHERE DATE = ? AND PAIR = ?",
@@ -349,28 +354,58 @@ class AerodromeGaugeWriter:
                 if cadusd and cadusd["RATE"]:
                     value_cad = round(record.value_usd * cadusd["RATE"], 6)
 
+            # FEE_EVENTS row: AERO amount is stored as TOKEN_B_AMT to match the
+            # Pack FEE_EVENT #5 precedent (TOKEN_B_AMT = 127.356 AERO).
             cur.execute(
                 """INSERT INTO FEE_EVENTS
                    (POSITION_ID, DATE, TOKEN_A_AMT, TOKEN_B_AMT, VALUE_USD,
                     VALUE_CAD, VALUE_EUR, VALUE_AUD, TX_HASH, SOURCE, NOTES)
                    VALUES (?,?,?,?,?,?,NULL,NULL,?,?,?)""",
-                (record.position_db_id, record.date_iso, record.aero_amount, None,
+                (record.position_db_id, record.date_iso, None, record.aero_amount,
                  record.value_usd, value_cad, record.tx_hash, "HARVEST",
                  record.notes),
             )
+            # TRANSACTIONS yield row (AERO emission) — required for portfolio accounting.
+            cur.execute(
+                """INSERT INTO TRANSACTIONS
+                   (ACCOUNT_ID, DATE, TYPE, ASSET, AMOUNT, VALUE_USD,
+                    VALUE_CAD, VALUE_EUR, VALUE_AUD,
+                    FX_RATE_CAD_USD, FX_RATE_EUR_USD, FX_RATE_AUD_USD,
+                    CHAIN, TX_HASH, COUNTERPARTY_ASSET, COUNTERPARTY_AMOUNT,
+                    FEE_ASSET, FEE_AMOUNT, FEE_USD, NOTES, CATEGORY)
+                   VALUES (?,?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?,?,?,?,?,?)""",
+                (
+                    record.account_id, record.date_iso, "yield", "AERO",
+                    record.aero_amount, record.value_usd,
+                    "Base", record.tx_hash,
+                    None, None,  # COUNTERPARTY_*
+                    None, None, None,  # fee columns
+                    "gauge emissions", "yield",
+                ),
+            )
+            # v5.3.29: increment cumulative realized fee income.
+            cur.execute(
+                """UPDATE LP_POSITIONS SET
+                   FEES_CLAIMED_USD = COALESCE(FEES_CLAIMED_USD, 0) + ?,
+                   FEES_EARNED_USD = COALESCE(FEES_EARNED_USD, 0) + ?,
+                   UPDATED_AT=datetime('now')
+                 WHERE ID=?""",
+                (record.value_usd or 0, record.value_usd or 0, record.position_db_id),
+            )
             db.commit()
-            return {"ok": True, "fee_events": 1}
+            return {"ok": True, "fee_events": 1, "transactions": 1}
         except Exception as e:
             db.rollback()
             # Persist to pending so the record is not lost.
-            from coldtrack.close_recorder import persist_pending
             pending = {
                 "reason": str(e),
                 "claim_record": {
                     "position_id_str": record.position_id_str,
                     "position_db_id": record.position_db_id,
+                    "account_id": record.account_id,
                     "aero_amount": record.aero_amount,
                     "value_usd": record.value_usd,
+                    "value_cad": record.value_cad,
                     "tx_hash": record.tx_hash,
                     "notes": record.notes,
                 },
@@ -405,9 +440,24 @@ class AerodromeGaugeWriter:
             if price:
                 value_usd = round(aero_amount * price, 6)
 
+        # v5.3.29: resolve the real account_id for the TRANSACTIONS yield row.
+        account_id = 0
+        from coldtrack.db import ColdTrackDB
+        try:
+            db_lookup = ColdTrackDB(Path(db_path))
+            db_lookup.init_schema()
+            acct_row = db_lookup.conn().execute(
+                "SELECT ID FROM ACCOUNTS WHERE NAME=?", (account,)
+            ).fetchone()
+            if acct_row:
+                account_id = acct_row["ID"]
+            db_lookup.close()
+        except Exception:
+            pass
+
         record = GaugeClaimRecord(
             position_id_str=str(token_id),
-            account_id=0,  # not used for FEE_EVENTS insert
+            account_id=account_id,
             position_db_id=position_db_id,
             date_iso=datetime.now(timezone.utc).isoformat(),
             aero_amount=aero_amount,
@@ -416,6 +466,112 @@ class AerodromeGaugeWriter:
         )
         self._record_claim(record, db_path, base_dir=base_dir)
         return result
+
+    def detect_external_claims(
+        self,
+        gauge_address: str,
+        wallet_address: str,
+        db_path: Any,
+        position_db_id: int,
+        from_block: Optional[int] = None,
+        to_block: Optional[int] = None,
+    ) -> List[GaugeClaimRecord]:
+        """Detect AERO transfer events from a gauge to the wallet not yet recorded.
+
+        v5.3.29: external claims (e.g. Aerodrome UI) leave on-chain traces. We
+        scan Transfer logs from the gauge address to the wallet and return
+        claim records that are NOT already present in FEE_EVENTS or
+        TRANSACTIONS by tx hash. Caller decides whether to auto-record or
+        prompt for review.
+        """
+        if not gauge_address or not wallet_address:
+            return []
+
+        # Find the AERO token Transfer events: topic0 = Transfer, topic1 = from
+        # (gauge), topic2 = to (wallet). The gauge is the source of the reward.
+        transfer_topic = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+        pad_wallet = wallet_address[2:].lower().zfill(64)
+        pad_gauge = gauge_address[2:].lower().zfill(64)
+        # Build an eth_getLogs filter. Some RPCs dislike an empty topics list
+        # but accept [[transfer_topic], [pad_gauge], [pad_wallet]].
+        params = [{
+            "fromBlock": hex(from_block) if from_block else "earliest",
+            "toBlock": hex(to_block) if to_block else "latest",
+            "address": AERO_TOKEN,
+            "topics": [
+                transfer_topic,
+                "0x" + pad_gauge,
+                "0x" + pad_wallet,
+            ],
+        }]
+        try:
+            logs = self._rpc_call("eth_getLogs", params) or []
+        except Exception as e:
+            print(f"[aero-gauge] external claim scan failed: {e}")
+            return []
+        if not isinstance(logs, list):
+            return []
+
+        # Load already-recorded tx hashes to dedupe.
+        from coldtrack.db import ColdTrackDB
+        try:
+            db = ColdTrackDB(Path(db_path))
+            db.init_schema()
+            recorded = {
+                r[0].lower()
+                for r in db.conn().execute(
+                    "SELECT TX_HASH FROM FEE_EVENTS WHERE TX_HASH IS NOT NULL "
+                    "UNION SELECT TX_HASH FROM TRANSACTIONS WHERE TX_HASH IS NOT NULL"
+                ).fetchall()
+            }
+            db.close()
+        except Exception as e:
+            print(f"[aero-gauge] dedupe load failed: {e}")
+            recorded = set()
+
+        aero_price = self._aero_price_usd()
+        records: List[GaugeClaimRecord] = []
+        seen_tx: set = set()
+        for log in logs:
+            try:
+                tx_hash = log.get("transactionHash")
+                if not tx_hash or tx_hash.lower() in seen_tx:
+                    continue
+                if tx_hash.lower() in recorded:
+                    continue
+                seen_tx.add(tx_hash.lower())
+                data = log.get("data", "0x0")
+                raw_amt = int(data, 16)
+                aero_amount = raw_amt / (10 ** AERO_DECIMALS)
+                if aero_amount <= 0:
+                    continue
+                value_usd = round(aero_amount * aero_price, 6) if aero_price else None
+                # Block timestamp for the date is best-effort.
+                date_iso = datetime.now(timezone.utc).isoformat()
+                try:
+                    receipt = self._rpc_call("eth_getTransactionReceipt", [tx_hash])
+                    if isinstance(receipt, dict):
+                        block_num = receipt.get("blockNumber")
+                        if block_num:
+                            block = self._rpc_call("eth_getBlockByNumber", [block_num, False])
+                            if isinstance(block, dict) and block.get("timestamp"):
+                                date_iso = datetime.fromtimestamp(
+                                    int(block["timestamp"], 16), tz=timezone.utc
+                                ).isoformat()
+                except Exception:
+                    pass
+                records.append(GaugeClaimRecord(
+                    position_id_str=str(position_db_id),
+                    account_id=0,
+                    position_db_id=position_db_id,
+                    date_iso=date_iso,
+                    aero_amount=aero_amount,
+                    value_usd=value_usd,
+                    tx_hash=tx_hash,
+                ))
+            except Exception:
+                continue
+        return records
 
     def _read_erc20_balance(self, token: str, wallet: str) -> int:
         data = "0x70a08231" + _pad_address(wallet)
@@ -473,6 +629,9 @@ class AerodromeGaugeWriter:
             _notify(f"Unstake tx: {unstake.tx_hash}")
 
         # Step 3: run the normal close flow (decrease + collect + burn).
+        # v5.3.29: flag the writer so the post-close state decomposes withdrawn
+        # token0/token1 into principal + accrued trading fees for the ledger.
+        self.base_writer._staked_close_decompose = True
         _notify("Step 3/3: closing position...")
         try:
             close_txs = self.base_writer.close_position(
@@ -483,9 +642,12 @@ class AerodromeGaugeWriter:
         except Exception as e:
             result.error = f"Close failed: {e}"
             return result
+        finally:
+            self.base_writer._staked_close_decompose = False
 
         # Record the claim if it produced a tx. The close itself is recorded by
         # AerodromeWriter._post_close_state / record_close_and_export in lp_tab.
+        position_db_id: Optional[int] = None
         if claim.tx_hash and db_path:
             # Best-effort ledger row for the AERO emissions claim. We do not have
             # the portfolio LP_POSITIONS.ID here, so we look it up by TOKEN_ID.
@@ -498,8 +660,9 @@ class AerodromeGaugeWriter:
                     (str(token_id),),
                 ).fetchone()
                 if row:
+                    position_db_id = row["ID"]
                     self.claim_and_record(
-                        token_id, account, row["ID"], db_path,
+                        token_id, account, position_db_id, db_path,
                         position_manager=position_manager,
                         base_dir=base_dir,
                     )
@@ -510,6 +673,23 @@ class AerodromeGaugeWriter:
                     db.close()
                 except Exception:
                     pass
+
+        # v5.3.29: also surface any external claims detected for this gauge.
+        try:
+            wallet_address = self.base_writer._get_account_address(account)
+            gauge_address = self._is_staked(token_id, position_manager, wallet_address)
+            if gauge_address and db_path and position_db_id:
+                ext = self.detect_external_claims(
+                    gauge_address, wallet_address, db_path, position_db_id
+                )
+                for rec in ext:
+                    # Best-effort auto-record external claims. In production the
+                    # caller may prefer a pending-review dialog; here we record
+                    # and log so the user sees the backfill happened.
+                    self._record_claim(rec, db_path, base_dir=base_dir)
+                    print(f"[aero-gauge] recorded external claim {rec.tx_hash}: {rec.aero_amount} AERO")
+        except Exception as e:
+            print(f"[aero-gauge] external claim detection skipped: {e}")
 
         return result
 

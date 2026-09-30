@@ -426,9 +426,11 @@ class AerodromeWriter(VenueWriter):
         dec1 = _get_token_decimals(token1)
 
         # v5.3.16: close capture bookkeeping — per-tx sigs, then CloseResult on success.
+        self._staked_close_decompose = False
         self._close_capture = {
             "position_id_str": str(token_id), "token0": token0, "token1": token1,
             "dec0": dec0, "dec1": dec1, "recipient": recipient,
+            "position_manager": position_manager,
             "decrease_sig": None, "collect_sig": None,
         }
         self.last_close_result = None
@@ -502,6 +504,83 @@ class AerodromeWriter(VenueWriter):
         return tx_hashes
 
     # ------------------------------------------------------------------
+    # Staked-close fee decomposition helpers
+    # ------------------------------------------------------------------
+
+    def _read_staked_position_fees(
+        self,
+        token_id: int,
+        position_manager: str,
+        token0: str,
+        token1: str,
+        dec0: int,
+        dec1: int,
+    ) -> Tuple[Optional[float], Optional[float]]:
+        """Return accrued token0/token1 trading fees for a staked position.
+
+        Uses the same feeGrowthInside math the adapter uses for the staked-card
+        display. Returns (None, None) if we cannot read/decompose safely.
+        """
+        try:
+            from venue_adapters.aerodrome_adapter import (
+                _compute_realtime_fees,
+                _decode_int24,
+                _fetch_pool_state,
+                _pool_for_token_ids,
+                SELECTOR_POSITIONS,
+            )
+        except Exception as e:
+            print(f"[aero-writer] fee decomposition import failed: {e}")
+            return (None, None)
+
+        # Read the position struct to get liquidity, ticks, and feeGrowthInsideLast.
+        data = SELECTOR_POSITIONS + _pad_int_to_64(token_id)
+        result = _base_rpc_call("eth_call", [{"to": position_manager, "data": data}, "latest"])
+        if not result or not isinstance(result, str) or len(result) < 2 + 32 * 13:
+            return (None, None)
+        try:
+            body = result[2:]
+            tick_spacing = int(body[256:320], 16)
+            tick_lower = _decode_int24(body[320:384])
+            tick_upper = _decode_int24(body[384:448])
+            liquidity = int(body[448:512], 16)
+            fee_growth_inside0_last = int(body[512:576], 16)
+            fee_growth_inside1_last = int(body[576:640], 16)
+            tokens_owed0 = int(body[640:704], 16)
+            tokens_owed1 = int(body[704:768], 16)
+        except (ValueError, IndexError):
+            return (None, None)
+
+        pool_address = _pool_for_token_ids(token0, token1, tick_spacing, position_manager)
+        if not pool_address:
+            return (None, None)
+        _, current_tick, _, _, _, _ = _fetch_pool_state(pool_address)
+        if current_tick is None:
+            return (None, None)
+
+        try:
+            fee0, fee1, status = _compute_realtime_fees(
+                pool_address=pool_address,
+                tick_lower=tick_lower,
+                tick_upper=tick_upper,
+                current_tick=current_tick,
+                liquidity=liquidity,
+                fee_growth_inside0_last=fee_growth_inside0_last,
+                fee_growth_inside1_last=fee_growth_inside1_last,
+                tokens_owed0=tokens_owed0,
+                tokens_owed1=tokens_owed1,
+                decimals0=dec0,
+                decimals1=dec1,
+            )
+        except Exception as e:
+            print(f"[aero-writer] _compute_realtime_fees failed: {e}")
+            return (None, None)
+        if status not in ("ok", "zero"):
+            return (None, None)
+        # Do not return negative values; a rounding error should not eat principal.
+        return (max(0.0, fee0), max(0.0, fee1))
+
+    # ------------------------------------------------------------------
     # Close capture (ledger recorder feed) — read-only, post-close
     # ------------------------------------------------------------------
 
@@ -525,7 +604,6 @@ class AerodromeWriter(VenueWriter):
         cap = getattr(self, "_close_capture", {}) or {}
         pos_mint = cap.get("position_id_str", "")
         sigs = [s for s in (cap.get("decrease_sig"), cap.get("collect_sig"), burn_sig) if s]
-        receipts: Dict[str, Any] = {}
         legs: List[CloseLeg] = []
         gas: Dict[str, float] = {}
         block_iso: Optional[str] = None
@@ -604,6 +682,47 @@ class AerodromeWriter(VenueWriter):
             pr = prices.get(leg.asset)
             if pr:
                 leg.value_usd = round(leg.amount * pr, 6)
+
+        # v5.3.29: staked-close fee decomposition. If this close was preceded by
+        # an unstake (i.e. the NFT was gauge-held before close), split the token0/
+        # token1 withdrawn amounts into principal and accrued-fee legs using the
+        # feeGrowthInside delta at close. The fee portion is recorded as income
+        # "included in withdrawn balance"; principal stays as liquidity legs.
+        # The total withdrawn value is unchanged (value-preserving decomposition).
+        # We detect staked mode by checking whether the NFT owner is/was a gauge
+        # via the saved capture flag or by inspecting current ownerOf.
+        decompose_fees = getattr(self, "_staked_close_decompose", False)
+        if decompose_fees and legs:
+            sym0 = _get_token_symbol(token0)
+            sym1 = _get_token_symbol(token1)
+            # Fetch accrued fees at close. We read from the position manager used
+            # in this close flow; if we cannot read, fall back to all-principal.
+            pm = cap.get("position_manager") or self._find_position_manager(int(pos_mint or 0))
+            accrued0, accrued1 = (None, None)
+            if pm:
+                accrued0, accrued1 = self._read_staked_position_fees(
+                    int(pos_mint or 0), pm, token0, token1, dec0, dec1
+                )
+            if accrued0 is None and accrued1 is None:
+                print("[aero-writer] staked fee decomposition unavailable, using principal-only fallback")
+            else:
+                # Build replacement legs: fee portion capped at the collected
+                # amount per token; remainder is principal.
+                new_legs: List[Any] = []
+                per_token_withdrawn: Dict[str, float] = {}
+                for leg in legs:
+                    per_token_withdrawn[leg.asset] = per_token_withdrawn.get(leg.asset, 0.0) + leg.amount
+                fee_amounts = {sym0: accrued0 or 0.0, sym1: accrued1 or 0.0}
+                for sym, withdrawn in per_token_withdrawn.items():
+                    fee_amt = min(fee_amounts.get(sym, 0.0), withdrawn)
+                    principal_amt = max(0.0, withdrawn - fee_amt)
+                    sig = cap.get("collect_sig") or cap.get("decrease_sig")
+                    if principal_amt > 0:
+                        new_legs.append(CloseLeg(asset=sym, amount=principal_amt, kind="liquidity", sig=sig))
+                    if fee_amt > 0:
+                        new_legs.append(CloseLeg(asset=sym, amount=fee_amt, kind="fee", sig=sig))
+                if new_legs:
+                    legs = new_legs
 
         # close_sig is the last successful funds-out tx; burn_sig is tracked in
         # the snapshot NOTES only and never appears as a withdraw/yield row.

@@ -2,11 +2,11 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.3.28 (September 2026) - Staked Aerodrome SlipStream gauge write operations
+Version: v5.3.29 (September 2026) - Staked Aerodrome accounting: fee decomposition, AERO claim dedupe, no close capital events
 """
 
 # Single source of truth for version — update this when bumping versions
-VERSION = "5.3.28"
+VERSION = "5.3.29"
 import sys
 import os
 
@@ -1011,8 +1011,8 @@ class ColdStackGUI:
                     "ColdStack is offline by default — this is the only feature that requires internet.",
                     parent=self.root
                 ))
-            except Exception as e:
-                self.root.after(0, lambda: messagebox.showerror(
+            except Exception as err:
+                self.root.after(0, lambda e=err: messagebox.showerror(
                     "Update Check Failed",
                     f"An error occurred while checking for updates:\n{str(e)}",
                     parent=self.root

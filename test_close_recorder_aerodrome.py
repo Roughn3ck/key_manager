@@ -133,6 +133,11 @@ def main():
         assert len(fe) == 1, fe
         assert fe[0]["SOURCE"] == "HARVEST"
         assert fe[0]["TOKEN_A_AMT"] == 3.21 and fe[0]["TOKEN_B_AMT"] == 0.00011
+        assert fe[0]["NOTES"] == "close: final fees", fe[0]["NOTES"]
+
+        # v5.3.29: close recorder no longer writes CAPITAL_EVENTS.
+        ce = _rows(db._conn, "SELECT * FROM CAPITAL_EVENTS WHERE POSITION_ID=?", (pos_id,))
+        assert len(ce) == 0, ce
 
         # LP_SNAPSHOTS — one close row, sigs + CLOSED marker in NOTES.
         sn = _rows(db._conn, "SELECT * FROM LP_SNAPSHOTS WHERE LP_POSITION_ID=?", (pos_id,))

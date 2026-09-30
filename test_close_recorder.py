@@ -158,16 +158,9 @@ def main():
         assert abs((fe[0]["VALUE_USD"] or 0) -
                    round(0.01011925 * 96000.0 + 9.20164718 * 210.0, 6)) < 1e-6 or fe[0]["VALUE_USD"] is not None
 
-        # CAPITAL_EVENTS — v5.3.22: one WITHDRAWAL row tied to the position,
-        # total USD value of liquidity legs, OWNER set.
+        # v5.3.29: CAPITAL_EVENTS are no longer written by the close recorder.
         ce = _rows(conn, "SELECT * FROM CAPITAL_EVENTS WHERE POSITION_ID=?", (pos_id,))
-        assert len(ce) == 1, ce
-        assert ce[0]["TYPE"] == "WITHDRAWAL"
-        assert ce[0]["ACCOUNT_ID"] == row["ACCOUNT_ID"]
-        assert ce[0]["OWNER"] == "HAgk14JpMQLgt6rVgv7cBQFJWFto5Dqxi472uT3DKpqk"
-        expected_value = round(0.10000000 * 96000.0 + 10.00000000 * 210.0, 6)
-        assert abs((ce[0]["VALUE_USD"] or 0) - expected_value) < 1e-6, ce[0]
-        assert "CLOSE_BURN_SIG_20260922" in (ce[0]["NOTES"] or "")
+        assert len(ce) == 0, ce
 
         # LP_SNAPSHOTS — one close row, sigs in NOTES, 'CLOSED via ColdStack'.
         sn = _rows(conn, "SELECT * FROM LP_SNAPSHOTS WHERE LP_POSITION_ID=?", (pos_id,))
@@ -190,27 +183,24 @@ def main():
         assert n_fe == 1, "FEE_EVENTS must dedupe by TX_HASH"
         n_ce = _rows(db2._conn, "SELECT COUNT(*) AS n FROM CAPITAL_EVENTS WHERE POSITION_ID=?",
                      (pos_id,))[0]["n"]
-        assert n_ce == 1, "CAPITAL_EVENTS must dedupe by (position,date,type)"
+        assert n_ce == 0, "v5.3.29: close recorder must not write CAPITAL_EVENTS"
         n_tx = _rows(db2._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS WHERE TX_HASH IN (?,?)",
                      ("DECREASE_SIG_20260922", "COLLECT_SIG_20260922"))[0]["n"]
         assert n_tx == 4, "TRANSACTIONS must dedupe by (TX_HASH, TYPE, ASSET)"
         db2.close()
 
-        # Already-closed row: NOTES-only append, no duplicate transactions/fee/capital rows.
+        # Already-closed row: NOTES-only append, no duplicate transactions/fee rows.
         db5 = ColdTrackDB(db_path); db5.init_schema()
         before_tx = _rows(db5._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS WHERE TX_HASH IN (?,?)",
                           ("DECREASE_SIG_20260922", "COLLECT_SIG_20260922"))[0]["n"]
-        before_ce = _rows(db5._conn, "SELECT COUNT(*) AS n FROM CAPITAL_EVENTS WHERE POSITION_ID=?",
-                          (pos_id,))[0]["n"]
         out_closed = CloseRecorder(db5).record(res)
         assert out_closed["ok"]
         assert out_closed.get("note", "").startswith("already closed")
         after_tx = _rows(db5._conn, "SELECT COUNT(*) AS n FROM TRANSACTIONS WHERE TX_HASH IN (?,?)",
                          ("DECREASE_SIG_20260922", "COLLECT_SIG_20260922"))[0]["n"]
-        after_ce = _rows(db5._conn, "SELECT COUNT(*) AS n FROM CAPITAL_EVENTS WHERE POSITION_ID=?",
-                         (pos_id,))[0]["n"]
         assert after_tx == before_tx, "already-closed replay must not duplicate TRANSACTIONS"
-        assert after_ce == before_ce, "already-closed replay must not duplicate CAPITAL_EVENTS"
+        ce = _rows(db5._conn, "SELECT COUNT(*) AS n FROM CAPITAL_EVENTS WHERE POSITION_ID=?", (pos_id,))[0]["n"]
+        assert ce == 0, "v5.3.29: close replay must not write CAPITAL_EVENTS"
         # NOTES should contain the new replay sigs.
         notes = _rows(db5._conn, "SELECT NOTES FROM LP_POSITIONS WHERE ID=?", (pos_id,))[0]["NOTES"] or ""
         assert "ColdStack close replay sigs" in notes, notes

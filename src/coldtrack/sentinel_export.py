@@ -27,6 +27,17 @@ Reads ONLY coldtrack.db (no vault, no keys, no network). Registry seam is
 via ACCOUNTS.NAME). The write is an atomic tmp + ``os.replace`` swap so the
 sentinel's fs.watchFile hot-reload never sees a partial read.
 
+v5.3.29 baseline convention (Kimi's data contract):
+  CAPITAL_EVENTS represents external portfolio capital only. The external
+  baseline is:
+      net_external_capital = SUM(VALUE_USD WHERE TYPE='INJECTION')
+                           - SUM(VALUE_USD WHERE TYPE='WITHDRAWAL' AND POSITION_ID IS NULL)
+  The exporter keeps full fidelity: all CAPITAL_EVENTS rows are emitted in
+  capital_events[] (including position-tagged WITHDRAWALs). Consumers that
+  compute the external-capital baseline must exclude rows where
+  ``type == 'WITHDRAWAL'`` and ``position_id`` is set. LP close recorders in
+  v5.3.29+ no longer write new position-tagged WITHDRAWALs.
+
 Stdlib only (sqlite3, json, os, argparse, datetime, logging, pathlib) — runs
 inside the embedded interpreter.
 
@@ -49,7 +60,7 @@ logger = logging.getLogger(__name__)
 # Contract version the sentinel pins (argus_sentinel.js VIEW_CONTRACT_VERSION).
 VIEW_CONTRACT_VERSION = 1
 # Semver of this port, embedded in generated_by. Credit preserved.
-EXPORTER_VERSION = "5.3.15"
+EXPORTER_VERSION = "5.3.29"
 GENERATED_BY = f"ColdTrack Sentinel Export {EXPORTER_VERSION} (port of kimi/coldtax)"
 
 # Default merged-view sources: the Pack + K&P portfolio DBs (Kimi's layout).

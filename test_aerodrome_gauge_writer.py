@@ -245,7 +245,7 @@ def test_close_staked_position_records_claim():
         conn = db.conn()
         conn.execute(
             "INSERT INTO PORTFOLIOS (NAME, TYPE) VALUES (?, ?)",
-            ("test", "internal"),
+            ("test", "client"),
         )
         conn.execute(
             "INSERT INTO ACCOUNTS (PORTFOLIO_ID, NAME, TYPE) VALUES (?, ?, ?)",
@@ -266,7 +266,20 @@ def test_close_staked_position_records_claim():
         rpc.post_owner = writer.base_writer.address
         writer._rpc_call = rpc
         writer._find_position_manager = lambda tid: rpc.position_manager
-        writer._read_erc20_balance = lambda token, wallet: 1_000 * (10 ** 18)
+        # Balance delta: 1_000 → 1_012.32 gives 12.32 AERO claimed.
+        _bal = [1_000 * (10 ** 18)]
+        def _fake_bal(token, wallet):
+            out = _bal[0]
+            _bal[0] = 1_012_320_000_000_000_000_000  # ~12.32 AERO more
+            return out
+        writer._read_erc20_balance = _fake_bal
+
+        # Resolve account_id properly from the test DB for TRANSACTIONS insert.
+        conn_id = sqlite3.connect(db_path)
+        conn_id.row_factory = sqlite3.Row
+        acct = conn_id.execute("SELECT ID FROM ACCOUNTS WHERE NAME=?", ("G2",)).fetchone()
+        account_id = acct["ID"] if acct else 0
+        conn_id.close()
 
         result = writer.close_staked_position("base:7088644", "G2", db_path=db_path, base_dir=Path(tmp))
         assert result.error is None, result.error
@@ -278,7 +291,15 @@ def test_close_staked_position_records_claim():
         ).fetchone()
         assert row is not None, "FEE_EVENTS row missing"
         assert row["SOURCE"] == "HARVEST", row["SOURCE"]
-        assert "gauge" in row["NOTES"].lower(), row["NOTES"]
+        assert row["NOTES"] == "gauge emissions", row["NOTES"]
+        assert row["TOKEN_B_AMT"] is not None
+        # v5.3.29: a TRANSACTIONS yield row is also written.
+        tx = conn2.execute(
+            "SELECT * FROM TRANSACTIONS WHERE TX_HASH = ?", (row["TX_HASH"],)
+        ).fetchone()
+        assert tx is not None, "TRANSACTIONS yield row missing"
+        assert tx["TYPE"] == "yield" and tx["ASSET"] == "AERO", tx
+        assert tx["ACCOUNT_ID"] == account_id, (tx["ACCOUNT_ID"], account_id)
         conn2.close()
     print("PASS test_close_staked_position_records_claim")
 
@@ -294,7 +315,7 @@ def test_claim_recorded_as_fee_event():
         conn = db.conn()
         conn.execute(
             "INSERT INTO PORTFOLIOS (NAME, TYPE) VALUES (?, ?)",
-            ("test", "internal"),
+            ("test", "client"),
         )
         conn.execute(
             "INSERT INTO ACCOUNTS (PORTFOLIO_ID, NAME, TYPE) VALUES (?, ?, ?)",
@@ -319,7 +340,7 @@ def test_claim_recorded_as_fee_event():
         result = writer.claim_and_record(7088644, "G2", pos_id, db_path)
         assert result.error is None, result.error
 
-        # Re-open and verify FEE_EVENTS row.
+        # Re-open and verify FEE_EVENTS + TRANSACTIONS rows.
         conn2 = sqlite3.connect(db_path)
         conn2.row_factory = sqlite3.Row
         row = conn2.execute(
@@ -327,10 +348,68 @@ def test_claim_recorded_as_fee_event():
         ).fetchone()
         assert row is not None, "FEE_EVENTS row missing"
         assert row["SOURCE"] == "HARVEST", row["SOURCE"]
-        assert "gauge" in row["NOTES"].lower(), row["NOTES"]
-        assert row["TOKEN_A_AMT"] is not None
+        assert row["NOTES"] == "gauge emissions", row["NOTES"]
+        assert row["TOKEN_B_AMT"] is not None
+        tx = conn2.execute(
+            "SELECT * FROM TRANSACTIONS WHERE TX_HASH = ?", (row["TX_HASH"],)
+        ).fetchone()
+        assert tx is not None, "TRANSACTIONS yield row missing"
+        assert tx["TYPE"] == "yield" and tx["ASSET"] == "AERO", tx
         conn2.close()
     print("PASS test_claim_recorded_as_fee_event")
+
+
+def test_tx_hash_dedupe_no_double_record():
+    """A claim already recorded by tx hash must not be re-inserted."""
+    import coldtrack.db as db_mod
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = Path(tmp) / "coldtrack.db"
+        db = db_mod.ColdTrackDB(db_path)
+        db.init_schema()
+        conn = db.conn()
+        conn.execute(
+            "INSERT INTO PORTFOLIOS (NAME, TYPE) VALUES (?, ?)",
+            ("test", "client"),
+        )
+        conn.execute(
+            "INSERT INTO ACCOUNTS (PORTFOLIO_ID, NAME, TYPE) VALUES (?, ?, ?)",
+            (1, "G2", "wallet"),
+        )
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO LP_POSITIONS (ACCOUNT_ID, POOL_NAME, PLATFORM, CHAIN, TOKEN_ID, STATUS, TOKEN_A, TOKEN_B, OPENED_DATE) "
+            "VALUES ((SELECT ID FROM ACCOUNTS WHERE NAME=?), ?, ?, ?, ?, ?, ?, ?, ?)",
+            ("G2", "ETH/cbBTC", "Aerodrome", "Base", "7088644", "active", "ETH", "cbBTC", "2026-01-01"),
+        )
+        pos_id = cur.lastrowid
+        tx_hash = "0x" + "d" * 64
+        conn.execute(
+            "INSERT INTO FEE_EVENTS (POSITION_ID, DATE, TOKEN_B_AMT, VALUE_USD, TX_HASH, SOURCE, NOTES) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (pos_id, "2026-09-30T00:00:00+00:00", 12.32, 30.0, tx_hash, "HARVEST", "gauge emissions"),
+        )
+        db.commit()
+        db.close()
+
+        writer = _new_writer()
+        rpc = _FakeRpc()
+        writer._rpc_call = rpc
+        writer._find_position_manager = lambda tid: rpc.position_manager
+        writer._read_erc20_balance = lambda token, wallet: 1_000 * (10 ** 18)
+        # Force the claim tx hash to match the already-recorded one.
+        writer.base_writer.receipts["0x0000000000000000000000000000000000000000000000000000000000000001"] = {"status": "0x1"}
+        result = writer.claim_and_record(7088644, "G2", pos_id, db_path)
+        assert result.error is None, result.error
+
+        conn2 = sqlite3.connect(db_path)
+        conn2.row_factory = sqlite3.Row
+        n = conn2.execute(
+            "SELECT COUNT(*) AS n FROM FEE_EVENTS WHERE TX_HASH = ?", (tx_hash,)
+        ).fetchone()["n"]
+        assert n == 1, f"dedupe failed: {n} FEE_EVENTS rows for same tx hash"
+        conn2.close()
+    print("PASS test_tx_hash_dedupe_no_double_record")
 
 
 def main():
@@ -343,6 +422,7 @@ def main():
     test_guided_close_state_machine()
     test_close_staked_position_records_claim()
     test_claim_recorded_as_fee_event()
+    test_tx_hash_dedupe_no_double_record()
     print("ALL AERODROME GAUGE WRITER TESTS PASS")
     return 0
 

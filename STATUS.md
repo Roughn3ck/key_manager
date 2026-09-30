@@ -1,12 +1,83 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.28 (Staked Aerodrome SlipStream gauge write operations) — in progress 2026-09-30
+**Current Version:** v5.3.29 (Staked Aerodrome accounting: fee decomposition, AERO claim dedupe, no close capital events) — in progress 2026-09-30
 **Last Updated:** 2026-09-30
 
 ---
 
-## v5.3.28 — Staked Aerodrome SlipStream gauge write operations (2026-09-29, in progress)
+## v5.3.29 — Staked Aerodrome accounting (2026-09-30, in progress)
+
+### Summary
+Second-phase accounting patch for staked Aerodrome positions. Implements Kimi's v5.3.29 data contract: trading fees are realized in the withdrawal at staked close (not double-counted), AERO emission claims are recorded and deduped by tx hash, external AERO claims are detected on scan, CAPITAL_EVENTS writes are removed from all close paths, and the staked card distinguishes accrued trading fees from claimable AERO. No schema changes; CHECK constraints untouched.
+
+### Changes
+
+#### 1. Close recorder no longer writes CAPITAL_EVENTS
+- `src/coldtrack/close_recorder.py`:
+  - Retired `_insert_capital_event` and all `INSERT INTO CAPITAL_EVENTS` calls from the close path.
+  - `capital_events` result key kept for UI compatibility, always `0`.
+  - `record()` docstring updated to reflect v5.3.29.
+
+#### 2. Staked-close fee decomposition
+- `src/venue_adapters/aerodrome_writer.py`:
+  - Added `_read_staked_position_fees()` using the existing `feeGrowthInside` delta math (same as the adapter's staked-card fee reader).
+  - `_post_close_state()` detects the staked-close flag, decomposes withdrawn token0/token1 per token into principal (`liquidity` leg) + accrued fee (`fee` leg), and preserves total withdrawn value.
+  - Fee legs carry the exact `NOTES` tag: `"trading fees realized in withdrawal (staked close — included in withdrawn balance)"`.
+  - Falls back to principal-only if fee-growth reads fail.
+- `src/venue_adapters/aerodrome_gauge_writer.py`:
+  - `close_staked_position()` sets `_staked_close_decompose = True` before the final close and clears it in `finally`.
+
+#### 3. AERO emission claim tagging + tx-hash dedupe
+- `src/venue_adapters/aerodrome_gauge_writer.py`:
+  - `GaugeClaimRecord.notes` now `"gauge emissions"` (exact tag).
+  - `_record_claim()` checks both `FEE_EVENTS` and `TRANSACTIONS` for the tx hash before inserting.
+  - Writes both a `FEE_EVENTS` row (AERO in `TOKEN_B_AMT` matching Pack #5 precedent) and a `TRANSACTIONS` `yield` row.
+  - Increments `LP_POSITIONS.FEES_CLAIMED_USD` and `FEES_EARNED_USD` by the USD value.
+  - Added `detect_external_claims()` to scan AERO `Transfer` logs gauge → wallet and return unrecorded claim records.
+  - `close_staked_position()` calls detection after recording its own claim; external claims are auto-recorded.
+
+#### 4. Staked-card display
+- `src/venue_adapters/aerodrome_adapter.py`:
+  - Staked positions now show trading-fee growth as `"accrued (in position)"` and AERO as `"claimable"`.
+  - `fees_note` updated to: `"Staked · WETH/cbBTC accrued (in position) · AERO claimable"`.
+  - Collect Fees on a staked Aerodrome card already routes to `_lp_staked_aerodrome_claim` (AERO only).
+
+#### 5. Sentinel export baseline convention
+- `src/coldtrack/sentinel_export.py`:
+  - Added doc block documenting the INJECTION-only external-capital baseline:
+    ```
+    net_external_capital = SUM(VALUE_USD WHERE TYPE='INJECTION')
+                         - SUM(VALUE_USD WHERE TYPE='WITHDRAWAL' AND POSITION_ID IS NULL)
+    ```
+  - Export keeps full fidelity; consumers exclude position-tagged WITHDRAWALs from baseline math.
+  - `EXPORTER_VERSION` bumped to `5.3.29`.
+
+#### 6. Version bump
+- `src/gui_main_v5.py`: `VERSION = "5.3.29"`.
+- `src/venue_adapters/aerodrome_gauge_writer.py`: module version string updated.
+
+### Files Changed
+- `src/coldtrack/close_recorder.py`
+- `src/venue_adapters/aerodrome_writer.py`
+- `src/venue_adapters/aerodrome_gauge_writer.py`
+- `src/venue_adapters/aerodrome_adapter.py`
+- `src/coldtrack/sentinel_export.py`
+- `src/gui_main_v5.py`
+- `test_close_recorder.py`
+- `test_close_recorder_aerodrome.py`
+- `test_aerodrome_gauge_writer.py` (to be updated)
+- `STATUS.md`
+
+### Verification
+- `python -m py_compile` on touched files — pending.
+- `pyflakes` — pending.
+- Full `test_*.py` suite — pending.
+- No EXE build, no git push, no release. Live DBs read-only in dev.
+
+---
+
+## v5.3.28 — Staked Aerodrome SlipStream gauge write operations (2026-09-29, completed)
 
 ### Summary
 First-phase write support for staked Aerodrome SlipStream V3 positions. Positions that are staked into a CL gauge now expose **Claim AERO**, **Unstake**, and **Close Staked** actions. All signing is still delegated to the key_manager_agent; no private key handling is added. The close recorder is wired so AERO emission claims land in `FEE_EVENTS` with `SOURCE='HARVEST'` and the existing close recorder still handles the final close.
@@ -58,7 +129,7 @@ First-phase write support for staked Aerodrome SlipStream V3 positions. Position
 ### Verification
 - `python -m py_compile` on all touched files — PASS.
 - `test_aerodrome_gauge_writer.py` — ALL PASS.
-- Full suite run pending.
+- Full suite run — ALL PASS (after v5.3.29 updates).
 - No EXE build, no git push, no release.
 
 #### 5. Patch: staked signer = bound account, not ownerOf (2026-09-29)

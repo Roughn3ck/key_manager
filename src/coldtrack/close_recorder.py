@@ -1,10 +1,14 @@
-"""ColdStack — ColdTrack Close-Position Ledger Recorder (v5.3.16).
+"""ColdStack — ColdTrack Close-Position Ledger Recorder (v5.3.29).
 
 Writes a successful LP close to coldtrack.db: the liquidity legs, the collected
 fees, the position STATUS flip, a closing snapshot, and dated FEE_EVENTS — all
 in ONE sqlite transaction. ColdStack becomes a db writer for closes (alongside
 Kimi's tooling), with strict locking discipline: BEGIN IMMEDIATE + busy_timeout,
 everything captured before the txn opens, never a network call inside the txn.
+
+v5.3.29: CAPITAL_EVENTS are no longer written by the close recorder. Capital
+movements tracked by the LP close are internal portfolio reshuffles; the
+external-capital baseline uses INJECTION rows only, per Kimi's convention.
 
 No schema changes. Column names mirror the existing Project X close rows
 (KP db #68–72). FEE_EVENTS.SOURCE uses 'HARVEST' (close-collected fees).
@@ -159,7 +163,11 @@ class CloseRecorder:
             self._close_position_row(conn, result, pos_id)
             self._upsert_snapshot(conn, result, pos_id, match)
             n_fee = self._insert_fee_events(conn, result, pos_id, match)
-            n_capital = self._insert_capital_event(conn, result, pos_id, account_id, match)
+            # v5.3.29: CAPITAL_EVENTS is external portfolio capital only (INJECTION -
+            # WITHDRAWAL with POSITION_ID NULL). LP closes are internal moves; the
+            # close recorder no longer writes a CAPITAL_EVENTS row. Existing position-
+            # tagged WITHDRAWALs are excluded from baseline math by query convention.
+            n_capital = 0
             self.db.commit()
         except Exception:
             self.db.rollback()
@@ -385,7 +393,13 @@ class CloseRecorder:
                            match: Dict[str, Any]) -> int:
         """One dated FEE_EVENTS row per close when any fee leg exists.
         SOURCE='HARVEST' (close-collected); the source CHECK allows only
-        MANUAL/READER/HARVEST — never altered."""
+        MANUAL/READER/HARVEST — never altered.
+
+        v5.3.29: the NOTES tag discriminates the income stream:
+          - unstaked close harvest -> "close: final fees"
+          - staked close decomposition -> "trading fees realized in withdrawal
+            (staked close — included in withdrawn balance)"
+        """
         fee_legs = [l for l in result.legs if l.kind == "fee"]
         if not fee_legs:
             return 0
@@ -404,74 +418,33 @@ class CloseRecorder:
         amt_b = sum((l.amount or 0) for l in fee_legs if l.asset == match.get("token_b")) or None
         # Token order vs the position row: A first.
         value_usd = sum((l.value_usd or 0) for l in fee_legs) or None
+        # Discriminate staked-close decomposition by the platform + leg signature.
+        # A staked Aerodrome close has principal and fee legs sharing the same
+        # sig (collect/decrease), and its fee legs are the in-withdrawal component.
+        is_staked_aero_close = (
+            result.platform == "Aerodrome"
+            and result.chain == "Base"
+            and any(l.kind == "liquidity" for l in result.legs)
+            and result.collect_sig == result.decrease_sig
+        )
+        notes = (
+            "trading fees realized in withdrawal (staked close — included in withdrawn balance)"
+            if is_staked_aero_close
+            else "close: final fees"
+        )
         conn.execute(
             """INSERT INTO FEE_EVENTS
                (POSITION_ID, DATE, TOKEN_A_AMT, TOKEN_B_AMT, VALUE_USD,
                 VALUE_CAD, VALUE_EUR, VALUE_AUD, TX_HASH, SOURCE, NOTES)
                VALUES (?,?,?,?,?,NULL,NULL,NULL,?,?,?)""",
             (pos_id, date_iso, amt_a, amt_b, value_usd,
-             tx_hash, "HARVEST",
-             "CLOSED via ColdStack"),
+             tx_hash, "HARVEST", notes),
         )
         return 1
 
-    def _insert_capital_event(self, conn, result: CloseResult, pos_id: int,
-                              account_id: int, match: Dict[str, Any]) -> int:
-        """One CAPITAL_EVENTS WITHDRAWAL row for the principal returned on close.
-
-        A close is treated as a withdrawal tied to the position.  The row stores
-        the total USD value of the liquidity legs; the per-asset breakdown lives
-        in NOTES with the close signatures.
-        """
-        liquidity_legs = [l for l in result.legs if l.kind == "liquidity"]
-        if not liquidity_legs:
-            return 0
-        date_iso = result.block_time_iso or _now_iso()
-        date_key = date_iso[:10]
-        # v5.3.22: dedupe by position+date+type — a self-healed retry must not
-        # create two WITHDRAWAL rows for the same close.
-        cur = conn.cursor()
-        dup = cur.execute(
-            "SELECT 1 FROM CAPITAL_EVENTS WHERE POSITION_ID = ? AND DATE = ? AND TYPE = ?",
-            (pos_id, date_iso, "WITHDRAWAL"),
-        ).fetchone()
-        if dup:
-            return 0
-
-        value_usd = sum((l.value_usd or 0) for l in liquidity_legs) or None
-        # Best-effort CAD conversion via FX_RATES.
-        value_cad = None
-        if value_usd:
-            cadusd = conn.execute(
-                "SELECT RATE FROM FX_RATES WHERE DATE = ? AND PAIR = ?",
-                (date_key, "CADUSD"),
-            ).fetchone()
-            if not cadusd:
-                cadusd = conn.execute(
-                    "SELECT RATE FROM FX_RATES WHERE PAIR = ? ORDER BY DATE DESC LIMIT 1",
-                    ("CADUSD",),
-                ).fetchone()
-            if cadusd and cadusd["RATE"]:
-                # RATE is CAD per USD; value_cad = value_usd * rate
-                value_cad = round(value_usd * cadusd["RATE"], 6)
-
-        breakdown = ", ".join(
-            f"{l.asset} {l.amount:.8f}" for l in liquidity_legs
-        )
-        sigs = ", ".join(s for s in (result.decrease_sig, result.collect_sig,
-                                       result.close_sig) if s)
-        notes = f"Close withdrawal — {breakdown}. sigs: {sigs}".strip()
-
-        conn.execute(
-            """INSERT INTO CAPITAL_EVENTS
-               (ACCOUNT_ID, POSITION_ID, DATE, TYPE, ASSET, AMOUNT, VALUE_USD,
-                VALUE_CAD, VALUE_EUR, VALUE_AUD, OWNER, NOTES)
-               VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?,?)""",
-            (account_id, pos_id, date_iso, "WITHDRAWAL", None, None, value_usd,
-             value_cad, result.owner, notes),
-        )
-        return 1
-
+# v5.3.29: _insert_capital_event removed. CAPITAL_EVENTS are no longer written
+# by the close recorder. The function signature is intentionally deleted so any
+# stale caller fails at import time rather than silently reviving the old path.
 
 # ---------------------------------------------------------------------------
 # Pending-record persistence (never lose the close record on a write failure)

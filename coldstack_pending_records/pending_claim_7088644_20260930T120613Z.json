@@ -1,0 +1,13 @@
+{
+  "reason": "Incorrect number of bindings supplied. The current statement uses 15, and there are 16 supplied.",
+  "claim_record": {
+    "position_id_str": "7088644",
+    "position_db_id": 1,
+    "account_id": 1,
+    "aero_amount": 12.32,
+    "value_usd": null,
+    "value_cad": null,
+    "tx_hash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+    "notes": "gauge emissions"
+  }
+}

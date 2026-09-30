@@ -1060,9 +1060,11 @@ def _decode_positions_response(
         else:
             fees_earned_usd += _usd_value(owed1_h, symbol1, price_engine) or 0.0
 
-    # For staked positions, the gauge is the NFT owner.
-    # Trading fees (token0/token1) are relinquished to veAERO voters per
-    # Aerodrome's spec. The staker only earns AERO emissions.
+    # v5.3.29: staked Aerodrome positions have two distinct reward streams:
+    #   - trading fees (token0/token1): accrued in position, not separately
+    #     claimable while staked; shown as "accrued (in position)".
+    #   - AERO emissions: claimable via gauge; shown as the only "claimable"
+    #     item, and the Collect Fees button triggers an AERO claim only.
     if is_staked:
         aero_earned = _get_earned_aero_rewards(nft_owner, token_id, wallet_address)
         if aero_earned > 0:
@@ -1073,12 +1075,17 @@ def _decode_positions_response(
                 aero_usd = _usd_value(aero_earned, "AERO", price_engine) or 0.0
             fees_earned["AERO"] = aero_earned
             fees_earned_usd = fees_earned_usd + (aero_earned * aero_usd)
-            # Set fees_note to explain the fee structure
-            if fee_status == "zero":
-                fees_note = "Staked · trading fees → veAERO voters"
-            # else: fees are shown from the fees_earned dict, no note needed
-        elif fee_status == "zero":
-            fees_note = "Staked (no pending emissions or fees)"
+        # Build the fee note. Trading-fee component is "accrued (in position)";
+        # AERO component is "claimable". Show both if both are present.
+        parts = []
+        if owed0_h > 0 or owed1_h > 0:
+            parts.append(f"{symbol0}/{symbol1} accrued (in position)")
+        if aero_earned > 0:
+            parts.append(f"AERO claimable")
+        if parts:
+            fees_note = " · ".join(["Staked"] + parts)
+        else:
+            fees_note = "Staked (no pending emissions or accrued fees)"
 
     position_value_usd = fees_earned_usd
     deposit_amounts: Dict[str, float] = {}
