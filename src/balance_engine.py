@@ -210,19 +210,28 @@ class BalanceEngine:
 
         return url
 
-    def _get_fallback(self, chain_id: str) -> Optional[str]:
-        """Get the fallback URL for a chain, with API key injected if configured.
+    def _get_fallback(self, chain_id: str, index: int = 0) -> Optional[str]:
+        """Get a fallback URL for a chain, with API key injected if configured.
+
+        v5.3.28: fallback may be a list of URLs. ``index`` selects which one.
 
         Args:
             chain_id: Chain identifier.
+            index: Which fallback URL to return (0 = first fallback).
 
         Returns:
             Fallback URL string with API key applied, or None if no fallback.
         """
         endpoint = self.rpc_config.get(chain_id, {})
-        url = endpoint.get("fallback")
-        if not url:
+        raw = endpoint.get("fallback")
+        if not raw:
             return None
+        if isinstance(raw, list):
+            if index >= len(raw):
+                return None
+            url = raw[index]
+        else:
+            url = raw
 
         auth_provider = endpoint.get("auth")
         if auth_provider and auth_provider in self.api_keys:

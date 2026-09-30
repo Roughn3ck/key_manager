@@ -215,13 +215,14 @@ def _selfheal_deprecated_endpoints(
     Returns:
         The (possibly repaired) config dict.
     """
-    changed: Dict[str, Dict[str, str]] = {}
+    changed: Dict[str, Dict[str, Any]] = {}
     for chain_id, entry in config.items():
         if not isinstance(entry, dict):
             continue
         for field in ("url", "fallback"):
             old = entry.get(field)
-            if old and old in DEPRECATED_ENDPOINTS:
+            # v5.3.28: fallback may now be a list of URLs. Only strings can be dict keys.
+            if old and isinstance(old, str) and old in DEPRECATED_ENDPOINTS:
                 new = DEPRECATED_ENDPOINTS[old]
                 entry[field] = new
                 changed.setdefault(chain_id, {})[field] = new

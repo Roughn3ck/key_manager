@@ -232,6 +232,17 @@ First-phase write support for staked Aerodrome SlipStream V3 positions. Position
   - `pyflakes` clean on touched files (remaining warnings predate this patch).
   - Full `test_*.py` suite — ALL PASS.
 
+#### 13. Hotfix: unhashable type: 'list' on lockscreen unlock (2026-09-30)
+- Symptom: after Patch 8, unlocking the lockscreen failed with `TypeError: cannot use 'list' as a dict key (unhashable type: 'list')`.
+- Root cause: Patch 8 changed the BSC `fallback` field from a string to a list of URLs in `rpc_endpoints.json`. `_selfheal_deprecated_endpoints()` in `src/rpc_config.py` did `if old and old in DEPRECATED_ENDPOINTS:` where `old` could be the list; lists are unhashable and cannot be dict keys.
+- Fix:
+  - `src/rpc_config.py`: `_selfheal_deprecated_endpoints()` now checks `isinstance(old, str)` before using the value as a dict key.
+  - `src/balance_engine.py`: `_get_fallback()` now accepts a list of fallback URLs and returns the selected index (default first fallback); string fallbacks still work.
+- Quality gates:
+  - `python -m py_compile` passes for `src/rpc_config.py`, `src/balance_engine.py`, and `src/gui_main_v5.py`.
+  - `pyflakes` clean on touched files (remaining warnings predate this hotfix).
+  - Full `test_*.py` suite — ALL PASS.
+
 ---
 
 ## v5.3.27 — Minor bug fixes & hardening (2026-09-29, released)
