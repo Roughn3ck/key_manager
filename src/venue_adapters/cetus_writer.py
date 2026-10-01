@@ -92,6 +92,9 @@ class CetusWriter(VenueWriter):
 
     VENUE_KEY = "cetus"
 
+    # v5.3.30: Cetus supports collect/compound/close via PTB.
+    supports_compound: bool = True
+
     def __init__(self, agent_url: str = AGENT_URL, rpc_url: str = DEFAULT_SUI_RPC):
         self.agent_url = agent_url.rstrip("/")
         self.rpc_url = rpc_url

@@ -21,6 +21,7 @@ import json
 import time
 import urllib.request
 import urllib.error
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from venue_adapters.venue_writer import (
@@ -126,6 +127,10 @@ def _log_action(action: str, tx_hash: str = "", extra: str = "") -> None:
     print(" ".join(parts))
 
 
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
 # ---------------------------------------------------------------------------
 # HyperliquidWriter
 # ---------------------------------------------------------------------------
@@ -138,6 +143,9 @@ class HyperliquidWriter(VenueWriter):
     """
 
     VENUE_KEY = "hyperliquid"
+
+    # v5.3.30: HyperEVM supports collect/compound/close.
+    supports_compound: bool = True
 
     def __init__(self, agent_url: str = "http://127.0.0.1:8842"):
         """Initialize the writer with the agent's HTTP endpoint.
@@ -420,6 +428,60 @@ class HyperliquidWriter(VenueWriter):
         if isinstance(result, dict):
             return result.get("address", "")
         raise RuntimeError(f"Could not get EVM address for account '{account}'")
+
+    def _get_position_owner(self, token_id: int) -> Optional[str]:
+        """Read ownerOf(tokenId) from the Project X position manager (read-only).
+
+        Args:
+            token_id: The NFT token ID of the position.
+
+        Returns:
+            The owner address (lowercase) or None if unreadable.
+        """
+        from venue_adapters.hyperliquid_adapter import owner_of
+        return owner_of(token_id)
+
+    def _resolve_owner_signer(self, token_id: int,
+                              position_manager: Optional[str] = None) -> str:
+        """Resolve the vault account that signs this HyperEVM action by matching
+        ownerOf(tokenId) to a derivable HyperEVM address — never a default/selected
+        account.
+
+        Args:
+            token_id: The NFT token ID of the position.
+            position_manager: Ignored for HyperEVM (single Project X manager);
+                              kept for API symmetry with Aerodrome/BSC writers.
+
+        Returns:
+            The vault account name whose derived EVM address owns the NFT.
+
+        Raises:
+            RuntimeError: If ownerOf cannot be read, or the owner matches no
+                          derivable HyperEVM account in this vault.
+        """
+        owner = self._get_position_owner(token_id)
+        if not owner:
+            raise RuntimeError(
+                f"Could not read ownerOf({token_id}) on {POSITION_MANAGER} — "
+                "cannot resolve the signer."
+            )
+        owner_l = owner.lower()
+        accounts = self._agent_call("list_accounts")
+        accounts = accounts.get("result", accounts) if isinstance(accounts, dict) else accounts
+        derivable = []
+        if isinstance(accounts, dict):
+            for name, data in accounts.items():
+                for addr in (data or {}).get("addresses", []):
+                    a = (addr.get("address") or "").lower()
+                    if a.startswith("0x"):
+                        derivable.append((name, a))
+                        if a == owner_l:
+                            return name
+        addrs = ", ".join(sorted({a for _, a in derivable})) or "(none)"
+        raise RuntimeError(
+            f"position owner {owner} matches no account in this vault for HyperEVM "
+            f"(derivable: {addrs})."
+        )
 
     def _get_token0_token1_for_pool(self, pool_address: str) -> Tuple[str, str]:
         """Read token0 and token1 from a pool contract.
@@ -1125,6 +1187,16 @@ class HyperliquidWriter(VenueWriter):
                 if increase_receipt:
                     if increase_receipt.get("status") == "0x1":
                         _log_action("compound_fees_increase_confirmed", tx_hash=increase_tx)
+                        # v5.3.29: capture the compound result for coldtrack recording.
+                        # The increase tx is the canonical compound signature.
+                        try:
+                            self._capture_compound_result(
+                                token_id, account_address, increase_tx,
+                                collect_tx, add0, add1,
+                            )
+                        except Exception as capture_err:
+                            _log_action("compound_fees_capture_warn",
+                                        extra=f"could not build compound result: {capture_err}")
                     else:
                         _log_action("compound_fees_increase_reverted", tx_hash=increase_tx)
 
@@ -1135,6 +1207,74 @@ class HyperliquidWriter(VenueWriter):
             traceback.print_exc()
 
         return tx_hashes
+
+    def _capture_compound_result(
+        self,
+        token_id: int,
+        account_address: str,
+        increase_tx: str,
+        collect_tx: Optional[str],
+        add0_raw: int,
+        add1_raw: int,
+    ) -> None:
+        """Build a CompoundResult from the successful increaseLiquidity step.
+
+        v5.3.29: HyperEVM fee compounding now records the reinvested fees in
+        coldtrack.db. The result is attached as self.last_compound_result so
+        the GUI's _lp_record_compound_for_writer() can persist it atomically.
+        """
+        from coldtrack.compound_recorder import CompoundResult, CompoundLeg
+
+        symbol0 = "WHYPE"
+        symbol1 = "UBTC"
+        amount0 = add0_raw / (10 ** WHYPE_DECIMALS)
+        amount1 = add1_raw / (10 ** UBTC_DECIMALS)
+
+        prices: Dict[str, float] = {}
+        pe = getattr(self, "price_engine", None)
+        if pe is not None:
+            try:
+                for sym in (symbol0, symbol1):
+                    amount = amount0 if sym == symbol0 else amount1
+                    pr = pe.convert_balance_to_fiat(amount, sym, currency="usd")
+                    if isinstance(pr, (int, float)) and pr > 0:
+                        prices[sym] = pr / amount if amount > 0 else 0.0
+            except Exception:
+                pass
+
+        legs: List[CompoundLeg] = []
+        if amount0 > 0:
+            legs.append(CompoundLeg(
+                asset=symbol0,
+                amount=amount0,
+                value_usd=round(amount0 * prices.get(symbol0, 0.0), 6) if prices.get(symbol0) else None,
+                sig=increase_tx,
+            ))
+        if amount1 > 0:
+            legs.append(CompoundLeg(
+                asset=symbol1,
+                amount=amount1,
+                value_usd=round(amount1 * prices.get(symbol1, 0.0), 6) if prices.get(symbol1) else None,
+                sig=increase_tx,
+            ))
+
+        # Snapshot token amounts: use the reinvested amounts as the compound
+        # increment. The position's total token amounts require liquidity math;
+        # the entry-basis update already grew by these same amounts.
+        final_amounts = {symbol0: amount0, symbol1: amount1}
+
+        self.last_compound_result = CompoundResult(
+            position_mint=str(token_id),
+            platform="HyperEVM",
+            chain="HyperEVM",
+            tx_hash=increase_tx,
+            collect_sig=collect_tx,
+            legs=legs,
+            block_time_iso=_now_iso(),
+            token_price_usd=prices,
+            final_amounts=final_amounts,
+            owner=account_address,
+        )
 
     def _parse_fees_from_receipt(self, receipt: dict, wallet_address: str) -> Tuple[int, int]:
         """Parse Transfer events from a collect tx receipt to get exact fee amounts.

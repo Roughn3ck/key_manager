@@ -17,9 +17,6 @@ The claim row is written to coldtrack.db via the close-recorder path as a
 FEE_EVENTS SOURCE='HARVEST' row (per the existing close-recorder contract).
 """
 import json
-import time
-import urllib.request
-import urllib.error
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,7 +40,6 @@ from venue_adapters.aerodrome_adapter import (
     _probe_gauge_selectors,
 )
 from venue_adapters.aerodrome_writer import AerodromeWriter
-from venue_adapters.venue_writer import CollectFeesParams
 
 
 AERO_DECIMALS = 18
@@ -210,6 +206,9 @@ class AerodromeGaugeWriter:
 
 
     def _broadcast(self, account: str, to: str, data: str, gas_check_address: str = "") -> str:
+        # v5.3.30: claim/unstake use the same verified-RPC gas-balance guard as
+        # the standard AerodromeWriter._broadcast.  The base writer's guard
+        # re-verifies the chain and aborts if the funded wallet reports zero.
         return self.base_writer._broadcast(account, to, data, gas_check_address=gas_check_address)
 
     def _wait_receipt(self, tx_hash: str) -> Optional[Dict[str, Any]]:
@@ -316,6 +315,35 @@ class AerodromeGaugeWriter:
                                    error="Unstake tx succeeded but NFT owner did not change")
         return GaugeStepResult(step="unstake", tx_hash=tx_hash, receipt=receipt)
 
+    def _match_position_for_claim(self, record: GaugeClaimRecord,
+                                   cur) -> Optional[Dict[str, Any]]:
+        """Return the single LP_POSITIONS row for this claim.
+
+        Primary match by TOKEN_ID = record.position_id_str. If that misses, the
+        CLI backfill can accept position_db_id directly. Ambiguous or missing
+        returns None and the caller writes to pending.
+        """
+        token_id = record.position_id_str
+        rows = cur.execute(
+            "SELECT * FROM LP_POSITIONS WHERE TOKEN_ID = ? ORDER BY ID", (token_id,)
+        ).fetchall()
+        rows = [dict(r) for r in rows]
+        if len(rows) > 1:
+            active = [r for r in rows if r.get("STATUS") == "active"]
+            if len(active) == 1:
+                rows = active
+            else:
+                return None
+        if rows:
+            return rows[0]
+        if record.position_db_id:
+            row = cur.execute(
+                "SELECT * FROM LP_POSITIONS WHERE ID = ?", (record.position_db_id,)
+            ).fetchone()
+            if row:
+                return dict(row)
+        return None
+
     def _record_claim(self, record: GaugeClaimRecord, db_path: Any,
                       base_dir: Optional[Path] = None) -> Dict[str, Any]:
         """Write a TRANSACTIONS + FEE_EVENTS row for an AERO emissions claim.
@@ -337,6 +365,19 @@ class AerodromeGaugeWriter:
                 ).fetchone()
                 if dup:
                     return {"ok": True, "note": "already recorded", "fee_events": 0, "transactions": 0}
+
+            # v5.3.30: resolve position + account_id for CLI backfill.
+            pos_row = self._match_position_for_claim(record, cur)
+            if pos_row is None:
+                raise RuntimeError(
+                    f"No LP_POSITIONS row found for TOKEN_ID={record.position_id_str}"
+                )
+            position_db_id = pos_row["ID"]
+            account_id = pos_row.get("ACCOUNT_ID") or record.account_id
+            if not account_id:
+                raise RuntimeError(
+                    "Cannot record claim: no ACCOUNT_ID on the matched LP_POSITIONS row"
+                )
 
             # Best-effort CAD conversion via FX_RATES (same contract as close recorder).
             value_cad = record.value_cad
@@ -361,7 +402,7 @@ class AerodromeGaugeWriter:
                    (POSITION_ID, DATE, TOKEN_A_AMT, TOKEN_B_AMT, VALUE_USD,
                     VALUE_CAD, VALUE_EUR, VALUE_AUD, TX_HASH, SOURCE, NOTES)
                    VALUES (?,?,?,?,?,?,NULL,NULL,?,?,?)""",
-                (record.position_db_id, record.date_iso, None, record.aero_amount,
+                (position_db_id, record.date_iso, None, record.aero_amount,
                  record.value_usd, value_cad, record.tx_hash, "HARVEST",
                  record.notes),
             )
@@ -375,7 +416,7 @@ class AerodromeGaugeWriter:
                     FEE_ASSET, FEE_AMOUNT, FEE_USD, NOTES, CATEGORY)
                    VALUES (?,?,?,?,?,?,NULL,NULL,NULL,NULL,NULL,NULL,?,?,?,?,?,?,?,?,?)""",
                 (
-                    record.account_id, record.date_iso, "yield", "AERO",
+                    account_id, record.date_iso, "yield", "AERO",
                     record.aero_amount, record.value_usd,
                     "Base", record.tx_hash,
                     None, None,  # COUNTERPARTY_*
@@ -390,10 +431,16 @@ class AerodromeGaugeWriter:
                    FEES_EARNED_USD = COALESCE(FEES_EARNED_USD, 0) + ?,
                    UPDATED_AT=datetime('now')
                  WHERE ID=?""",
-                (record.value_usd or 0, record.value_usd or 0, record.position_db_id),
+                (record.value_usd or 0, record.value_usd or 0, position_db_id),
             )
             db.commit()
-            return {"ok": True, "fee_events": 1, "transactions": 1}
+            return {
+                "ok": True,
+                "position_id": position_db_id,
+                "account_id": account_id,
+                "fee_events": 1,
+                "transactions": 1,
+            }
         except Exception as e:
             db.rollback()
             # Persist to pending so the record is not lost.
@@ -416,6 +463,15 @@ class AerodromeGaugeWriter:
         finally:
             db.close()
 
+    def record_claim_backfill(self, record: GaugeClaimRecord,
+                              db_path: Any, base_dir: Optional[Path] = None) -> Dict[str, Any]:
+        """CLI-facing one-shot AERO claim backfill.
+
+        Matches the claim to a live LP_POSITIONS row by TOKEN_ID, then records it
+        through the same _record_claim path used by on-chain claims.
+        """
+        return self._record_claim(record, db_path, base_dir=base_dir)
+
     def claim_and_record(self, token_id: int, account: str, position_db_id: int,
                          db_path: Any, position_manager: Optional[str] = None,
                          base_dir: Optional[Path] = None) -> GaugeStepResult:
@@ -430,7 +486,7 @@ class AerodromeGaugeWriter:
         # balance delta across the claim tx.
         wallet_address = self.base_writer._get_account_address(account)
         pre_bal = self._read_erc20_balance(AERO_TOKEN, wallet_address)
-        receipt = result.receipt or {}
+        _ = result.receipt or {}
         post_bal = self._read_erc20_balance(AERO_TOKEN, wallet_address)
         aero_amount = max(0, (post_bal - pre_bal)) / (10 ** AERO_DECIMALS)
 

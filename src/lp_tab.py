@@ -1,7 +1,6 @@
 """ColdStack LP Positions tab (extracted from gui_main_v5.py in v5.1.4)."""
 import sys
 import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -13,10 +12,9 @@ from saved_pools import (
     load_saved_pools, save_pool, remove_saved_pool, is_pool_saved,
     update_position_tracking, get_position_tracking,
     update_saved_pool_wallet, update_saved_pool_binding, _find_pool_entry,
+    reorder_saved_pools,
 )
-from venue_adapters.venue_writer import (
-    CollectFeesParams, CompoundFeesParams,
-)
+from lp_operations import LPOperationController
 from lp_liquidity_manager import open_add_liquidity, open_remove_liquidity, open_edit_position
 from lp_liquidity_manager import _add_status_tooltip as _lp_tooltip
 
@@ -29,6 +27,7 @@ class LPTab:
         self._lp_widgets = {}
         self._lp_auto_fetched = False
         self._lp_last_fetched_address = ""
+        self._lp_ops = LPOperationController(self)
 
     @staticmethod
     def _lp_card_key(venue: str, position_id: str) -> str:
@@ -1138,6 +1137,38 @@ class LPTab:
             return ("close confirmed on-chain · ledger write failed — saved to "
                     f"coldstack_pending_records/ (retry in ColdTrack). ({e})")
 
+    def _lp_record_compound_for_writer(self, writer, venue: str = "") -> str:
+        """Generic compound→ledger hook (v5.3.29): reads writer.last_compound_result
+        and records it (atomic, pending on failure) + auto-exports. Venue-agnostic —
+        the writer supplies the CompoundResult; this resolves the portfolio DB and calls
+        the compound recorder."""
+        result = getattr(writer, "last_compound_result", None)
+        if result is None:
+            return "compound confirmed on-chain"
+        db_path = self._lp_portfolio_db_path()
+        if db_path is None:
+            return f"compound confirmed on-chain · ledger write skipped (no portfolio db at {self._lp_app_base_dir() / 'coldtrack.db'})"
+        try:
+            from coldtrack.compound_recorder import record_compound_and_export
+            out = record_compound_and_export(result, db_path, base_dir=db_path.parent)
+            if out.get("error"):
+                return ("compound confirmed on-chain · ledger pending — position not mapped "
+                        "(recorded to coldstack_pending_records/, retry in ColdTrack)") \
+                    if ("not found" in out["error"] or "ambiguous" in out["error"]) \
+                    else f"compound confirmed on-chain · ledger pending — {out['error']}"
+            return (f"compound confirmed on-chain · ledger recorded "
+                    f"(fee_events={out.get('fee_events', 0)}, snapshots={out.get('snapshots', 0)})")
+        except RuntimeError as e:
+            msg = str(e)
+            if "no LP_POSITIONS row" in msg or "ambiguous" in msg:
+                return ("compound confirmed on-chain · ledger pending — position not mapped "
+                        "(recorded to coldstack_pending_records/, retry in ColdTrack)")
+            return ("compound confirmed on-chain · ledger write failed — saved to "
+                    "coldstack_pending_records/ (retry in ColdTrack)")
+        except Exception as e:
+            return ("compound confirmed on-chain · ledger write failed — saved to "
+                    f"coldstack_pending_records/ (retry in ColdTrack). ({e})")
+
     def _lp_saved_entry_is_closed(self, pos, venue: str) -> bool:
         """Return True if a fetched saved-pool position is closed.
 
@@ -1753,6 +1784,87 @@ class LPTab:
                             pass
                         return acct
         return "(unbound)"
+
+    # ------------------------------------------------------------------
+    # Saved-pool drag-and-drop reorder (v5.3.30)
+    # ------------------------------------------------------------------
+
+    def _lp_bind_card_drag_reorder(self, card: ctk.CTkFrame, entry: Dict[str, Any]) -> None:
+        """Attach drag-and-drop bindings to a saved-pool card for reordering.
+
+        Moves the card's saved pool in the vault list based on the visual drop
+        target, persists the vault, and re-renders the saved-pool section so the
+        order matches. No network calls are made during the drop.
+        """
+        drag_data: Dict[str, Any] = {"entry": entry, "dragging": False}
+
+        def _on_press(event):
+            drag_data["dragging"] = True
+            card.configure(fg_color=("#3a3a3a", "#2a2a2a"))
+            return "break"
+
+        def _on_motion(event):
+            if not drag_data["dragging"]:
+                return "break"
+            card._lp_drag_y = event.y_root
+            return "break"
+
+        def _find_drop_index(y_root: int) -> Optional[int]:
+            scroll = self._lp_widgets.get("scroll")
+            if not scroll:
+                return None
+            all_saved = load_saved_pools(self.gui.key_manager.address_db) if self.gui.key_manager else []
+            if len(all_saved) < 2:
+                return None
+            # Match each saved pool to its rendered card (placeholders or live cards).
+            for idx, saved in enumerate(all_saved):
+                tid = saved.get("token_id")
+                venue = saved.get("venue", "HyperEVM")
+                prefix = self._lp_venue_prefix(venue)
+                pos_key = self._lp_card_key(venue, f"{prefix}:{tid}")
+                target_card = self._lp_widgets.get("position_cards", {}).get(pos_key)
+                if target_card and target_card.winfo_exists():
+                    try:
+                        y0 = target_card.winfo_rooty()
+                        y1 = y0 + target_card.winfo_height()
+                        if y_root < (y0 + y1) / 2:
+                            return idx
+                    except Exception:
+                        continue
+            return len(all_saved) - 1
+
+        def _on_release(event):
+            if not drag_data["dragging"]:
+                return "break"
+            drag_data["dragging"] = False
+            card.configure(fg_color=("#2b2b2b", "#1e1e1e"))
+            if not self.gui.key_manager:
+                return "break"
+            all_saved = load_saved_pools(self.gui.key_manager.address_db)
+            try:
+                old_idx = all_saved.index(entry)
+            except ValueError:
+                return "break"
+            new_idx = _find_drop_index(event.y_root)
+            if new_idx is None or old_idx == new_idx:
+                return "break"
+            ok = reorder_saved_pools(self.gui.key_manager.address_db, old_idx, new_idx)
+            if ok and self.gui.current_password:
+                ok = self.gui.key_manager.save_encrypted_data(self.gui.current_password)
+            if ok:
+                self.gui.show_notification("Saved pool order updated")
+                # Re-render the saved-pool section so order matches the vault.
+                self._lp_clear_single()
+                self._lp_render_all_saved_placeholders()
+                if self.gui.online_mode:
+                    self._lp_auto_fetch_all_saved()
+            else:
+                self.gui.show_notification("Failed to reorder saved pool", error=True)
+            return "break"
+
+        card.bind("<ButtonPress-1>", _on_press)
+        card.bind("<B1-Motion>", _on_motion)
+        card.bind("<ButtonRelease-1>", _on_release)
 
     def _lp_evm_rpc_call(self, chain_key: str, method: str, params: list) -> Any:
         """Make a JSON-RPC call to the configured EVM endpoint for ``chain_key``."""
@@ -2420,7 +2532,8 @@ class LPTab:
                 _entry = _find_pool_entry(self.gui.key_manager.address_db, _raw, position.venue or "")
         _acct = self._lp_pool_account_label(_entry)
         _acct_suffix = f"  ·  {_acct}" if _acct else ""
-        _staked = bool(getattr(position, "raw_data", {}).get("is_staked"))
+        _raw_data = getattr(position, "raw_data", None) or {}
+        _staked = bool(_raw_data.get("is_staked"))
         header_text = f"{position.health_emoji} {position.pair}  ·  {position.venue}  ·  ID: {position.position_id}{_acct_suffix}"
         header_frame = ctk.CTkFrame(info, fg_color="transparent")
         header_frame.pack(fill="x", anchor="w")
@@ -2438,8 +2551,8 @@ class LPTab:
         if wallet_addr and len(wallet_addr) >= 16:
             ctk.CTkLabel(info, text=f"Wallet: {wallet_addr[:10]}...{wallet_addr[-6:]}",
                          font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(1, 0))
-        elif _staked and getattr(position, "raw_data", {}).get("owner_display"):
-            ctk.CTkLabel(info, text=position.raw_data["owner_display"],
+        elif _staked and _raw_data.get("owner_display"):
+            ctk.CTkLabel(info, text=_raw_data["owner_display"],
                          font=ctk.CTkFont(size=10), text_color=("#dc6602", "#fd9e4a")).pack(anchor="w", pady=(1, 0))
 
         # Line 2: Range · Current · % In/Out Range (with colored % In Range)
@@ -2470,7 +2583,8 @@ class LPTab:
         button_frame.pack(side="right", padx=(4, 0))
 
         status_label = self._lp_widgets.get("status_label")
-        _staked = bool(getattr(position, "raw_data", {}).get("is_staked"))
+        _raw_data = getattr(position, "raw_data", None) or {}
+        _staked = bool(_raw_data.get("is_staked"))
         _is_aerodrome_staked = _staked and position.position_id and position.position_id.startswith("base:")
         can_manage_lp = position.position_id and (
             position.position_id.startswith("hyperevm:") or
@@ -2512,30 +2626,10 @@ class LPTab:
                 _lp_tooltip(close_staked_btn, status_label, "Claim → Unstake → Close")
 
         elif can_manage_lp:
-            collect_btn = ctk.CTkButton(button_frame, text="💰 Collect", width=75, height=24,
-                              font=ctk.CTkFont(size=9, weight="bold"),
-                              fg_color=("#fd7e14", "#dc6602"),
-                              command=lambda pos=position: self._lp_collect_fees_dialog(pos))
-            collect_btn.pack(side="left", padx=(0, 2))
-            if status_label:
-                _lp_tooltip(collect_btn, status_label, "Collect Fees")
-
-            compound_btn = ctk.CTkButton(button_frame, text="🔄 Compound", width=85, height=24,
-                              font=ctk.CTkFont(size=9, weight="bold"),
-                              fg_color=("#20c997", "#1aa179"),
-                              command=lambda pos=position: self._lp_compound_fees_dialog(pos))
-            compound_btn.pack(side="left", padx=(0, 2))
-            if status_label:
-                _lp_tooltip(compound_btn, status_label, "Compound Fees")
-
-            close_btn = ctk.CTkButton(button_frame, text="✕ Close", width=65, height=24,
-                              font=ctk.CTkFont(size=9, weight="bold"),
-                              fg_color=("#6f42c1", "#5a32a3"),
-                              hover_color=("#5a32a3", "#42288a"),
-                              command=lambda pos=position: self._lp_close_position_dialog(pos))
-            close_btn.pack(side="left", padx=(0, 2))
-            if status_label:
-                _lp_tooltip(close_btn, status_label, "Close Position")
+            # Tests that bypass __init__ may not have _lp_ops yet; lazily initialize.
+            if not hasattr(self, "_lp_ops"):
+                self._lp_ops = LPOperationController(self)
+            self._lp_ops.render_standard_buttons(button_frame, position, tooltip_target=status_label)
 
         if position.position_id:
             copy_btn = ctk.CTkButton(button_frame, text="📋 Copy", width=65, height=22,
@@ -2554,7 +2648,8 @@ class LPTab:
                 except (ValueError, IndexError):
                     _token_id = 0
             _venue = position.venue or "HyperEVM"
-            if _token_id and is_pool_saved(self.gui.key_manager.address_db, _token_id, _venue):
+            _km = getattr(self.gui, "key_manager", None)
+            if _token_id and _km and _km.address_db is not None and is_pool_saved(_km.address_db, _token_id, _venue):
                 remove_btn = ctk.CTkButton(button_frame, text="✕ Remove", width=70, height=22,
                                   font=ctk.CTkFont(size=9),
                                   fg_color=("#dc3545", "#c82333"),
@@ -2901,6 +2996,9 @@ class LPTab:
             if pool_address:
                 ctk.CTkLabel(info, text=f"Pool: {pool_address[:20]}...",
                              font=ctk.CTkFont(size=10), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
+            # v5.3.30: bind drag-and-drop reordering to saved-pool placeholder cards.
+            self._lp_bind_card_drag_reorder(card, entry)
+
             ctk.CTkLabel(info, text="Range: Not fetched · Current: Not fetched",
                          font=ctk.CTkFont(size=11), text_color=("#666666", "gray50")).pack(anchor="w", pady=(2, 0))
             ctk.CTkLabel(info, text="Fees: Not fetched · Value: Not fetched · Holdings: Not fetched",
@@ -2946,7 +3044,7 @@ class LPTab:
         Opens a dialog showing all vault accounts with matching-chain
         addresses, letting the user pick the correct account for this pool.
         """
-        from tkinter import messagebox, simpledialog, Toplevel, StringVar
+        from tkinter import simpledialog, Toplevel
         import tkinter as tk
 
         if not self.gui.key_manager:
@@ -3593,6 +3691,10 @@ class LPTab:
             return self._lp_verify_bsc_position_ownership(
                 position, token_id, account_name, writer
             )
+        if venue_key == "hyperliquid":
+            return self._lp_verify_hyperliquid_position_ownership(
+                position, token_id, account_name, writer
+            )
 
         # Honest wording for venues without a pre-check.
         raise RuntimeError(
@@ -3692,6 +3794,31 @@ class LPTab:
         return self._lp_resolve_evm_owner_to_account(
             position, token_id, owner, owner_pm, account_name, writer,
             chain_label="bsc", venue_default="BSC",
+        )
+
+    def _lp_verify_hyperliquid_position_ownership(
+        self, position, token_id: int, account_name: str, writer
+    ) -> str:
+        """HyperEVM ownership resolver: use the adapter's owner_of() read.
+
+        v5.3.29: HyperEVM finally gets the same owner-anchored pre-check as
+        Aerodrome and BSC. lp_tab does not hand-encode calldata; it calls the
+        adapter-exposed owner_of(token_id) helper, which reads ownerOf on the
+        Project X Position Manager.
+        """
+        from venue_adapters.hyperliquid_adapter import owner_of, POSITION_MANAGER
+
+        owner_pm = POSITION_MANAGER  # Project X manager (0xead...9091)
+        owner = owner_of(token_id)
+        if not owner:
+            raise RuntimeError(
+                f"stale record — refetch this position: ownerOf({token_id}) reverted on "
+                f"{owner_pm}. The position id in this record is not a live NFT."
+            )
+
+        return self._lp_resolve_evm_owner_to_account(
+            position, token_id, owner, owner_pm, account_name, writer,
+            chain_label="hyperliquid_evm", venue_default="HyperEVM",
         )
 
     def _lp_resolve_evm_owner_to_account(
@@ -4063,338 +4190,12 @@ class LPTab:
         return False
 
     def _lp_compound_fees_dialog(self, position):
-        """Show confirmation dialog and compound fees for an LP position."""
-        from tkinter import messagebox
-
-        if self._lp_guard_staked_action(position, "Compound"):
-            return
-
-        # Solana (Orca) compound is not yet supported — check BEFORE calling the
-        # EVM-only _lp_resolve_wallet_for_position so the user gets the right error
-        if position.position_id.startswith("solana:"):
-            # Resolve account via NFT ownership so the error message is accurate
-            account_name_check = self._lp_resolve_solana_account_for_position(position)
-            if not account_name_check:
-                self.gui.show_notification(
-                    "Could not resolve the vault account that owns this Solana position NFT. "
-                    "Ensure the wallet that owns this position is in your vault.", error=True)
-                return
-            self.gui.show_notification(
-                "Compound fees is not yet implemented on Solana (Orca). "
-                "Use Collect Fees, or the Edit (✎) button to rebalance."
-            )
-            return
-
-        wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
-        if not wallet_address:
-            self.gui.show_notification("Could not resolve wallet address for this position", error=True)
-            return
-        if not account_name:
-            self.gui.show_notification("Could not resolve vault account for this address", error=True)
-            return
-
-        try:
-            chain_name, gas_token, venue_key = self._lp_resolve_venue_for_position(position)
-        except RuntimeError as e:
-            self.gui.show_notification(str(e), error=True)
-            return
-
-        # BSC compound is not yet supported (requires swap implementation)
-        if venue_key == "bsc":
-            self.gui.show_notification(
-                "Compound fees is not yet implemented on BSC. Use Collect Fees instead."
-            )
-            return
-
-        # v5.3.17: fatal pre-flight ownership check for EVM positions.
-        # v5.3.28-patch4: catch ALL exceptions here — any uncaught error in a
-        # compound-dialog path must surface in the dialog, never be swallowed.
-        if venue_key in ("aerodrome", "hyperliquid", "bsc"):
-            try:
-                account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
-            except RuntimeError as e:
-                self.gui.show_notification(str(e), error=True)
-                return
-            except Exception as e:
-                error_msg = str(e)
-                print(f"[compound_fees] ownership check crashed: {error_msg}")
-                self.gui.show_notification(
-                    f"Ownership check failed for {position.position_id}: {error_msg}. "
-                    "Refetch this position and try again.",
-                    error=True,
-                )
-                return
-
-        confirm = messagebox.askyesno(
-            "Confirm: Compound Fees",
-            "You are about to compound fees for position:\n"
-            f"  {position.pair} ({position.position_id})\n\n"
-            f"This will submit multiple transactions on {chain_name}:\n"
-            "  1. Collect accrued fees\n"
-            "  2. Swap to optimal ratio (if needed)\n"
-            "  3. Increase liquidity with collected amounts\n\n"
-            f"Ensure your wallet has {gas_token} for gas.\n"
-            "The key_manager_agent must be running and unlocked.\n\n"
-            "Continue?",
-        )
-        if not confirm:
-            return
-        self.gui.show_notification("Compounding fees... (multi-TX operation)")
-
-        def _do_compound():
-            try:
-                writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
-                if writer is None:
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        "Writer not available", error=True))
-                    return
-                if not writer.is_available():
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        "Agent not running. Start key_manager_agent with --serve.", error=True))
-                    return
-                tx_hashes = writer.compound_fees(CompoundFeesParams(
-                    account=account_name,
-                    position_id=position.position_id,
-                ))
-                if tx_hashes:
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        f"Compound fees done. {len(tx_hashes)} TXs submitted. First: {tx_hashes[0][:20]}..."))
-                    # Record collected fees in saved-pools tracking
-                    self._lp_record_fee_collection(position.position_id, wallet_address, tx_hashes)
-                    # Wait for the last tx to be mined, then refresh fees
-                    self.gui.root.after(8000, lambda: self._lp_refresh_position_fees(
-                        position.position_id, wallet_address))
-                else:
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        "Compound fees: no transactions submitted", error=True))
-            except Exception as e:
-                error_msg = str(e)
-                print(f"[compound_fees] error: {error_msg}")
-                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
-                    error_msg = (
-                        f"Wallet has no {gas_token} for gas. Send {gas_token} to your wallet address "
-                        f"to pay for transactions. (Details: {error_msg})"
-                    )
-                elif "nonce too high" in error_msg.lower():
-                    error_msg = (
-                        "Transaction rejected (nonce conflict). Wait a moment and try again. "
-                        f"(Details: {error_msg})"
-                    )
-                elif "OverflowError" in error_msg or "result too large" in error_msg.lower():
-                    error_msg = (
-                        "Internal error during transaction signing. The transaction may have "
-                        "succeeded on-chain — check Project X to verify. Try again if needed."
-                    )
-                self.gui.root.after(0, lambda: self.gui.show_notification(
-                    f"Compound error: {error_msg}", error=True))
-                # Even on error, the tx may have gone through — refresh fees after a delay
-                self.gui.root.after(5000, lambda: self._lp_refresh_position_fees(
-                    position.position_id, wallet_address))
-
-        threading.Thread(target=_do_compound, daemon=True).start()
+        """v5.3.30: delegate compound orchestration to the shared controller."""
+        self._lp_ops.run_compound(position)
 
     def _lp_collect_fees_dialog(self, position):
-        """Show confirmation dialog and collect fees for an LP position."""
-        from tkinter import messagebox
-
-        if self._lp_guard_staked_action(position, "Collect fees"):
-            return
-
-        # Solana positions resolve via NFT ownership, not just "first account with a Solana key"
-        if position.position_id.startswith("solana:"):
-            account_name = self._lp_resolve_solana_account_for_position(position)
-            if not account_name:
-                self.gui.show_notification(
-                    "Could not resolve the vault account that owns this Solana position NFT. "
-                    "Ensure the wallet that owns this position is in your vault.", error=True)
-                return
-            chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
-
-            # v5.2.5: Pre-flight check — verify the vault account's derived
-            # Solana address actually holds the position NFT before showing
-            # the confirmation dialog. Without this check, the user confirms
-            # the operation, the agent derives a different address from the private
-            # key, and the operation fails with a confusing "wallet X does not
-            # hold the position NFT" error.
-            mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
-            try:
-                from venue_adapters.orca_adapter import _solana_rpc_call, _is_solana_address
-                # Get the derived Solana address from the agent
-                writer_check = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
-                if writer_check and writer_check.is_available():
-                    derived_addr = writer_check._get_solana_address(account_name)
-                    if derived_addr and _is_solana_address(derived_addr):
-                        # Check if this derived address holds the NFT
-                        nft_check = _solana_rpc_call(
-                            "getTokenAccountsByOwner",
-                            [derived_addr, {"mint": mint}, {"encoding": "jsonParsed"}],
-                        )
-                        has_nft = False
-                        if nft_check and isinstance(nft_check, dict):
-                            for entry_data in nft_check.get("value", []):
-                                try:
-                                    amt = entry_data["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"]
-                                    if amt == "1":
-                                        has_nft = True
-                                        break
-                                except (KeyError, TypeError, AttributeError):
-                                    continue
-                        if not has_nft:
-                            self.gui.show_notification(
-                                f"Address mismatch: vault account '{account_name}' derives to "
-                                f"{derived_addr[:6]}...{derived_addr[-4:]}, but the position NFT "
-                                f"is held by a different wallet.\n\n"
-                                f"The private key for Solana in this vault account may not match "
-                                f"the wallet that created this position.\n\n"
-                                f"To fix: re-import the correct Solana private key for "
-                                f"the wallet that owns this position.",
-                                error=True)
-                            return
-            except Exception as e:
-                # Don't block on pre-flight check failures — let the write attempt proceed
-                print(f"[collect_fees] pre-flight NFT check failed (non-fatal): {e}")
-
-            confirm = messagebox.askyesno(
-                "Confirm: Collect Fees",
-                "You are about to collect fees for position:\n"
-                f"  {position.pair} ({position.position_id})\n\n"
-                f"This will spend gas on {chain_name}.\n"
-                f"Ensure your wallet has {gas_token} for gas.\n"
-                "The key_manager_agent must be running and unlocked.\n\n"
-                "Continue?",
-            )
-            if not confirm:
-                return
-            self.gui.show_notification("Collecting fees on Solana...")
-
-            def _do_collect_sol():
-                try:
-                    writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
-                    if writer is None or not writer.is_available():
-                        self.gui.root.after(0, lambda: self.gui.show_notification(
-                            "Agent not running. Start key_manager_agent with --serve.", error=True))
-                        return
-                    tx_hash = writer.collect_fees(CollectFeesParams(
-                        account=account_name,
-                        position_id=position.position_id,
-                    ))
-                    if tx_hash:
-                        self.gui.root.after(0, lambda: self.gui.show_notification(
-                            f"Fees collected. TX: {tx_hash[:24]}..."))
-                        self.gui.root.after(5000, lambda: self._lp_do_fetch())
-                    else:
-                        self.gui.root.after(0, lambda: self.gui.show_notification(
-                            "Collect failed: no tx signature returned", error=True))
-                except Exception as e:
-                    error_msg = str(e)
-                    if "insufficient funds" in error_msg.lower() or "Insufficient" in error_msg:
-                        error_msg = (f"Wallet has no {gas_token} for gas on {chain_name}. "
-                                     f"Send {gas_token} to your Solana address. (Details: {error_msg})")
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        f"Collect error: {error_msg}", error=True))
-                    self.gui.root.after(5000, lambda: self._lp_do_fetch())
-
-            threading.Thread(target=_do_collect_sol, daemon=True).start()
-            return
-
-        wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
-        if not wallet_address:
-            self.gui.show_notification("Could not resolve wallet address for this position", error=True)
-            return
-        if not account_name:
-            self.gui.show_notification("Could not resolve vault account for this address", error=True)
-            return
-
-        try:
-            chain_name, gas_token, venue_key = self._lp_resolve_venue_for_position(position)
-        except RuntimeError as e:
-            self.gui.show_notification(str(e), error=True)
-            return
-
-        # v5.3.17: fatal pre-flight ownership check for EVM positions.
-        # v5.3.28-patch4: catch ALL exceptions here — any uncaught error in a
-        # collect-dialog path must surface in the dialog, never be swallowed.
-        if venue_key in ("aerodrome", "hyperliquid", "bsc"):
-            try:
-                account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
-            except RuntimeError as e:
-                self.gui.show_notification(str(e), error=True)
-                return
-            except Exception as e:
-                error_msg = str(e)
-                print(f"[collect_fees] ownership check crashed: {error_msg}")
-                self.gui.show_notification(
-                    f"Ownership check failed for {position.position_id}: {error_msg}. "
-                    "Refetch this position and try again.",
-                    error=True,
-                )
-                return
-
-        confirm = messagebox.askyesno(
-            "Confirm: Collect Fees",
-            "You are about to collect fees for position:\n"
-            f"  {position.pair} ({position.position_id})\n\n"
-            f"This will spend gas on {chain_name}.\n"
-            f"Ensure your wallet has {gas_token} for gas.\n"
-            "The key_manager_agent must be running and unlocked.\n\n"
-            "Continue?",
-        )
-        if not confirm:
-            return
-        self.gui.show_notification("Collecting fees...")
-
-        def _do_collect():
-            try:
-                writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
-                if writer is None:
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        "Writer not available", error=True))
-                    return
-                if not writer.is_available():
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        "Agent not running. Start key_manager_agent with --serve.", error=True))
-                    return
-                tx_hash = writer.collect_fees(CollectFeesParams(
-                    account=account_name,
-                    position_id=position.position_id,
-                    recipient=wallet_address,
-                ))
-                if tx_hash:
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        f"Fees collected. TX: {tx_hash[:20]}..."))
-                    # Record collected fees in saved-pools tracking
-                    self._lp_record_fee_collection(position.position_id, wallet_address, [tx_hash])
-                    # Wait a moment for the tx to be mined, then refresh fees
-                    self.gui.root.after(5000, lambda: self._lp_refresh_position_fees(
-                        position.position_id, wallet_address))
-                else:
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        "Collect failed: no tx hash returned", error=True))
-            except Exception as e:
-                error_msg = str(e)
-                print(f"[collect_fees] error: {error_msg}")
-                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
-                    error_msg = (
-                        f"Wallet has no {gas_token} for gas. Send {gas_token} to your wallet address "
-                        f"to pay for transactions. (Details: {error_msg})"
-                    )
-                elif "nonce too high" in error_msg.lower():
-                    error_msg = (
-                        "Transaction rejected (nonce conflict). Wait a moment and try again. "
-                        f"(Details: {error_msg})"
-                    )
-                elif "OverflowError" in error_msg or "result too large" in error_msg.lower():
-                    error_msg = (
-                        "Internal error during transaction signing. The transaction may have "
-                        "succeeded on-chain — check Project X to verify. Try again if needed."
-                    )
-                self.gui.root.after(0, lambda: self.gui.show_notification(
-                    f"Collect error: {error_msg}", error=True))
-                # Even on error, the tx may have gone through — refresh fees after a delay
-                self.gui.root.after(5000, lambda: self._lp_refresh_position_fees(
-                    position.position_id, wallet_address))
-
-        threading.Thread(target=_do_collect, daemon=True).start()
+        """v5.3.30: delegate collect orchestration to the shared controller."""
+        self._lp_ops.run_collect(position)
 
     def _lp_record_fee_collection(self, position_id: str, wallet_address: str, tx_hashes: List[str]):
         """Record collected fees from a collect/compound tx into saved-pools tracking.
@@ -4695,334 +4496,9 @@ class LPTab:
         threading.Thread(target=_do_unstake, daemon=True).start()
 
     def _lp_close_position_dialog(self, position):
-        """Show confirmation dialog and close an LP position completely.
+        """v5.3.30: delegate close orchestration to the shared controller."""
+        self._lp_ops.run_close(position)
 
-        Calls decreaseLiquidity(100%) + collect() to withdraw all liquidity
-        and fees, effectively closing the position.
-        """
-        from tkinter import messagebox
-
-        if self._lp_guard_staked_action(position, "Close position"):
-            return
-
-        # Solana positions resolve via NFT ownership, not just "first account with a Solana key"
-        if position.position_id.startswith("solana:"):
-            account_name = self._lp_resolve_solana_account_for_position(position)
-            if not account_name:
-                self.gui.show_notification(
-                    "Could not resolve the vault account that owns this Solana position NFT. "
-                    "Ensure the wallet that owns this position is in your vault.", error=True)
-                return
-            chain_name, gas_token, venue_key = self._lp_get_chain_info(position.position_id)
-
-            # v5.2.5: Pre-flight check — verify the vault account's derived
-            # Solana address actually holds the position NFT before showing
-            # the confirmation dialog. Without this check, the user confirms
-            # the close, the agent derives a different address from the private
-            # key, and the operation fails with a confusing "wallet X does not
-            # hold the position NFT" error.
-            mint = position.position_id.split(":", 1)[1] if ":" in position.position_id else position.position_id
-            try:
-                from venue_adapters.orca_adapter import _solana_rpc_call, _is_solana_address
-                # Get the derived Solana address from the agent
-                writer_check = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
-                if writer_check and writer_check.is_available():
-                    derived_addr = writer_check._get_solana_address(account_name)
-                    if derived_addr and _is_solana_address(derived_addr):
-                        # Check if this derived address holds the NFT
-                        nft_check = _solana_rpc_call(
-                            "getTokenAccountsByOwner",
-                            [derived_addr, {"mint": mint}, {"encoding": "jsonParsed"}],
-                        )
-                        has_nft = False
-                        if nft_check and isinstance(nft_check, dict):
-                            for entry_data in nft_check.get("value", []):
-                                try:
-                                    amt = entry_data["account"]["data"]["parsed"]["info"]["tokenAmount"]["amount"]
-                                    if amt == "1":
-                                        has_nft = True
-                                        break
-                                except (KeyError, TypeError, AttributeError):
-                                    continue
-                        if not has_nft:
-                            self.gui.show_notification(
-                                f"Address mismatch: vault account '{account_name}' derives to "
-                                f"{derived_addr[:6]}...{derived_addr[-4:]}, but the position NFT "
-                                f"is held by a different wallet.\n\n"
-                                f"The private key for Solana in this vault account may not match "
-                                f"the wallet that created this position.\n\n"
-                                f"To fix: re-import the correct Solana private key for "
-                                f"the wallet that owns this position.",
-                                error=True)
-                            return
-            except Exception as e:
-                # Don't block on pre-flight check failures — let the write attempt proceed
-                print(f"[close_position] pre-flight NFT check failed (non-fatal): {e}")
-
-            confirm = messagebox.askyesno(
-                "Confirm: Close Position",
-                "You are about to CLOSE this position completely:\n"
-                f"  {position.pair} ({position.position_id})\n\n"
-                "This will:\n"
-                "  1. Withdraw ALL liquidity from the position\n"
-                "  2. Collect any remaining fees\n"
-                "  3. Burn the position NFT, recovering rent\n\n"
-                f"This will spend gas on {chain_name}.\n"
-                f"Ensure your wallet has {gas_token} for gas.\n"
-                "The key_manager_agent must be running and unlocked.\n\n"
-                "Continue?",
-            )
-            if not confirm:
-                return
-            self.gui.show_notification("Closing position on Solana... (multi-TX operation)")
-
-            def _do_close_sol():
-                try:
-                    writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
-                    if writer is None or not writer.is_available():
-                        self.gui.root.after(0, lambda: self.gui.show_notification(
-                            "Agent not running. Start key_manager_agent with --serve.", error=True))
-                        return
-                    # v5.3.16: give the writer the price engine so the close
-                    # capture can price legs for the ledger record.
-                    try:
-                        writer.price_engine = self.gui.price_engine
-                    except Exception:
-                        pass
-                    tx_hashes = writer.close_position(position.position_id, account_name)
-                    if tx_hashes:
-                        # v5.3.4: post-close verification — closePosition burns
-                        # the NFT and closes the position PDA. Poll until the
-                        # position account is gone (or ~10s deadline) before
-                        # claiming success / removing the card.
-                        from venue_adapters.orca_adapter import (
-                            _get_account_data,
-                            _derive_position_address,
-                        )
-                        mint = (position.position_id.split(":", 1)[1]
-                                if ":" in position.position_id else position.position_id)
-                        self.gui.root.after(0, lambda: self.gui.show_notification(
-                            f"Close TXs submitted ({len(tx_hashes)}). Waiting for on-chain confirmation..."))
-                        confirmed = False
-                        verifiable = False
-                        deadline = time.time() + 10
-                        pos_addr = _derive_position_address(mint)
-                        if pos_addr:
-                            verifiable = True
-                            while time.time() < deadline:
-                                if _get_account_data(pos_addr) is None:
-                                    confirmed = True
-                                    break
-                                time.sleep(2)
-                        if confirmed:
-                            # v5.3.16: write the close to coldtrack.db + auto-export.
-                            # v5.3.22: surface the verified tx signatures in the success note.
-                            note = self._lp_record_orca_close(writer, position, account_name)
-                            sigs_note = " · ".join(
-                                f"{s[:12]}..." for s in tx_hashes if s
-                            )
-                            notify = f"Position closed ✓ {note}"
-                            if sigs_note:
-                                notify += f"  ·  TXs: {sigs_note}"
-                            self.gui.root.after(0, lambda n=notify: self._lp_forget_position(
-                                position, notify=n))
-                        elif verifiable:
-                            self.gui.root.after(0, lambda: self.gui.show_notification(
-                                f"Close TXs submitted but position still on-chain — verify. "
-                                f"({len(tx_hashes)} TXs)", error=True))
-                        else:
-                            # Could not derive the position PDA — cannot verify.
-                            # Keep the card and ask the user to verify manually.
-                            self.gui.root.after(0, lambda: self.gui.show_notification(
-                                f"Close TXs submitted ({len(tx_hashes)}) but closure could "
-                                f"not be verified on-chain — check the position on Orca.", error=True))
-                    else:
-                        self.gui.root.after(0, lambda: self.gui.show_notification(
-                            "Close position: no transactions submitted", error=True))
-                except Exception as e:
-                    error_msg = str(e)
-                    if "insufficient funds" in error_msg.lower() or "Insufficient" in error_msg:
-                        error_msg = (f"Wallet has no {gas_token} for gas on {chain_name}. "
-                                     f"Send {gas_token} to your Solana address. (Details: {error_msg})")
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        f"Close error: {error_msg}", error=True))
-
-            threading.Thread(target=_do_close_sol, daemon=True).start()
-            return
-
-        wallet_address, account_name = self._lp_resolve_wallet_for_position(position)
-        if not wallet_address:
-            self.gui.show_notification("Could not resolve wallet address for this position", error=True)
-            return
-        if not account_name:
-            self.gui.show_notification("Could not resolve vault account for this address", error=True)
-            return
-
-        try:
-            chain_name, gas_token, venue_key = self._lp_resolve_venue_for_position(position)
-        except RuntimeError as e:
-            self.gui.show_notification(str(e), error=True)
-            return
-
-        # v5.3.17: fatal pre-flight ownership check for EVM positions.
-        # v5.3.28-patch4: catch ALL exceptions here — any uncaught error in a
-        # close-dialog path must surface in the dialog, never be swallowed.
-        if venue_key in ("aerodrome", "hyperliquid", "bsc"):
-            try:
-                account_name = self._lp_verify_evm_position_ownership(position, account_name, venue_key)
-            except RuntimeError as e:
-                self.gui.show_notification(str(e), error=True)
-                return
-            except Exception as e:
-                error_msg = str(e)
-                print(f"[close_position] ownership check crashed: {error_msg}")
-                self.gui.show_notification(
-                    f"Ownership check failed for {position.position_id}: {error_msg}. "
-                    "Refetch this position and try again.",
-                    error=True,
-                )
-                return
-
-        confirm = messagebox.askyesno(
-            "Confirm: Close Position",
-            "You are about to CLOSE this position completely:\n"
-            f"  {position.pair} ({position.position_id})\n\n"
-            "This will:\n"
-            "  1. Withdraw ALL liquidity from the position\n"
-            "  2. Collect any remaining fees\n\n"
-            "Your position NFT will remain but with zero liquidity.\n"
-            f"This will spend gas on {chain_name}.\n"
-            f"Ensure your wallet has {gas_token} for gas.\n"
-            "The key_manager_agent must be running and unlocked.\n\n"
-            "Continue?",
-        )
-        if not confirm:
-            return
-        self.gui.show_notification("Closing position... (multi-TX operation)")
-
-        def _do_close():
-            try:
-                writer = self.gui.lp_engine.get_writer(venue_key, self.gui.current_password)
-                if writer is None:
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        "Writer not available", error=True))
-                    return
-                if not writer.is_available():
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        "Agent not running. Start key_manager_agent with --serve.", error=True))
-                    return
-
-                # v5.3.17: final writer/chain guard. The resolved writer's chain
-                # must match the position record. This catches any residual
-                # dispatch bug before a transaction is signed.
-                writer_chain = getattr(writer, "chain_id", None)
-                expected_chain_id = {
-                    "aerodrome": 8453,
-                    "hyperliquid": 999,
-                    "bsc": 56,
-                }.get(venue_key)
-                if expected_chain_id is not None and writer_chain is not None:
-                    if writer_chain != expected_chain_id:
-                        self.gui.root.after(0, lambda: self.gui.show_notification(
-                            f"Chain mismatch: resolved {venue_key} writer serves chain "
-                            f"{writer_chain}, expected {expected_chain_id}. Refetch this position.",
-                            error=True))
-                        return
-
-                # Pass the live price engine so the close recorder can price legs.
-                try:
-                    writer.price_engine = self.gui.price_engine
-                except Exception:
-                    pass
-
-                tx_hashes = writer.close_position(position.position_id, account_name)
-                if tx_hashes:
-                    # v5.3.4: fire-and-forget is gone. Wait for each receipt
-                    # and verify business-level closure before touching the UI.
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        f"Closing position… waiting for on-chain confirmation ({len(tx_hashes)} TX)"))
-                    receipt_errs = []
-                    for tx_hash in tx_hashes:
-                        try:
-                            receipt = writer._wait_for_tx_receipt(
-                                tx_hash, timeout=120, poll_interval=2.0)
-                            if receipt is None:
-                                receipt_errs.append(tx_hash)
-                        except RuntimeError as e:
-                            # Reverted on-chain — _wait_for_tx_receipt raises.
-                            receipt_errs.append(f"{tx_hash} reverted: {e}")
-                            break
-                    if receipt_errs:
-                        for err in receipt_errs:
-                            print(f"[close_position] receipt problem: {err}")
-                        unconfirmed = [e for e in receipt_errs if "reverted" not in e]
-                        reverted = [e for e in receipt_errs if "reverted" in e]
-                        if reverted:
-                            self.gui.root.after(0, lambda r=reverted[0]: self.gui.show_notification(
-                                f"Close TX reverted on-chain — position NOT closed. "
-                                f"TX: {r.split()[0]}…", error=True))
-                        else:
-                            self.gui.root.after(0, lambda: self.gui.show_notification(
-                                f"Close TX unconfirmed after 120s — check the explorer. "
-                                f"TX: {unconfirmed[0][:20]}…", error=True))
-                        # Keep the card — never claim success without receipts.
-                        return
-                    # Full close: decrease + collect confirmed. Verify the
-                    # position is empty (and, for Aerodrome, optionally burned)
-                    # before removing the card.
-                    token_id = None
-                    try:
-                        token_id = int(position.position_id.split(":", 1)[1])
-                    except (ValueError, IndexError, AttributeError):
-                        token_id = None
-                    liquidity = 0
-                    if token_id is not None:
-                        try:
-                            liquidity = writer._get_position_liquidity(token_id)
-                        except Exception as e:
-                            print(f"[close_position] post-close liquidity read failed: {e}")
-                            liquidity = 0
-                    if liquidity > 0:
-                        self.gui.root.after(0, lambda: self.gui.show_notification(
-                            "Liquidity still on-chain — retry Close or Collect Fees", error=True))
-                        return
-                    # v5.3.16: ledger auto-record — Aerodrome wired; others stub.
-                    # v5.3.21: Cetus (Sui) close recorder integration via last_close_result.
-                    vkey = (venue_key or "").lower()
-                    is_aero = vkey in ("aerodrome", "aerodrome/base") or "aerodrome" in vkey
-                    is_cetus = vkey == "cetus"
-                    if is_aero or is_cetus:
-                        note = self._lp_record_close_for_writer(writer, venue=venue_key)
-                        burn_note = ""
-                        # v5.3.18: if the writer burned the NFT, include it in the success note.
-                        if getattr(writer, "last_burn_sig", None):
-                            burn_note = f" · NFT burned ({writer.last_burn_sig[:12]}...)"
-                    else:
-                        print(f"[close_position] ledger recording not implemented for venue "
-                              f"'{venue_key}' yet — close confirmed on-chain; record via Kimi's tool.")
-                        note = ("close confirmed on-chain — ledger recording pending "
-                                "(this venue's recorder is a follow-up)")
-                        burn_note = ""
-                    self.gui.root.after(0, lambda n=note, b=burn_note: self._lp_forget_position(
-                        position, notify=f"Position closed ✓ {n}{b}"))
-                    return
-                else:
-                    # No transactions submitted.
-                    self.gui.root.after(0, lambda: self.gui.show_notification(
-                        "Close position: no transactions submitted", error=True))
-                    return
-            except Exception as e:
-                error_msg = str(e)
-                print(f"[close_position] error: {error_msg}")
-                if "insufficient funds" in error_msg.lower() or "Insufficient gas" in error_msg:
-                    error_msg = (
-                        f"Wallet has no {gas_token} for gas. Send {gas_token} to your wallet address "
-                        f"to pay for transactions. (Details: {error_msg})"
-                    )
-                self.gui.root.after(0, lambda: self.gui.show_notification(
-                    f"Close error: {error_msg}", error=True))
-
-        threading.Thread(target=_do_close, daemon=True).start()
 
     def _lp_rerender_cards(self):
         """Re-render existing LP position cards to reflect mode changes.

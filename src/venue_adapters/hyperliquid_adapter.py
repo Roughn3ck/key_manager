@@ -251,6 +251,28 @@ def _tick_spacing(fee: int) -> int:
     return mapping.get(fee, 60)
 
 
+def owner_of(token_id: int) -> Optional[str]:
+    """Return the EVM owner address of a Project X / HyperEVM NFT position.
+
+    Reads ownerOf(tokenId) from the Project X Position Manager. Returns the
+    checksummed/lowercase owner address or None if the call reverts / returns
+    no data. This is the single adapter-side read that lp_tab should use for
+    HyperEVM ownership pre-checks — no hand-encoded calldata in lp_tab.
+    """
+    if token_id is None:
+        return None
+    data = SELECTOR_OWNER_OF + _pad_int_to_64(token_id)
+    result = _evm_rpc_call(
+        "eth_call",
+        [{"to": POSITION_MANAGER, "data": data}, "latest"],
+    )
+    if result and isinstance(result, str) and len(result) >= 66:
+        addr = _decode_address(result[2:66])
+        if int(addr, 16) != 0:
+            return addr.lower()
+    return None
+
+
 def _get_token_decimals(token_address: str) -> int:
     """Return known decimals; fall back to on-chain decimals() call."""
     lower = token_address.lower()

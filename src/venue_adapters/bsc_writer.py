@@ -43,7 +43,12 @@ class BSCWriter(VenueWriter):
 
     VENUE_KEY = "bsc"
 
+    # v5.3.30: BSC supports collect/close. Compound is disabled until a BSC swap
+    # implementation exists (compound_fees currently raises NotImplementedError).
+    supports_compound: bool = False
+
     def __init__(self, agent_url: str = "http://127.0.0.1:8842"):
+
         self.agent_url = agent_url.rstrip("/")
         self.chain_id = BSC_CHAIN_ID  # 56
         # v5.3.28: rpc_url is resolved dynamically from the rotated config list

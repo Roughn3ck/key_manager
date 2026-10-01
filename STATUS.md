@@ -1,12 +1,146 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.29 (Staked Aerodrome accounting: fee decomposition, AERO claim dedupe, no close capital events) — in progress 2026-09-30
+**Current Version:** v5.3.30 (Operation primitives refactor: one collect/compound/close per venue + capability-driven GUI + unified accounting)
 **Last Updated:** 2026-09-30
 
 ---
 
-## v5.3.29 — Staked Aerodrome accounting (2026-09-30, in progress)
+## v5.3.30 — Operation primitives refactor (2026-09-30, completed)
+
+### Summary
+One `collect` / `compound` / `close` primitive per venue, reused by every GUI call site, with honest capability flags driving button rendering. The LP dialog orchestration (confirmation, ownership pre-check, writer dispatch, recording, refresh) is now shared instead of copy/pasted in `lp_tab.py`. Standalone collects now record to `FEE_EVENTS` via the same event path and `TX_HASH` dedupe as compound/close. No schema changes; `FEE_EVENTS.SOURCE` stays within `('MANUAL','READER','HARVEST')`; no new `CHECK` constraints.
+
+### Design rules delivered
+- One `collect_fees()` primitive per venue writer.
+- One `compound_fees()` primitive per venue writer, which composes `collect_fees()` → optional swap → `increase_liquidity` / record.
+- One `close_position()` primitive per venue writer, which composes `decreaseLiquidity()` → `collect_fees()` → optional `burn`.
+- GUI renders Collect/Compound/Close buttons only from the writer capability flags (`supports_collect`, `supports_compound`, `supports_close`) plus the staked-position guard.
+- Unified accounting: collect, compound and close all record to `FEE_EVENTS` and dedupe by `TX_HASH`.
+
+### Changes
+
+#### 1. Capability flags on every writer
+- `src/venue_adapters/venue_writer.py`: base `VenueWriter` declares `supports_collect`, `supports_compound`, `supports_close` (defaults `True`).
+- `src/venue_adapters/aerodrome_writer.py`: `supports_compound = True`.
+- `src/venue_adapters/hyperliquid_writer.py`: `supports_compound = True`.
+- `src/venue_adapters/cetus_writer.py`: `supports_compound = True`.
+- `src/venue_adapters/bsc_writer.py`: `supports_compound = False` (swap not implemented yet).
+- `src/venue_adapters/orca_writer.py`: `supports_compound = False` (Orca compound not yet implemented; users directed to Collect/Rebalance).
+
+#### 2. New shared operation modules
+- `src/lp_operation_core.py` (242 lines): capability model, venue/account resolution, notification scheduling, EVM ownership pre-check wrapper, standalone-collect recording helper.
+- `src/lp_operation_runner.py` (243 lines): confirmation-dialog shell + collect/compound executors; delegates close to `lp_operation_close.py`.
+- `src/lp_operation_close.py` (195 lines): close-position executor (EVM/Solana/Sui variants), post-TX receipt verification and ledger recording.
+- `src/lp_operations.py` (90 lines): thin GUI facade used by `lp_tab.py`; renders capability-driven buttons and delegates to the runner.
+
+#### 3. `lp_tab.py` refactor
+- `src/lp_tab.py`:
+  - Imports `LPOperationController` from `lp_operations` and stores it as `self._lp_ops`.
+  - Replaced the ~270-line hard-coded Collect/Compound/Close button block in `_lp_render_card()` with `self._lp_ops.render_standard_buttons()`.
+  - `_lp_collect_fees_dialog`, `_lp_compound_fees_dialog`, `_lp_close_position_dialog` are now one-line shims delegating to `self._lp_ops`.
+  - Removed ~800 lines of duplicated dialog orchestration from `lp_tab.py` (it now lives once in `lp_operation_runner.py`).
+  - Added a lazy `_lp_ops` initialization guard for tests that bypass `LPTab.__init__`.
+  - Cleaned up imports made unused by the refactor (`time`, `CollectFeesParams`, `CompoundFeesParams`, `messagebox` in one dialog).
+
+#### 4. Unified collect accounting
+- `src/coldtrack/collect_recorder.py` (new, 268 lines):
+  - `CollectResult` + `CollectRecorder` write a standalone collect to `FEE_EVENTS` with `SOURCE='MANUAL'`.
+  - Dedupes by `TX_HASH` + `POSITION_ID`, same pattern as `compound_recorder.py` and `close_recorder.py`.
+  - Pending-file retry path on DB write failure.
+- `src/lp_operation_core.py`: `_record_collect()` is called from `_execute_collect()` after a successful `collect_fees()` so the GUI collect path now uses the same ledger event path as compound/close.
+
+#### 5. Hidden-import updates
+- `build_gui_v5.py`: added `--hidden-import=lp_operations`, `lp_operation_core`, `lp_operation_runner`, `coldtrack.collect_recorder`.
+- `coldstack.spec`: added same modules to `hiddenimports`.
+
+### Files Changed
+- `src/venue_adapters/venue_writer.py`
+- `src/venue_adapters/aerodrome_writer.py`
+- `src/venue_adapters/hyperliquid_writer.py`
+- `src/venue_adapters/cetus_writer.py`
+- `src/venue_adapters/bsc_writer.py`
+- `src/venue_adapters/orca_writer.py`
+- `src/lp_tab.py`
+- `src/lp_operations.py` (rewritten as thin facade)
+- `src/lp_operation_core.py` (new)
+- `src/lp_operation_runner.py` (new)
+- `src/coldtrack/collect_recorder.py` (new)
+- `build_gui_v5.py`
+- `coldstack.spec`
+- `test_operation_primitives.py` (new)
+- `STATUS.md`
+
+### Verification
+- `python -m py_compile` on touched/new files — PASS.
+- `pyflakes` on new files — zero undefined-name/syntax errors; remaining `lp_tab.py` warnings predate this patch.
+- Full `test_*.py` suite — ALL PASS (including new `test_operation_primitives.py`).
+- Line-count impact: `lp_tab.py` shrunk from 5115 to 4433 lines (-682); new operation modules total ~770 lines (`lp_operation_core` 242 + `lp_operation_runner` 243 + `lp_operation_close` 195 + `lp_operations` 90). Net increase ~88 lines for much clearer separation.
+- No EXE build, no git push, no release. Live DBs read-only in dev.
+
+---
+
+## v5.3.30 EOM fix batch (2026-10-01, completed)
+
+### Summary
+Lockscreen version pinned to 5.3.30; saved-pool drag-and-drop reordering with vault persistence; G1 Aerodrome claim now aborts loudly on a missing `TOKEN_ID` and verifies signer gas balance on the same verified RPC before broadcast; G2 AERO claim accounting gets a one-shot CLI backfill using the provided fixture; action buttons restored on Orca / BSC / Project X cards by fixing the capability-render path and hardening `_lp_render_card` for test stubs. No schema changes; version remains 5.3.30.
+
+### Changes
+
+#### 1. Version lock
+- `src/gui_main_v5.py`: `VERSION = "5.3.30"` (already set by refactor section).
+- `src/coldtrack/sentinel_export.py`: `EXPORTER_VERSION = "5.3.30"`.
+
+#### 2. Saved-pool drag-and-drop reordering
+- `src/saved_pools.py`:
+  - Added `reorder_saved_pools(address_db, old_index, new_index)` — moves an entry in place, validates bounds, returns boolean.
+- `src/lp_tab.py`:
+  - Added `_lp_bind_card_drag_reorder(card, entry)` with `<ButtonPress-1>`, `<B1-Motion>`, `<ButtonRelease-1>` bindings.
+  - Drop target is determined by the rendered card geometry; on release, the vault list is reordered, re-encrypted, and the saved-pool section is re-rendered.
+  - Bound to saved-pool placeholder cards in `_lp_render_all_saved_placeholders()`.
+
+#### 3. G1 claim hardening
+- `src/venue_adapters/aerodrome_writer.py`:
+  - `_parse_token_id()` now raises `ValueError` with an explicit message when `position_id` is empty or missing the token ID.
+  - `_read_native_balance()` defaults to `require_verified=True`, calling `_verify_rpc_chain()` before the balance read so a wrong-chain RPC cannot fake a non-zero balance for the funded wallet.
+- `src/venue_adapters/aerodrome_gauge_writer.py`:
+  - `_broadcast()` documents that claim/unstake reuse the verified-RPC gas-balance guard in `AerodromeWriter._broadcast`.
+
+#### 4. G2 AERO claim backfill + CLI
+- `src/venue_adapters/aerodrome_gauge_writer.py`:
+  - `_record_claim()` now resolves the matching `LP_POSITIONS` row by `TOKEN_ID` and uses its `ACCOUNT_ID` for the `TRANSACTIONS` yield row. Fails into the pending file if the row is missing/ambiguous.
+  - Added `record_claim_backfill(record, db_path, base_dir)` — public one-shot path used by the CLI.
+- `src/coldtrack/__main__.py`:
+  - New `record-claim` subcommand accepts `--db`, `--token-id`, `--tx-hash`, `--aero`, `--value-usd`, `--gas-eth`, `--date`, `--account`, `--accrued-weth`, `--accrued-cbbtc`.
+  - Notes string captures the fixture details: `gas {gas_eth:g} ETH; accrued WETH {accrued_weth:g} + cbBTC {accrued_cbbtc:g}`.
+
+#### 5. Action buttons restored on Orca / BSC / Project X cards
+- `src/lp_tab.py`:
+  - Fixed `_lp_render_card` so it no longer crashes on `position.raw_data = None` (new `_raw_data` guard).
+  - Save/Remove button path now checks that `key_manager` and `address_db` exist before calling `is_pool_saved()`.
+- `src/venue_adapters/orca_writer.py`:
+  - Removed unused imports (`POOL_ACCOUNT_LEN`, `_is_solana_address`, `_get_sol_token_symbol`) and fixed a pyflakes undefined-name warning on `CloseResult`.
+
+### Files Changed
+- `src/gui_main_v5.py`
+- `src/coldtrack/sentinel_export.py`
+- `src/saved_pools.py`
+- `src/lp_tab.py`
+- `src/venue_adapters/aerodrome_writer.py`
+- `src/venue_adapters/aerodrome_gauge_writer.py`
+- `src/venue_adapters/orca_writer.py`
+- `src/coldtrack/__main__.py`
+- `STATUS.md`
+
+### Verification
+- `python -m py_compile` on touched/new files — PASS.
+- `pyflakes` on new files — zero undefined-name/syntax errors; remaining `lp_tab.py` / `aerodrome_writer.py` / `cetus_writer.py` warnings predate this patch.
+- Full `test_*.py` suite — ALL PASS.
+- No EXE build, no git push, no release. Live DBs read-only in dev.
+
+---
+
+## v5.3.29 — Staked Aerodrome accounting + HyperEVM pre-check/compound (2026-09-30)
 
 ### Summary
 Second-phase accounting patch for staked Aerodrome positions. Implements Kimi's v5.3.29 data contract: trading fees are realized in the withdrawal at staked close (not double-counted), AERO emission claims are recorded and deduped by tx hash, external AERO claims are detected on scan, CAPITAL_EVENTS writes are removed from all close paths, and the staked card distinguishes accrued trading fees from claimable AERO. No schema changes; CHECK constraints untouched.
@@ -70,9 +204,79 @@ Second-phase accounting patch for staked Aerodrome positions. Implements Kimi's 
 - `STATUS.md`
 
 ### Verification
-- `python -m py_compile` on touched files — pending.
-- `pyflakes` — pending.
-- Full `test_*.py` suite — pending.
+- `python -m py_compile` on touched files — PASS.
+- `pyflakes` on new files — zero undefined-name/syntax errors; pre-existing `lp_tab.py` / `hyperliquid_adapter.py` unused-import warnings predate this patch.
+- Full `test_*.py` suite — ALL PASS (including new `test_hyperliquid_precheck_compound.py`).
+- No EXE build, no git push, no release. Live DBs read-only in dev.
+
+---
+
+## v5.3.29 — HyperEVM (Project X) ownership pre-check + compound-fee accounting
+
+### Summary
+Mirrors the Aerodrome/BSC ownership pre-check for HyperEVM and adds the v5.3.29 compound-fee accounting path. A HyperEVM fee compound = collect fees → re-add as liquidity; the recorder writes `FEE_EVENTS` income, grows the position's entry basis, takes a post-compound snapshot, and never writes `CAPITAL_EVENTS`. All work uses temp DB copies in tests; live DBs remain read-only.
+
+### Changes
+
+#### 1. HyperEVM ownership pre-check (adapter + writer + lp_tab)
+- `src/venue_adapters/hyperliquid_adapter.py`:
+  - Added `owner_of(token_id)` helper: reads `ownerOf(tokenId)` on the Project X Position Manager (`0xead19ae861c29bbb2101e834922b2feee69b9091`) and returns the owner address or `None`.
+  - This is the single adapter-exposed read `lp_tab` uses; no hand-encoded calldata in `lp_tab.py`.
+- `src/venue_adapters/hyperliquid_writer.py`:
+  - Added `_get_position_owner()` and `_resolve_owner_signer()` mirroring the Aerodrome/BSC owner-anchored signer resolution.
+  - `_resolve_owner_signer` aborts with precise wording naming the on-chain owner and the derivable HyperEVM vault addresses when none match.
+- `src/lp_tab.py`:
+  - Added `_lp_verify_hyperliquid_position_ownership()` dispatched from `_lp_verify_evm_position_ownership()` for `venue_key == "hyperliquid"`.
+  - Honest stale-record error when `ownerOf` reverts / returns zero address.
+  - Binding-first, owner-anchored fallback; persists self-healed binding via existing `_lp_resolve_evm_owner_to_account`.
+
+#### 2. Compound-fee ledger recording
+- `src/coldtrack/compound_recorder.py` (NEW):
+  - `CompoundResult` / `CompoundLeg` dataclasses capture the compound transaction hash, reinvested token amounts/values, and spot prices.
+  - `CompoundRecorder.record()` performs the three-table atomic write:
+    1. `FEE_EVENTS`: one row `SOURCE='HARVEST'`, `NOTES='auto-compound — fees reinvested'`, `TOKEN_A_AMT`/`TOKEN_B_AMT`/`VALUE_USD`/`TX_HASH`.
+    2. `LP_POSITIONS`: increment `FEES_CLAIMED_USD`/`FEES_EARNED_USD`; grow `AMOUNT_A_ENTRY`/`AMOUNT_B_ENTRY`/`TOTAL_VALUE_USD_ENTRY` by reinvested amounts (income counted once; basis grows so capital-growth math stays clean).
+    3. `LP_SNAPSHOTS`: post-compound snapshot with `IN_RANGE=1` and tx hash in `NOTES`.
+    4. **No `CAPITAL_EVENTS` row** — internal reinvestment, not external capital.
+    5. Dedupe by `TX_HASH`; already-closed positions just append sigs to `NOTES`.
+  - Pending-record persistence and `record_compound_and_export()` mirror the close recorder.
+- `src/venue_adapters/hyperliquid_writer.py`:
+  - Added `_capture_compound_result()` called after a successful `increaseLiquidity` receipt.
+  - Builds `CompoundLeg`s for WHYPE/UBTC, USD values via the writer's `price_engine`, and stores `self.last_compound_result`.
+- `src/lp_tab.py`:
+  - Added `_lp_record_compound_for_writer()` (mirrors `_lp_record_close_for_writer`).
+  - `_lp_compound_fees_dialog()` now passes `price_engine` to the writer and records the compound after on-chain success, appending the ledger note to the success notification.
+
+#### 3. Sole-writer CLI subcommand
+- `src/coldtrack/__main__.py` (NEW):
+  - Adds `coldtrack compound` alongside the existing `export` subcommand.
+  - Takes `--db`, `--token-id`, `--tx-hash`, `--collect-hash`, `--amount-a`, `--amount-b`, `--value-usd`, `--price-a`, `--price-b`, `--token-a`, `--token-b`, `--owner`, `--date`.
+  - Constructs a `CompoundResult` and calls `record_compound_and_export()` — the real recording path executed, not just messages.
+
+#### 4. Build / packaging
+- `build_gui_v5.py` and `coldstack.spec`: added `--hidden-import=coldtrack.compound_recorder`.
+
+### Files Changed
+- `src/venue_adapters/hyperliquid_adapter.py`
+- `src/venue_adapters/hyperliquid_writer.py`
+- `src/lp_tab.py`
+- `src/coldtrack/compound_recorder.py` (NEW)
+- `src/coldtrack/__main__.py` (NEW)
+- `build_gui_v5.py`
+- `coldstack.spec`
+- `test_hyperliquid_precheck_compound.py` (NEW)
+- `STATUS.md`
+
+### Verification
+- `python -m py_compile` on touched files — PASS.
+- `pyflakes` on new files — clean (zero undefined-name/syntax errors); pre-existing `lp_tab.py` / `hyperliquid_adapter.py` warnings predate this patch.
+- `test_hyperliquid_precheck_compound.py` — ALL PASS:
+  - `owner_of` reads Project X manager; returns `None` on revert.
+  - Writer `_resolve_owner_signer` match / no-match.
+  - `lp_tab` pre-check match / mismatch / stale-token wordings.
+  - Compound recorder: FEE_EVENT + basis growth + snapshot + no CAPITAL_EVENTS + dedupe + already-closed NOTES append.
+  - CLI `compound` subcommand records to a temp DB copy.
+- Full `test_*.py` suite — ALL PASS.
 - No EXE build, no git push, no release. Live DBs read-only in dev.
 
 ---

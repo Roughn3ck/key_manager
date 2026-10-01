@@ -101,9 +101,17 @@ class VenueWriter(ABC):
     Concrete implementations live in venue-specific writer modules (e.g.
     hyperliquid_writer.py). Each writer is responsible for its own signing,
     nonce management and broadcast path.
+
+    v5.3.30: each venue declares operation capabilities so the GUI can render
+    action buttons honestly and the orchestration layer can dispatch uniformly.
     """
 
     VENUE_KEY: str = ""
+
+    # Capability flags. Override in concrete classes to reflect actual support.
+    supports_collect: bool = True
+    supports_compound: bool = True
+    supports_close: bool = True
 
     def _verify_rpc_chain(self, rpc: str, expected_chain_id: int) -> None:
         """Verify that ``rpc`` serves ``expected_chain_id``.

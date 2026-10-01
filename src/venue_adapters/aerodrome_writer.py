@@ -72,6 +72,11 @@ class AerodromeWriter(VenueWriter):
 
     VENUE_KEY = "aerodrome"
 
+    # v5.3.30: Aerodrome supports collect/close and unstaked compound. Staked
+    # compound is disabled in the GUI because the gauge-held NFT cannot add
+    # liquidity until it is unstaked first.
+    supports_compound: bool = True
+
     def __init__(self, agent_url: str = "http://127.0.0.1:8842"):
         self.agent_url = agent_url.rstrip("/")
         self.chain_id = BASE_CHAIN_ID  # 8453
@@ -188,8 +193,16 @@ class AerodromeWriter(VenueWriter):
         """Confirm the dialog-resolved account derives to the position owner on
         Base. If not, abort with both addresses named (no fallback)."""
 
-    def _read_native_balance(self, address: str) -> int:
-        """Read ETH balance (in wei) for an address on BASE."""
+    def _read_native_balance(self, address: str, require_verified: bool = True) -> int:
+        """Read ETH balance (in wei) for an address on BASE.
+
+        v5.3.30: ``require_verified`` defaults to True so callers that need a
+        balance for a signing decision always use a chain-verified RPC. This
+        matches the same verified RPC used by ``_broadcast`` and prevents a
+        wrong-chain RPC from reporting a non-zero balance for the funded wallet.
+        """
+        if require_verified:
+            self._verify_rpc_chain(self.rpc_url, self.chain_id)
         result = self._rpc_call("eth_getBalance", [address, "latest"])
         if result and isinstance(result, str):
             return int(result, 16)
@@ -273,15 +286,28 @@ class AerodromeWriter(VenueWriter):
         Accepts formats:
           - 'base:12345' -> 12345
           - '12345' -> 12345
+
+        v5.3.30: a missing/empty TOKEN_ID aborts loudly. The downstream
+        position-manager lookups treat 0 as a valid token, so a silent None
+        would burn the wrong NFT or produce a confusing revert.
         """
+        if not position_id or not str(position_id).strip():
+            raise ValueError("Missing position_id (TOKEN_ID is required)")
+        raw = str(position_id).strip()
         try:
-            if position_id.startswith("base:"):
-                return int(position_id.split(":", 1)[1])
-            if position_id.startswith("hyperevm:"):
-                return int(position_id.split(":", 1)[1])
-            return int(position_id)
+            if raw.startswith("base:"):
+                inner = raw.split(":", 1)[1]
+                if not inner:
+                    raise ValueError(f"Missing token ID in position_id: {position_id}")
+                return int(inner)
+            if raw.startswith("hyperevm:"):
+                inner = raw.split(":", 1)[1]
+                if not inner:
+                    raise ValueError(f"Missing token ID in position_id: {position_id}")
+                return int(inner)
+            return int(raw)
         except (ValueError, IndexError):
-            return None
+            raise ValueError(f"Invalid position_id: {position_id}")
 
     def _find_position_manager(self, token_id: int) -> str:
         """Find which Position Manager holds this NFT on BASE."""

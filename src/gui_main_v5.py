@@ -2,11 +2,11 @@
 ColdStack GUI - Modern dark-themed interface for secure offline crypto key management.
 Built with CustomTkinter.
 
-Version: v5.3.29 (September 2026) - Staked Aerodrome accounting: fee decomposition, AERO claim dedupe, no close capital events
+Version: v5.3.30 (October 2026) - Operation primitives refactor: one collect/compound/close per venue + capability-driven GUI + unified accounting
 """
 
 # Single source of truth for version — update this when bumping versions
-VERSION = "5.3.29"
+VERSION = "5.3.30"
 import sys
 import os
 

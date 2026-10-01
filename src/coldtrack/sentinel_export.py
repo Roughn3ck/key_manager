@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 # Contract version the sentinel pins (argus_sentinel.js VIEW_CONTRACT_VERSION).
 VIEW_CONTRACT_VERSION = 1
 # Semver of this port, embedded in generated_by. Credit preserved.
-EXPORTER_VERSION = "5.3.29"
+EXPORTER_VERSION = "5.3.30"
 GENERATED_BY = f"ColdTrack Sentinel Export {EXPORTER_VERSION} (port of kimi/coldtax)"
 
 # Default merged-view sources: the Pack + K&P portfolio DBs (Kimi's layout).

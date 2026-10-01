@@ -131,6 +131,10 @@ def build_gui_exe():
         '--hidden-import=account_dialogs',
         '--hidden-import=vault_tab',
         '--hidden-import=lp_tab',
+        '--hidden-import=lp_operations',
+        '--hidden-import=lp_operation_core',
+        '--hidden-import=lp_operation_runner',
+        '--hidden-import=lp_operation_close',
         '--hidden-import=chain_options',
         # --- v5.2.2 Appearance module ---
         '--hidden-import=appearance',
@@ -146,6 +150,10 @@ def build_gui_exe():
         '--hidden-import=coldtrack.sentinel_export',
         # --- v5.3.16: ColdTrack close recorder (Orca close → ledger) ---
         '--hidden-import=coldtrack.close_recorder',
+        # --- v5.3.29: ColdTrack compound recorder (HyperEVM fee compound → ledger) ---
+        '--hidden-import=coldtrack.compound_recorder',
+        # --- v5.3.30: ColdTrack collect recorder (standalone collect → ledger) ---
+        '--hidden-import=coldtrack.collect_recorder',
         '--collect-submodules=coldtrack',
         # --- v5.2.6: Ed25519 utils ---
         '--hidden-import=ed25519_utils',

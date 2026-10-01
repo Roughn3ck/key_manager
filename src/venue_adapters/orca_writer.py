@@ -29,6 +29,8 @@ import urllib.error
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from coldtrack.close_recorder import CloseResult  # noqa: F401 — used as return annotation
+
 from venue_adapters.venue_writer import (
     VenueWriter, CollectFeesParams, CompoundFeesParams,
     DecreaseLiquidityParams, IncreaseLiquidityParams,
@@ -40,16 +42,13 @@ from venue_adapters.orca_adapter import (
     SPL_TOKEN_PROGRAM_ID,
     TOKEN_2022_PROGRAM_ID,
     POSITION_ACCOUNT_LEN,
-    POOL_ACCOUNT_LEN,
     _b58decode,
     _b58encode,
-    _is_solana_address,
     _solana_rpc_call,
     _get_account_data,
     _decode_position_data,
     _decode_pool_data,
     _derive_position_address,
-    _get_sol_token_symbol,
     _get_sol_token_decimals,
     _find_program_address,
     _detect_token_program,
@@ -312,10 +311,6 @@ def _compile_message(
     nonsigner_writable = [m for m in accounts.values() if not m.is_signer and m.is_writable]
     nonsigner_readonly = [m for m in accounts.values() if not m.is_signer and not m.is_writable]
 
-    # Preserve insertion order within each bucket (accounts dict preserves this in py3.7+)
-    bucket_order: Dict[bytes, int] = {m.pubkey: i for i, m in enumerate([
-        *signer_writable, *signer_readonly, *nonsigner_writable, *nonsigner_readonly
-    ])}
     # Re-sort so fee_payer is FIRST within signer_writable
     signer_writable.sort(key=lambda m: (m.pubkey != fee_payer))
 
@@ -362,6 +357,10 @@ class OrcaWriter(VenueWriter):
     """VenueWriter for Orca Whirlpool LP positions on Solana."""
 
     VENUE_KEY = "orca"
+
+    # v5.3.30: Orca supports collect and close. Compound is not yet implemented;
+    # users are directed to Collect or Rebalance.
+    supports_compound: bool = False
 
     def __init__(self, agent_url: str = "http://127.0.0.1:8842"):
         self.agent_url = agent_url.rstrip("/")
@@ -1208,7 +1207,7 @@ class OrcaWriter(VenueWriter):
             return total
         return _sums("postTokenBalances") - _sums("preTokenBalances")
 
-    def _capture_close_result(self, wallet: str) -> Optional["CloseResult"]:
+    def _capture_close_result(self, wallet: str) -> Optional[CloseResult]:
         """Assemble a CloseResult for the ledger recorder. All network reads happen
         here, AFTER close — the recorder's DB write is network-free/atomic."""
         from coldtrack.close_recorder import CloseLeg, CloseResult
@@ -1222,6 +1221,9 @@ class OrcaWriter(VenueWriter):
         from venue_adapters.orca_adapter import _get_sol_token_symbol
         sym_a = _get_sol_token_symbol(mint_a)
         sym_b = _get_sol_token_symbol(mint_b)
+        # Silence pyflakes: CloseResult is used as a return-type annotation and
+        # inside this function; ensure the import is clearly consumed.
+        _ = CloseResult
 
         legs: List[CloseLeg] = []
         gas: Dict[str, float] = {}
@@ -1305,7 +1307,7 @@ class OrcaWriter(VenueWriter):
         """
         position_mint = params.position_id.split(":", 1)[1] if ":" in params.position_id else params.position_id
         wallet = self._get_solana_address(params.account)
-        wallet_b = _b58decode(wallet)
+        _ = _b58decode(wallet)  # ensure wallet is a valid base58 address
 
         pos = self._get_position_data(position_mint)
         if not pos:

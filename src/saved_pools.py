@@ -159,6 +159,30 @@ def _find_pool_entry(address_db: Dict[str, Any], token_id: Union[int, str], venu
     return None
 
 
+def reorder_saved_pools(address_db: Dict[str, Any], old_index: int,
+                        new_index: int) -> bool:
+    """Move a saved pool from ``old_index`` to ``new_index`` in place.
+
+    The caller must re-encrypt the vault to persist the change.
+
+    Returns True on success, False if indexes are invalid or the list is empty.
+    """
+    try:
+        pools = address_db.get("saved_pools")
+        if not isinstance(pools, list) or not pools:
+            return False
+        n = len(pools)
+        if old_index < 0 or old_index >= n or new_index < 0 or new_index >= n:
+            return False
+        if old_index == new_index:
+            return True
+        entry = pools.pop(old_index)
+        pools.insert(new_index, entry)
+        return True
+    except Exception:
+        return False
+
+
 def update_saved_pool_binding(
     address_db: Dict[str, Any],
     token_id: Union[int, str],
