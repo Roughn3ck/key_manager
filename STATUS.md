@@ -1,8 +1,122 @@
 # ColdStack - Status Report
 
 **Project:** https://github.com/Roughn3ck/key_manager
-**Current Version:** v5.3.30 (Operation primitives refactor: one collect/compound/close per venue + capability-driven GUI + unified accounting)
-**Last Updated:** 2026-09-30
+**Current Version:** v5.3.30 (Operation primitives refactor + EOM fix batch + capability-driven button matrix + staked Aerodrome reconciliation + EOM N1 dispatch/registry/fees batch + HyperEVM pre-check/compound accounting)
+**Last Updated:** 2026-10-04
+
+---
+
+## v5.3.30-forge — Capability-driven button matrix slice + staked Aerodrome reconciliation + EOM N1 dispatch/registry/fees batch (2026-10-04, completed)
+
+### Summary
+Standalone slice fixing the missing action buttons on Orca, BSC, Cetus, and Project X cards. A new `venue_adapters.capabilities` module declares the per-venue matrix; `lp_tab.py` uses it to render buttons instead of a legacy whitelist guard. Staked Aerodrome keeps its dedicated Claim/Unstake/Close Staked buttons. Reconciled the v5.3.29 staked Aerodrome accounting spec against the current code: hardened zero-AERO claims so they no-op instead of writing phantom ledger rows, fixed post-close position lookup to handle rows already marked closed, and updated the gauge-writer fixture test to exercise a real balance delta.
+
+This same batch also addresses Kris's EOM dispatch rejections (G4 BSC collect, G5 Project X compound, N1 Cetus collect) by confirming the runner dispatch map is driven from the same canonical venue keys used for button rendering, fixes the Sui token registry so it loads from the EXE directory in frozen mode (resolving the N1 LBTC pricing gap), and adds real-time accrued-fee computation for Cetus positions so the N1 card shows fees. No EXE build, no push, no version bump (tree stays 5.3.30).
+
+### Changes
+
+#### 1. New capability matrix module
+- `src/venue_adapters/capabilities.py` (new):
+  - `VenueCapabilities` dataclass: `collect`, `compound`, `close`.
+  - Canonical matrix:
+    - Orca: collect ✓, close ✓, compound ✗
+    - BSC: collect ✓, close ✓, compound ✗
+    - Cetus: collect ✓, compound ✓, close ✓
+    - Project X / HyperEVM: collect ✓, compound ✓, close ✓
+    - Aerodrome unstaked: collect ✓, compound ✓, close ✓
+  - `resolve_venue_key()` normalises saved-pool venue names and `position_id` prefixes.
+  - `get_capabilities()` returns the matrix set; staked Aerodrome returns all False so the dedicated staked buttons are used instead.
+  - `button_labels()` returns the human labels for the trace.
+
+#### 2. Matrix-driven button rendering in `lp_tab.py`
+- `src/lp_tab.py`:
+  - Imported `get_capabilities` and `button_labels`.
+  - Replaced the legacy `can_manage_lp` whitelist with the capability matrix.
+  - Non-staked cards call `self._lp_ops.render_standard_buttons(..., caps=caps)`.
+  - Staked Aerodrome cards keep the existing dedicated gauge buttons and log `decision=staked`.
+  - Removed the old `can_manage_lp` / `can_save_lp` confusion; saveability is now computed independently.
+
+#### 3. `[button-render]` trace
+- `src/lp_tab.py`:
+  - Added `_lp_log_button_render(key, venue, buttons, decision)`.
+  - Emits one line per card, e.g.:
+    - `[button-render] key=orca:solana:... venue=Orca buttons=[Collect, Close] decision=matrix collect=True compound=False close=True`
+    - `[button-render] key=aerodrome:base:... venue=Aerodrome buttons=[Claim, Unstake, CloseStaked] decision=staked`
+  - Uses ASCII-safe button names so Windows console logging never chokes on emoji.
+
+#### 4. `lp_operations.py` accepts a capability override
+- `render_standard_buttons()` now takes an optional `caps` dict/`VenueCapabilities` override so `lp_tab.py` can pass the matrix decision directly.
+
+#### 5. Fixture tests
+- `test_button_matrix.py` (new):
+  - Asserts the rendered button set for Orca, BSC, Cetus, HyperEVM, Aerodrome unstaked, and staked Aerodrome.
+  - Asserts the `[button-render]` trace is emitted and contains the expected venue/decision.
+- `test_aerodrome_gauge_writer.py` (updated):
+  - `test_claim_recorded_as_fee_event` now simulates a real AERO balance delta so the recorder path is exercised end-to-end.
+
+#### 6. Staked Aerodrome spec reconciliation
+- `src/venue_adapters/aerodrome_gauge_writer.py`:
+  - `claim_and_record()` skips ledger writes when the on-chain AERO balance delta is zero (already-claimed / empty gauge), avoiding phantom FEE_EVENTS/TRANSACTIONS rows.
+  - `close_staked_position()` post-close position lookup no longer requires `STATUS='active'`; a row already closed by the close recorder is still accepted for claim ledger attribution.
+
+#### 7. EOM N1 dispatch/registry/fees batch
+- `src/venue_adapters/capabilities.py` + `src/lp_operation_core.py` + `src/lp_operation_runner.py`:
+  - Runner dispatch uses the same canonical venue keys (`bsc`, `hyperliquid`, `cetus`) as the capability matrix and `_lp_resolve_venue_for_position`; both-directions matrix audit shows every declared capability has a writer method and vice versa.
+- `src/sui_assets.py` + `build_gui_v5.py`:
+  - `load_registry()` now resolves `sui_tokens.json` from the EXE directory when frozen, with a module-dir fallback in source mode.
+  - Added startup log line `[sui-registry] path=<p> mappings=<n>` so `gui_debug.log` proves the load.
+  - PyInstaller build now bundles `src/sui_tokens.json` into the EXE output directory (`--add-data=src/sui_tokens.json;.`).
+- `src/venue_adapters/cetus_adapter.py`:
+  - `decode_position()` now extracts `fee_growth_inside_a/b_last`; `decode_pool()` extracts `fee_growth_global_a/b`.
+  - New `_compute_cetus_fees()` applies Uniswap-V3 feeGrowth accumulator math to compute real-time accrued Cetus trading fees (mirroring the Aerodrome staked-card reader).
+  - `_position_from_fields()` and `fetch_fees_earned()` now use the computed fees instead of the stale `fee_owed_a/b` fields.
+  - Fees note still follows the honest-totals rule (unpriced legs flagged with count suffix).
+
+#### 8. HyperEVM (Project X) ownership pre-check + compound accounting
+- `src/venue_adapters/hyperliquid_adapter.py`:
+  - Adapter-exposed `owner_of(token_id)` helper reads `ownerOf` on the Project X Position Manager (`POSITION_MANAGER = 0xead19ae861c29bbb2101e834922b2feee69b9091`). `lp_tab.py` uses this directly (no hand-encoded calldata).
+- `src/venue_adapters/hyperliquid_writer.py`:
+  - `_resolve_owner_signer()` matches `ownerOf(tokenId)` to a derivable HyperEVM vault account.
+  - `compound_fees()` captures a `CompoundResult` in `self.last_compound_result` for ledger recording.
+- `src/lp_tab.py`:
+  - `_lp_verify_hyperliquid_position_ownership()` dispatches to the adapter/writer helpers, with saved-pool binding first + owner-anchored fallback + binding self-heal (same pattern as Aerodrome/BSC).
+  - `_lp_record_compound_for_writer()` records the captured `CompoundResult` atomically via `coldtrack.compound_recorder`.
+- `src/coldtrack/compound_recorder.py`:
+  - Records a compound as FEE_EVENTS (`SOURCE='HARVEST'`, NOTES "auto-compound — fees reinvested"), grows `LP_POSITIONS` entry basis (`AMOUNT_A_ENTRY`, `AMOUNT_B_ENTRY`, `TOTAL_VALUE_USD_ENTRY`), increments `FEES_CLAIMED_USD`/`FEES_EARNED_USD`, writes a post-compound `LP_SNAPSHOTS` row, and writes NO `CAPITAL_EVENTS` row.
+  - Dedupes by `TX_HASH`; already-closed positions get sigs appended to `NOTES` only.
+- `src/coldtrack/__main__.py`:
+  - Added `coldtrack compound` CLI subcommand for the sole-writer backfill path.
+
+### Files Changed
+- `src/venue_adapters/capabilities.py` (new)
+- `src/venue_adapters/aerodrome_gauge_writer.py`
+- `src/venue_adapters/cetus_adapter.py`
+- `src/venue_adapters/cetus_writer.py`
+- `src/venue_adapters/hyperliquid_adapter.py`
+- `src/venue_adapters/hyperliquid_writer.py`
+- `src/sui_assets.py`
+- `src/lp_tab.py`
+- `src/lp_operations.py`
+- `src/lp_operation_core.py`
+- `src/lp_operation_runner.py`
+- `src/coldtrack/compound_recorder.py`
+- `src/coldtrack/__main__.py`
+- `build_gui_v5.py`
+- `test_button_matrix.py` (new)
+- `test_aerodrome_gauge_writer.py`
+- `test_hyperliquid_precheck_compound.py`
+- `test_sui_cetus.py`
+- `STATUS.md`
+
+### Verification
+- `python -m py_compile` on touched/new files — PASS.
+- `pyflakes` on touched files — zero undefined-name/syntax errors; remaining `lp_tab.py` / `cetus_writer.py` warnings predate this patch.
+- `test_aerodrome_gauge_writer.py` — ALL PASS.
+- `test_button_matrix.py` — ALL PASS.
+- `test_hyperliquid_precheck_compound.py` — ALL PASS.
+- `test_sui_cetus.py` — ALL PASS.
+- Full `test_*.py` suite — ALL PASS (DB-bound tests `test_close_recorder.py` and `test_close_recorder_aerodrome.py` require the live K&P/Pack DBs at their configured paths and were skipped in this dev environment; all other tests pass).
+- No EXE build, no git push, no release. Live DBs read-only in dev.
 
 ---
 

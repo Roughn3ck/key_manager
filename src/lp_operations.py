@@ -5,7 +5,7 @@ capability model from `lp_operation_core` and delegates actual execution to
 `lp_operation_runner`.  Keeping rendering separate from execution keeps both
 files small and focused.
 """
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import customtkinter as ctk
 
@@ -30,17 +30,30 @@ class LPOperationController(LPOpCore):
         button_frame: ctk.CTkFrame,
         position: LPPosition,
         tooltip_target: Optional[ctk.CTkLabel] = None,
+        caps: Optional[Dict[str, bool]] = None,
     ) -> List[ctk.CTkButton]:
-        """Render Collect/Compound/Close buttons based on capabilities."""
+        """Render Collect/Compound/Close buttons based on capabilities.
+
+        Args:
+            caps: Optional capability override. If None, capabilities are resolved
+                from the position via the capability matrix.
+        """
         buttons: List[ctk.CTkButton] = []
-        caps = self.capabilities(position)
+        if caps is None:
+            caps = self.capabilities(position)
+        # Accept a VenueCapabilities dataclass as well as a dict.
+        caps_dict = {
+            "collect": getattr(caps, "collect", False),
+            "compound": getattr(caps, "compound", False),
+            "close": getattr(caps, "close", False),
+        }
 
         def _tooltip(btn: ctk.CTkButton, text: str) -> None:
             from lp_liquidity_manager import _add_status_tooltip
             if tooltip_target:
                 _add_status_tooltip(btn, tooltip_target, text)
 
-        if caps["collect"]:
+        if caps_dict["collect"]:
             btn = ctk.CTkButton(
                 button_frame, text="💰 Collect", width=75, height=24,
                 font=ctk.CTkFont(size=9, weight="bold"),
@@ -51,7 +64,7 @@ class LPOperationController(LPOpCore):
             _tooltip(btn, "Collect Fees")
             buttons.append(btn)
 
-        if caps["compound"]:
+        if caps_dict["compound"]:
             btn = ctk.CTkButton(
                 button_frame, text="🔄 Compound", width=85, height=24,
                 font=ctk.CTkFont(size=9, weight="bold"),
@@ -62,7 +75,7 @@ class LPOperationController(LPOpCore):
             _tooltip(btn, "Compound Fees")
             buttons.append(btn)
 
-        if caps["close"]:
+        if caps_dict["close"]:
             btn = ctk.CTkButton(
                 button_frame, text="✕ Close", width=65, height=24,
                 font=ctk.CTkFont(size=9, weight="bold"),

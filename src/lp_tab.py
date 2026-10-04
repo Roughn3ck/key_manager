@@ -17,6 +17,7 @@ from saved_pools import (
 from lp_operations import LPOperationController
 from lp_liquidity_manager import open_add_liquidity, open_remove_liquidity, open_edit_position
 from lp_liquidity_manager import _add_status_tooltip as _lp_tooltip
+from venue_adapters.capabilities import get_capabilities, button_labels
 
 
 class LPTab:
@@ -46,6 +47,24 @@ class LPTab:
         if len(err_text) > 60:
             err_text = err_text[:57] + "..."
         print(f"[card-render] fn={fn_name} key={key} state={state} error={err_text}")
+
+    def _lp_log_button_render(self, key: str, venue: str, buttons: List[str],
+                              decision: str = ""):
+        """Mandatory button-render trace so missing buttons are diagnosable."""
+        decision_text = decision if decision else "-"
+        if len(decision_text) > 80:
+            decision_text = decision_text[:77] + "..."
+        # Use ASCII-safe names in the trace so Windows console logging never chokes.
+        safe_names = {
+            "💰 Collect": "Collect",
+            "🔄 Compound": "Compound",
+            "✕ Close": "Close",
+            "🌾 Claim": "Claim",
+            "🔓 Unstake": "Unstake",
+            "✕ Close Staked": "CloseStaked",
+        }
+        btn_text = ", ".join(safe_names.get(b, b) for b in buttons) if buttons else "(none)"
+        print(f"[button-render] key={key} venue={venue} buttons=[{btn_text}] decision={decision_text}")
 
     def create_tab(self, parent):
         """Build the LP Positions tab content with wallet scan + single position fetch."""
@@ -2586,20 +2605,21 @@ class LPTab:
         _raw_data = getattr(position, "raw_data", None) or {}
         _staked = bool(_raw_data.get("is_staked"))
         _is_aerodrome_staked = _staked and position.position_id and position.position_id.startswith("base:")
-        can_manage_lp = position.position_id and (
+
+        # v5.3.30-forge: capability-driven action buttons. The legacy
+        # `can_manage_lp` whitelist is replaced by the venue matrix so every
+        # implemented operation renders on every card of that venue.
+        can_save_lp = bool(position.position_id and (
             position.position_id.startswith("hyperevm:") or
             position.position_id.startswith("bsc:") or
             position.position_id.startswith("base:") or
             position.position_id.startswith("solana:") or
             position.position_id.startswith("sui:")
-        )
-        # v5.3.21: Cetus (Sui) supports Collect/Compound/Close via PTBs.
-        can_save_lp = can_manage_lp or bool(
-            position.position_id and position.position_id.startswith("sui:")
-        )
+        ))
 
         if _is_aerodrome_staked:
             # v5.3.28: staked Aerodrome gets gauge-specific write buttons.
+            staked_buttons = ["🌾 Claim", "🔓 Unstake", "✕ Close Staked"]
             claim_btn = ctk.CTkButton(button_frame, text="🌾 Claim", width=75, height=24,
                               font=ctk.CTkFont(size=9, weight="bold"),
                               fg_color=("#fd7e14", "#dc6602"),
@@ -2625,11 +2645,24 @@ class LPTab:
             if status_label:
                 _lp_tooltip(close_staked_btn, status_label, "Claim → Unstake → Close")
 
-        elif can_manage_lp:
+            self._lp_log_button_render(key, position.venue or "Aerodrome", staked_buttons, "staked")
+
+        elif position.position_id:
             # Tests that bypass __init__ may not have _lp_ops yet; lazily initialize.
             if not hasattr(self, "_lp_ops"):
                 self._lp_ops = LPOperationController(self)
-            self._lp_ops.render_standard_buttons(button_frame, position, tooltip_target=status_label)
+            caps = get_capabilities(
+                venue=position.venue, position_id=position.position_id, is_staked=False
+            )
+            self._lp_ops.render_standard_buttons(
+                button_frame, position, tooltip_target=status_label, caps=caps
+            )
+            labels = button_labels(caps)
+            self._lp_log_button_render(
+                key, position.venue or "Unknown",
+                [labels.get(k, k) for k in ("collect", "compound", "close") if labels.get(k)],
+                f"matrix collect={caps.collect} compound={caps.compound} close={caps.close}",
+            )
 
         if position.position_id:
             copy_btn = ctk.CTkButton(button_frame, text="📋 Copy", width=65, height=22,

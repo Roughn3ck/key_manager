@@ -4,7 +4,6 @@ No on-chain broadcasts — only calldata correctness, state-machine gating,
 pre-flight revert handling, idempotent resume paths, and a DB-copy recorder
 row test.
 """
-import json
 import sqlite3
 import sys
 import tempfile
@@ -16,11 +15,9 @@ from venue_adapters.aerodrome_adapter import (
     SELECTOR_CLAIM_EMISSIONS,
     SELECTOR_GAUGE_GET_REWARD_UINT,
     SELECTOR_GAUGE_WITHDRAW,
-    AERO_TOKEN,
 )
 from venue_adapters.aerodrome_gauge_writer import (
     AerodromeGaugeWriter,
-    GaugeStepResult,
 )
 
 
@@ -335,7 +332,9 @@ def test_claim_recorded_as_fee_event():
         rpc = _FakeRpc()
         writer._rpc_call = rpc
         writer._find_position_manager = lambda tid: rpc.position_manager
-        writer._read_erc20_balance = lambda token, wallet: 1_000 * (10 ** 18)
+        # v5.3.30: emulate a real AERO balance delta so the recorder writes a row.
+        balances = [1_000_000_000_000_000_000_000, 1_012_320_000_000_000_000_000]
+        writer._read_erc20_balance = lambda token, wallet, *args, **kwargs: balances.pop(0)
 
         result = writer.claim_and_record(7088644, "G2", pos_id, db_path)
         assert result.error is None, result.error

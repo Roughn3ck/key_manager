@@ -19,10 +19,10 @@ from venue_adapters.venue_writer import (
 )
 from sui_ptb import (
     Argument, CallArg, make_move_call, make_transfer_objects,
-    serialize_transaction_data_v1, sui_intent_bytes,
+    serialize_transaction_data_v1,
     get_shared_object_initial_version, get_object_ref, get_gas_coin_object,
-    dry_run_transaction_block, execute_transaction_block, struct_type_tag,
-    make_pure_u128, make_pure_u64, make_pure_bool, make_pure_address,
+    dry_run_transaction_block, struct_type_tag,
+    make_pure_u128, make_pure_bool, make_pure_address,
     make_shared_object_input, sui_rpc, sui_int, sui_i32,
 )
 from sui_assets import DEFAULT_SUI_RPC, get_coin_metadata
@@ -450,7 +450,7 @@ class CetusWriter(VenueWriter):
             _coin_symbol_decimals(pos["coin_type_b"])[1],
         )
         if liquidity_delta <= 0:
-            print(f"[cetus-writer] compound_fees: fee amounts too small to add liquidity; collecting only")
+            print("[cetus-writer] compound_fees: fee amounts too small to add liquidity; collecting only")
             collect_tx = self.collect_fees(CollectFeesParams(account=params.account, position_id=params.position_id))
             return [collect_tx]
 

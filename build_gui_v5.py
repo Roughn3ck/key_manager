@@ -192,6 +192,9 @@ def build_gui_exe():
         '--collect-all=rich',
         # --- Data files ---
         '--add-data=rpc_endpoints.json;.',
+        # --- v5.3.31: Sui token registry must land beside the EXE so the runtime
+        # loader (src/sui_assets.py) finds it in the application directory. ---
+        '--add-data=src/sui_tokens.json;.',
         # --- v5.2.3: Railgun sidecar (Node.js) ---
         '--add-data=sidecar;sidecar',
         # --- Build options ---

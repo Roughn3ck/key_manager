@@ -16,7 +16,6 @@ import math
 import time
 import urllib.request
 import urllib.error
-from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from lp_engine import LPPosition, OfflineError, VenueAdapter, register_adapter

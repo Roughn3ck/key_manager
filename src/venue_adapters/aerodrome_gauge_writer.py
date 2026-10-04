@@ -480,21 +480,22 @@ class AerodromeGaugeWriter:
         if result.error or result.skipped or not result.tx_hash:
             return result
 
-        # Compute AERO amount from the receipt: look for a Transfer event from the
-        # LeafVoter minting AERO to the recipient. The exact topic depends on the
-        # AERO token contract; we approximate by reading the recipient's AERO
-        # balance delta across the claim tx.
+        # v5.3.30: if the gauge reports a tx hash but the on-chain AERO balance
+        # did not change, there was nothing to claim (claim rewards zero or
+        # already-claimed path). Do not write a zero-value FEE_EVENTS/TRANSACTIONS
+        # row; just return the successful no-op so callers continue to unstake/close.
         wallet_address = self.base_writer._get_account_address(account)
         pre_bal = self._read_erc20_balance(AERO_TOKEN, wallet_address)
         _ = result.receipt or {}
         post_bal = self._read_erc20_balance(AERO_TOKEN, wallet_address)
         aero_amount = max(0, (post_bal - pre_bal)) / (10 ** AERO_DECIMALS)
+        if aero_amount <= 0:
+            return result
 
         value_usd = None
-        if aero_amount > 0:
-            price = self._aero_price_usd()
-            if price:
-                value_usd = round(aero_amount * price, 6)
+        price = self._aero_price_usd()
+        if price:
+            value_usd = round(aero_amount * price, 6)
 
         # v5.3.29: resolve the real account_id for the TRANSACTIONS yield row.
         account_id = 0
@@ -665,6 +666,10 @@ class AerodromeGaugeWriter:
             print(f"[aero-gauge] {msg}")
 
         # Step 1: claim emissions while still staked.
+        # v5.3.30: when there are no emissions to claim the gauge returns a
+        # zero-transfer/zero-amount result. Treat that as a successful no-op
+        # (skipped) rather than a failure, so the close can still unstake and
+        # close the position. The ledger is only updated when a real tx exists.
         _notify("Step 1/3: claiming AERO emissions...")
         claim = self.claim_emissions(token_id, account, position_manager=position_manager)
         result.steps.append(claim)
@@ -711,8 +716,11 @@ class AerodromeGaugeWriter:
             try:
                 db = ColdTrackDB(Path(db_path))
                 db.init_schema()
+                # v5.3.30: do not require STATUS='active' here. The close recorder
+                # may have already marked the position closed before we reach this
+                # post-close ledger write; the claim still belongs to this position.
                 row = db.conn().execute(
-                    "SELECT ID FROM LP_POSITIONS WHERE TOKEN_ID = ? AND STATUS = 'active'",
+                    "SELECT ID FROM LP_POSITIONS WHERE TOKEN_ID = ? ORDER BY ID",
                     (str(token_id),),
                 ).fetchone()
                 if row:

@@ -9,6 +9,7 @@ Run:  python test_sui_cetus.py
 import os
 import sys
 from pathlib import Path
+from typing import List  # noqa: E402
 
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
@@ -241,9 +242,9 @@ def test_cetus_owned_objects_fixture():
 def test_cetus_price_as_mapping():
     """Part 1: LBTC is priced as BTC via the Sui token registry."""
     import venue_adapters.cetus_adapter as ca
-    registry = {"price_as": {"LBTC": "BTC"}}
-    assert ca._price_as_symbol("LBTC", registry) == "BTC"
-    assert ca._price_as_symbol("deep", registry) == "deep"
+    mapping_registry = {"price_as": {"LBTC": "BTC"}}
+    assert ca._price_as_symbol("LBTC", mapping_registry) == "BTC"
+    assert ca._price_as_symbol("deep", mapping_registry) == "deep"
     assert ca._price_as_symbol("LBTC", None) == "LBTC"
 
     class FakePriceEngine:
@@ -257,17 +258,73 @@ def test_cetus_price_as_mapping():
     # N1 ground truth: ~0.0106822 LBTC + 358.925 SUI -> ~$1313.07
     lbtc_amt = 0.0106822
     sui_amt = 358.925
-    lbtc_usd = ca._usd(lbtc_amt, "LBTC", FakePriceEngine(), registry=registry)
-    sui_usd = ca._usd(sui_amt, "SUI", FakePriceEngine(), registry=registry)
+    lbtc_usd = ca._usd(lbtc_amt, "LBTC", FakePriceEngine(), registry=mapping_registry)
+    sui_usd = ca._usd(sui_amt, "SUI", FakePriceEngine(), registry=mapping_registry)
     total = (lbtc_usd or 0.0) + (sui_usd or 0.0)
     assert abs(total - 1313.07) < 5.0, total
     print(f"✅ LBTC price_as BTC -> Pool Value ~${total:.2f}")
 
 
+def test_cetus_accrued_fees_math():
+    """v5.3.31: real-time fee computation from feeGrowth accumulators."""
+    import venue_adapters.cetus_adapter as ca
+
+    pos = {
+        "liquidity": 1_000_000_000_000,
+        "tick_lower": -100000,
+        "tick_upper": 100000,
+        "fee_owed_a": 100_000,
+        "fee_owed_b": 200_000,
+        "fee_growth_inside_a_last": 500,
+        "fee_growth_inside_b_last": 800,
+    }
+    pool = {
+        "tick_current": 0,
+        "fee_growth_global_a": 1500,
+        "fee_growth_global_b": 1800,
+    }
+    fee_a, fee_b = ca._compute_cetus_fees(pos, pool, 8, 9)
+    assert fee_a >= 0.0001, fee_a
+    assert fee_b >= 0.0001, fee_b
+    # Accrued raw = liquidity * (1500-500) >> 128 -> very small human amounts.
+    print(f"✅ Cetus accrued fees computed: {fee_a:g} A, {fee_b:g} B")
+
+
+def test_cetus_registry_loads_from_exe_dir():
+    """v5.3.31: frozen EXE mode resolves sui_tokens.json from the EXE directory."""
+    import os, sys, tempfile, shutil, json
+    import sui_assets
+
+    tmp = tempfile.mkdtemp()
+    exe_dir = os.path.join(tmp, "exe")
+    os.makedirs(exe_dir)
+    reg_path = os.path.join(exe_dir, "sui_tokens.json")
+    with open(reg_path, "w", encoding="utf-8") as f:
+        json.dump({"coins": {}, "price_as": {"TEST": "BTC"}}, f)
+
+    old_frozen = getattr(sys, "frozen", False)
+    old_exe = sys.executable
+    try:
+        sys.frozen = True
+        sys.executable = os.path.join(exe_dir, "coldstack.exe")
+        # Force re-evaluation of the module-level path.
+        original = sui_assets._REGISTRY_PATH
+        try:
+            sui_assets._REGISTRY_PATH = sui_assets._default_registry_path()
+            reg = sui_assets.load_registry()
+            assert reg.get("price_as", {}).get("TEST") == "BTC", reg
+            print("✅ sui_tokens.json loaded from EXE directory in frozen mode")
+        finally:
+            sui_assets._REGISTRY_PATH = original
+    finally:
+        sys.frozen = old_frozen
+        sys.executable = old_exe
+        shutil.rmtree(tmp)
+
+
 def test_cetus_honest_unpriced_total():
     """Part 1: unpriced legs are not silently dropped from USD totals."""
     import venue_adapters.cetus_adapter as ca
-    registry = {"price_as": {}}
 
     class FakePriceEngine:
         def convert_balance_to_fiat(self, amount, symbol, currency="usd"):
@@ -516,6 +573,8 @@ def main():
     test_cetus_adapter_position()
     test_cetus_owned_objects_fixture()
     test_cetus_price_as_mapping()
+    test_cetus_accrued_fees_math()
+    test_cetus_registry_loads_from_exe_dir()
     test_cetus_honest_unpriced_total()
     test_cetus_writer_construction()
     test_cetus_writer_ptb_shapes()

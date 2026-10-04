@@ -16,12 +16,28 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional
 
 DEFAULT_SUI_RPC = "https://sui-rpc.publicnode.com"
-_REGISTRY_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sui_tokens.json")
+
+
+def _default_registry_path() -> str:
+    """Return the Sui token registry path.
+
+    In a PyInstaller-frozen EXE the JSON must be loaded from the application's
+    runtime directory (where the user can edit it), not the _MEIPASS temp dir
+    where module-relative resolution lands. Source runs keep the original
+    src/sui_tokens.json location so editing the source tree still works.
+    """
+    if getattr(sys, "frozen", False):
+        return os.path.join(os.path.dirname(sys.executable), "sui_tokens.json")
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "sui_tokens.json")
+
+
+_REGISTRY_PATH = _default_registry_path()
 
 # symbol/decimals keyed by coin type (metadata cache; 5-minute TTL not needed --
 # coin metadata is immutable in practice, so cache for the process lifetime).
@@ -44,15 +60,23 @@ def _rpc(url: str, method: str, params: list, timeout: int = 12) -> Any:
 
 
 def load_registry(path: Optional[str] = None) -> Dict[str, Any]:
-    """Load ``src/sui_tokens.json`` (or a caller-supplied path). Never raises."""
+    """Load ``sui_tokens.json`` (or a caller-supplied path). Never raises.
+
+    v5.3.31: logs the resolved path and mapping count on first load so the
+    gui_debug.log proves whether the registry loaded in EXE mode.
+    """
     p = path or _REGISTRY_PATH
     try:
         with open(p, "r", encoding="utf-8") as f:
             reg = json.load(f)
         if isinstance(reg, dict) and isinstance(reg.get("coins"), dict):
+            mapping_count = len(reg.get("price_as") or {})
+            print(f"[sui-registry] path={p} mappings={mapping_count}")
             return reg
-    except Exception:
-        pass
+    except FileNotFoundError:
+        print(f"[sui-registry] path={p} not found")
+    except Exception as e:
+        print(f"[sui-registry] path={p} load failed: {e}")
     return {"coins": {}}
 
 

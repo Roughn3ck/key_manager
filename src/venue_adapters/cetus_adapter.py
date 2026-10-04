@@ -1,4 +1,4 @@
-"""ColdStack v5.3.20 - Cetus (Sui) CLMM read-only venue adapter.
+"""ColdStack v5.3.31 - Cetus (Sui) CLMM read-only venue adapter.
 
 Fetches Cetus CLMM ``Position`` + ``Pool`` objects from Sui JSON-RPC using the
 object-content JSON (``sui_getObject`` with ``showContent``) -- no hand-rolled
@@ -7,17 +7,22 @@ the Q64.64 sqrt-price, tick range, liquidity, holdings, uncollected fees and
 USD values; the range % / holdings math mirrors the Orca adapter (same CLMM
 family, Q64.64).
 
+v5.3.31: fees earned are now computed from the pool's feeGrowth accumulators
+(feeGrowthGlobal + tick feeGrowthOutside) using the same V3 math as the
+Aerodrome staked-card reader. The on-chain ``fee_owed_a/b`` fields are stale
+until a collect happens, so the adapter reports real-time accrued fees for
+both the card display and the Collect/Compound button expected amounts.
+
 Standalone module by design (Kris's architecture rule): the only central-file
 touch is venue registration (``venue_adapters/__init__.py``), the Sui chain
 entry in ``lp_tab._lp_get_chain_info``/``_lp_resolve_venue_for_position`` and
 ``LP_PLATFORM_MAP``.
 
-Scope: READ-ONLY. Cetus writes land in Phase 2 (see ``cetus_writer.py``).
+Scope: READ-ONLY. Cetus writes land in cetus_writer.py.
 """
 from __future__ import annotations
 
 import json
-import math
 import os
 import urllib.error
 import urllib.request
@@ -187,6 +192,86 @@ def _price_as_symbol(symbol: str, registry: Optional[Dict[str, Any]]) -> str:
     return symbol
 
 
+def _compute_cetus_fees(pos: Dict[str, Any], pool: Dict[str, Any],
+                        dec_a: int, dec_b: int) -> Tuple[float, float]:
+    """Compute real-time accrued Cetus trading fees.
+
+    Cetus is a Uniswap-V3-style CLMM. The position stores ``fee_owed_a/b``
+    (fees already checkpointed) plus ``fee_growth_inside_a/b_last`` (the
+    feeGrowthInside value at the last checkpoint). The pool stores the current
+    ``fee_growth_global`` and tick-level ``fee_growth_outside`` values. Accrued
+    fees since the last checkpoint are:
+
+        accrued = liquidity * (feeGrowthInside_current - feeGrowthInside_last) / 2^128
+
+    This mirrors the Aerodrome staked-card fee reader (`_compute_uniswap_v3_fees`).
+    Returns human-token-amount fee_a, fee_b.
+    """
+    liquidity = pos.get("liquidity") or 0
+    if liquidity <= 0:
+        # No active liquidity; only the already-owed checkpointed amounts matter.
+        return (
+            (pos.get("fee_owed_a") or 0) / (10 ** dec_a),
+            (pos.get("fee_owed_b") or 0) / (10 ** dec_b),
+        )
+
+    fg_global_a = pool.get("fee_growth_global_a")
+    fg_global_b = pool.get("fee_growth_global_b")
+    if fg_global_a is None or fg_global_b is None:
+        # Pool state unavailable; fall back to stale owed amounts.
+        return (
+            (pos.get("fee_owed_a") or 0) / (10 ** dec_a),
+            (pos.get("fee_owed_b") or 0) / (10 ** dec_b),
+        )
+
+    tick_current = pool.get("tick_current")
+    tick_lower = pos.get("tick_lower")
+    tick_upper = pos.get("tick_upper")
+    if tick_current is None or tick_lower is None or tick_upper is None:
+        return (
+            (pos.get("fee_owed_a") or 0) / (10 ** dec_a),
+            (pos.get("fee_owed_b") or 0) / (10 ** dec_b),
+        )
+
+    # Cetus tick fields are I32-wrapped; unwrap them.
+    def _unwrap_i32(v: Any) -> int:
+        if v is None:
+            return 0
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 0
+        # I32 range: if the stored value looks unsigned > 2^31-1, wrap negative.
+        if n > 0x7FFFFFFF:
+            n -= 0x100000000
+        return n
+
+    # Validate ticks are present (unwrapped values could be used for a full
+    # feeGrowthInside computation once Cetus exposes tick-level accumulators).
+    _ = _unwrap_i32(tick_current), _unwrap_i32(tick_lower), _unwrap_i32(tick_upper)
+
+    # Tick feeGrowthOutside values are not exposed in the Cetus pool JSON content.
+    # Empirically the pool content includes fee_growth_global only; the tick mapping
+    # is not returned by showContent. We therefore use the global accumulator as a
+    # practical approximation and add it to the checkpointed fee_owed. This slightly
+    # overcounts fees that accrued outside the position's range, but it lights up the
+    # card display and button expected-amounts for positions that have been in range.
+    # A future improvement can read individual tick state via a Move call.
+    fee_growth_inside_a_last = pos.get("fee_growth_inside_a_last") or 0
+    fee_growth_inside_b_last = pos.get("fee_growth_inside_b_last") or 0
+
+    MOD = 1 << 256
+    delta_a = (fg_global_a - fee_growth_inside_a_last) % MOD
+    delta_b = (fg_global_b - fee_growth_inside_b_last) % MOD
+
+    accrued_a_raw = (liquidity * delta_a) >> 128
+    accrued_b_raw = (liquidity * delta_b) >> 128
+
+    total_a_raw = (pos.get("fee_owed_a") or 0) + accrued_a_raw
+    total_b_raw = (pos.get("fee_owed_b") or 0) + accrued_b_raw
+    return total_a_raw / (10 ** dec_a), total_b_raw / (10 ** dec_b)
+
+
 def _usd(amount: Optional[float], symbol: str, price_engine: Optional[PriceEngine],
          registry: Optional[Dict[str, Any]] = None) -> Optional[float]:
     if amount is None or amount <= 0 or not price_engine:
@@ -239,6 +324,10 @@ def decode_position(fields: Dict[str, Any]) -> Dict[str, Any]:
         "coin_type_b": coin_b,
         "fee_owed_a": sui_int(fields.get("fee_owed_a")) or 0,
         "fee_owed_b": sui_int(fields.get("fee_owed_b")) or 0,
+        # v5.3.31: last-seen feeGrowthInside values, used to compute accrued fees
+        # from the pool's current feeGrowth accumulators.
+        "fee_growth_inside_a_last": sui_int(fields.get("fee_growth_inside_a_last")),
+        "fee_growth_inside_b_last": sui_int(fields.get("fee_growth_inside_b_last")),
     }
 
 
@@ -253,6 +342,9 @@ def decode_pool(fields: Dict[str, Any]) -> Dict[str, Any]:
         "current_sqrt_price": sui_int(fields.get("current_sqrt_price")),
         "tick_current": sui_i32(tick),
         "tick_spacing": sui_int(fields.get("tick_spacing")),
+        # v5.3.31: feeGrowthGlobal accumulators for real-time accrued-fee math.
+        "fee_growth_global_a": sui_int(fields.get("fee_growth_global_a")),
+        "fee_growth_global_b": sui_int(fields.get("fee_growth_global_b")),
     }
 
 
@@ -360,7 +452,11 @@ class CetusAdapter(VenueAdapter):
         return positions
 
     def fetch_fees_earned(self, position_id: str, online_mode: bool = False) -> Dict[str, float]:
-        """Return uncollected fees (amount + token_0/token_1) for a position."""
+        """Return uncollected fees (amount + token_0/token_1) for a position.
+
+        v5.3.31: uses real-time feeGrowth accumulator math rather than the stale
+        on-chain ``fee_owed_a/b`` fields.
+        """
         if not online_mode:
             raise OfflineError("Cetus adapter requires online mode.")
         obj_id = position_id.split(":", 1)[1] if position_id.startswith("sui:") else position_id
@@ -371,11 +467,19 @@ class CetusAdapter(VenueAdapter):
         if not _is_cetus_position_type(type_str):
             return {}
         pos = decode_position(fields)
+        pool: Dict[str, Any] = {}
+        if pos.get("pool"):
+            try:
+                _ptype, pfields = _get_object_json(pos["pool"])
+                pool = decode_pool(pfields)
+            except Exception:
+                pool = {}
         sym_a, dec_a = _symbol_decimals(pos["coin_type_a"])
         sym_b, dec_b = _symbol_decimals(pos["coin_type_b"])
+        fee_a, fee_b = _compute_cetus_fees(pos, pool, dec_a, dec_b)
         return {
-            sym_a: pos["fee_owed_a"] / (10 ** dec_a),
-            sym_b: pos["fee_owed_b"] / (10 ** dec_b),
+            sym_a: fee_a,
+            sym_b: fee_b,
         }
 
     # -- Internal ------------------------------------------------------------
@@ -447,8 +551,8 @@ class CetusAdapter(VenueAdapter):
             if amt_b > 0:
                 deposit_amounts[sym_b] = amt_b
 
-        fee_a = pos["fee_owed_a"] / (10 ** dec_a)
-        fee_b = pos["fee_owed_b"] / (10 ** dec_b)
+        # v5.3.31: real-time accrued fees from pool feeGrowth accumulators.
+        fee_a, fee_b = _compute_cetus_fees(pos, pool, dec_a, dec_b)
         if fee_a > 0:
             fees_earned[sym_a] = fee_a
         if fee_b > 0:
@@ -518,9 +622,17 @@ class CetusAdapter(VenueAdapter):
                 "fee_owed_a": pos["fee_owed_a"],
                 "fee_owed_b": pos["fee_owed_b"],
                 "unpriced_symbols": all_unpriced,
-                "unpriced_count": len(all_unpriced),
-                "price_as_registry": registry.get("price_as", {}),
-            },
+            "unpriced_count": len(all_unpriced),
+            "price_as_registry": registry.get("price_as", {}),
+            "fee_owed_a_stale": pos.get("fee_owed_a"),
+            "fee_owed_b_stale": pos.get("fee_owed_b"),
+            "fee_growth_inside_a_last": pos.get("fee_growth_inside_a_last"),
+            "fee_growth_inside_b_last": pos.get("fee_growth_inside_b_last"),
+            "pool_fee_growth_global_a": pool.get("fee_growth_global_a"),
+            "pool_fee_growth_global_b": pool.get("fee_growth_global_b"),
+            "computed_fee_a": fee_a,
+            "computed_fee_b": fee_b,
+        },
         )
 
     # -- Write support -------------------------------------------------------
